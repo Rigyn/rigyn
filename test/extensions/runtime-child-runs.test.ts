@@ -1,0 +1,768 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
+import { ProviderRegistry } from "../../src/providers/registry.js";
+import { HarnessService } from "../../src/service/harness.js";
+import { SessionStore } from "../../src/storage/store.js";
+import { ScriptedProvider, type ScriptedProviderStep } from "../../src/testing/scripted-provider.js";
+import { sha256 } from "../../src/tools/hash.js";
+import type { ToolExecutionBackend } from "../../src/tools/backend.js";
+
+async function fixture(
+  t: { after(callback: () => Promise<void>): void },
+  source: string,
+  scripts: readonly ScriptedProviderStep[],
+  options: { toolBackend?: ToolExecutionBackend } = {},
+) {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-child-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "child-extension.mjs");
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "child-test",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root });
+  const provider = new ScriptedProvider({
+    id: "child-provider",
+    models: [{ id: "child-model", contextTokens: 100_000, capabilities: { tools: "supported" } }],
+    scripts,
+  });
+  const store = new SessionStore(join(root, "sessions.sqlite"));
+  const service = new HarnessService({
+    store,
+    workspace: root,
+    providers: new ProviderRegistry([provider]),
+    runtimeExtensions: host,
+    extraTools: host.tools(),
+    ...(options.toolBackend === undefined ? {} : { toolBackend: options.toolBackend }),
+    projectTrusted: false,
+  });
+  await service.initialize();
+  t.after(async () => {
+    await service.close();
+    store.close();
+    await host.close();
+    delete (globalThis as Record<string, unknown>).__runtimeChildApi;
+  });
+  return { root, host, provider, service, store };
+}
+
+test("runtime child runs use the active service, explicit tools, bounded output, and session retention", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "text", text: "ephemeral-output" }],
+      usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cacheReadTokens: 0 },
+    },
+    {
+      kind: "turn",
+      content: [{ type: "text", text: "persisted-output" }],
+      usage: { inputTokens: 20, outputTokens: 3, totalTokens: 23 },
+    },
+  ]);
+  const parent = await value.service.createSession({ name: "parent" });
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  const ephemeral = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "finish the bounded task",
+    context: "fresh",
+    tools: ["read"],
+    outputLimitBytes: 9,
+  });
+  assert.deepEqual({
+    status: ephemeral.status,
+    finalText: ephemeral.finalText,
+    truncated: ephemeral.truncated,
+    persisted: ephemeral.persisted,
+  }, {
+    status: "success",
+    finalText: "ephemeral",
+    truncated: true,
+    persisted: false,
+  });
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+  assert.deepEqual(value.provider.capturedRequests()[0]?.tools.map((tool) => tool.name), ["read"]);
+  assert.deepEqual(ephemeral.usage, {
+    inputTokens: 10,
+    outputTokens: 2,
+    totalTokens: 12,
+    cacheReadTokens: 0,
+  });
+  assert.deepEqual(ephemeral.artifacts, []);
+  assert.deepEqual(ephemeral.execution, {
+    backend: "local",
+    required: false,
+    routedTools: [],
+    localTools: ["read"],
+  });
+
+  const kept = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "keep this child",
+    context: "fresh",
+    tools: ["read", "grep"],
+    session: "persisted",
+  });
+  assert.equal(kept.status, "success");
+  assert.equal(kept.finalText, "persisted-output");
+  assert.equal(kept.persisted, true);
+  const retained = value.store.getThread(kept.threadId);
+  assert.equal(retained.parentThreadId, parent.threadId);
+  assert.deepEqual(value.provider.capturedRequests()[1]?.tools.map((tool) => tool.name), ["grep", "read"]);
+
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "cannot run",
+    context: "fresh",
+    tools: ["missing_tool"],
+  }), /unavailable tools: missing_tool/u);
+  assert.equal(value.provider.callCount, 2);
+});
+
+test("runtime child runs accept an explicit empty tool allowlist", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [{
+    kind: "turn",
+    content: [{ type: "text", text: "review complete" }],
+  }]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "review without tools",
+    context: "fresh",
+    tools: [],
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.finalText, "review complete");
+  assert.deepEqual(value.provider.capturedRequests()[0]?.tools, []);
+});
+
+test("runtime child runs select the host backend explicitly and fail closed when required routing is incomplete", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const routed: string[] = [];
+  const backend: ToolExecutionBackend = {
+    id: "sandbox-fixture",
+    handles(name) { return name === "read"; },
+    resources() { return [{ kind: "workspace", key: "sandbox", mode: "read" }]; },
+    async execute(request) {
+      routed.push(request.invocation.name);
+      return { content: "backend read", isError: false, status: "success", summary: "backend read" };
+    },
+  };
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "read-through-backend", name: "read", arguments: { path: "README.md" } }],
+      usage: { inputTokens: 5, outputTokens: 1, totalTokens: 6 },
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    {
+      kind: "turn",
+      content: [{ type: "text", text: "backend complete" }],
+      usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9, cacheReadTokens: 0 },
+    },
+  ], { toolBackend: backend });
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "read through the selected backend",
+    context: "fresh",
+    tools: ["read"],
+    execution: { backend: "inherit", backendId: "sandbox-fixture", requireAllTools: true },
+  });
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.model, { provider: value.provider.id, model: "child-model" });
+  assert.deepEqual(result.execution, {
+    backend: "host",
+    backendId: "sandbox-fixture",
+    required: true,
+    routedTools: ["read"],
+    localTools: [],
+  });
+  assert.deepEqual(result.usage, {
+    inputTokens: 12,
+    outputTokens: 3,
+    totalTokens: 15,
+    cacheReadTokens: 0,
+  });
+  assert.deepEqual(routed, ["read"]);
+
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "must route all tools",
+    context: "fresh",
+    tools: ["read", "grep"],
+    execution: { backend: "inherit", requireAllTools: true },
+  }), /not routed: grep/u);
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "wrong backend",
+    context: "fresh",
+    tools: ["read"],
+    execution: { backend: "inherit", backendId: "missing-backend" },
+  }), /unavailable execution backend/u);
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "invalid local selection",
+    context: "fresh",
+    tools: ["read"],
+    execution: { backend: "local", backendId: "sandbox-fixture" },
+  }), /local execution cannot select or require a backend/u);
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "unknown execution field",
+    context: "fresh",
+    tools: ["read"],
+    execution: { backend: "inherit", fallback: true },
+  }), /unknown or owner-controlled field/u);
+  assert.equal(value.provider.callCount, 2);
+});
+
+test("runtime child results expose bounded artifact metadata without retaining ephemeral content", async (t) => {
+  const source = `export default (api) => {
+    globalThis.__runtimeChildApi = api;
+    api.registerTool({
+      name: "make_artifact",
+      description: "Create a small artifact",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      validate() {},
+      resources() { return [{ kind: "session", key: "artifact", mode: "write" }]; },
+      async execute(_input, context) {
+        const artifact = await context.artifacts.write(
+          "report.txt",
+          "text/plain",
+          [Buffer.from("child artifact")],
+          context.signal,
+        );
+        return { content: "artifact created", isError: false, artifacts: [artifact] };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "artifact-call", name: "make_artifact", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    { kind: "turn", content: [{ type: "text", text: "artifact complete" }] },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "create one artifact",
+    context: "fresh",
+    tools: ["make_artifact"],
+    execution: { backend: "local" },
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.artifactCount, 1);
+  assert.equal(result.artifactsTruncated, false);
+  assert.deepEqual(result.artifacts.map((artifact: { mediaType: string; bytes: number; retained: boolean }) => ({
+    mediaType: artifact.mediaType,
+    bytes: artifact.bytes,
+    retained: artifact.retained,
+  })), [{ mediaType: "text/plain", bytes: 14, retained: false }]);
+  assert.match(result.artifacts[0].sha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("forked child context excludes the in-flight delegation call and recursive child runs stay blocked", async (t) => {
+  const source = `export default (api) => {
+    let rootThreadId;
+    api.registerTool({
+      name: "delegate_child",
+      description: "Run one bounded child task",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        rootThreadId ??= context.threadId;
+        const result = await api.runChild({
+          threadId: rootThreadId,
+          prompt: "inspect the delegated task",
+          context: "fork",
+          tools: ["delegate_child"],
+          maxSteps: 3
+        });
+        globalThis.__runtimeChildResult = result;
+        return { content: JSON.stringify(result), isError: result.status === "error" };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "parent-delegate", name: "delegate_child", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "child-delegate", name: "delegate_child", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    { kind: "turn", content: [{ type: "text", text: "child stopped recursion" }] },
+    { kind: "turn", content: [{ type: "text", text: "parent complete" }] },
+  ]);
+
+  const run = await value.service.run({
+    prompt: "delegate this request",
+    provider: value.provider.id,
+    model: "child-model",
+  });
+  assert.equal(run.results.at(-1)?.finalText, "parent complete");
+  assert.equal(value.provider.callCount, 4);
+  const childRequest = value.provider.capturedRequests()[1]!;
+  const childMessageText = childRequest.messages.flatMap((message) => message.content)
+    .flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+  assert.match(childMessageText, /delegate this request/u);
+  assert.match(childMessageText, /inspect the delegated task/u);
+  assert.equal(childRequest.messages.some((message) => message.content.some((block) =>
+    block.type === "tool_call" && block.name === "delegate_child")), false);
+  const nestedFailure = value.store.listEvents(run.threadId).find((event) =>
+    event.event.type === "tool_completed" && event.event.callId === "parent-delegate");
+  assert.equal(nestedFailure?.event.type === "tool_completed" ? nestedFailure.event.isError : true, false);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [run.threadId]);
+  delete (globalThis as Record<string, unknown>).__runtimeChildResult;
+});
+
+test("runtime children expose identity before provider work and stream safe events through the native tool row", async (t) => {
+  const source = `export default (api) => {
+    api.registerTool({
+      name: "native_child",
+      description: "Run one visible in-process child",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        const trace = { order: [], events: [], session: undefined };
+        globalThis.__nativeChildTrace = trace;
+        const visible = [];
+        const result = await api.runChild({
+          threadId: context.threadId,
+          branch: context.branch,
+          prompt: "complete the visible child task",
+          context: "fresh",
+          tools: ["read"],
+          onStart(session) {
+            trace.order.push("start");
+            trace.session = session;
+            context.reportProgress({
+              type: "result",
+              content: "Child started",
+              isError: false,
+              metadata: { threadId: session.threadId, branch: session.branch, state: "running" }
+            });
+          },
+          onEvent(update) {
+            trace.order.push(update.event.type);
+            trace.events.push(update);
+            if (update.event.type === "text_delta") visible.push(update.event.text);
+            if (update.event.type === "reasoning_delta") visible.push(update.event.text);
+            context.reportProgress({
+              type: "result",
+              content: visible.join("") || "Child running",
+              isError: false,
+              metadata: { threadId: update.threadId, event: update.event.type, sequence: update.sequence }
+            });
+          }
+        });
+        return {
+          content: result.finalText,
+          isError: result.status === "error",
+          status: result.status === "error" ? "error" : "success",
+          summary: result.summary,
+          nextActions: result.nextActions,
+          metadata: { childThreadId: result.threadId, childStatus: result.status }
+        };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "parent-native-child", name: "native_child", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    {
+      kind: "turn",
+      content: [
+        { type: "reasoning", text: "private trace", visibility: "provider_trace" },
+        { type: "reasoning", text: "visible plan", visibility: "summary" },
+        { type: "text", text: "child complete" },
+      ],
+      usage: { inputTokens: 12, outputTokens: 4, totalTokens: 19, cacheReadTokens: 3 },
+      eventDelayMs: 2,
+    },
+    { kind: "turn", content: [{ type: "text", text: "parent continued" }] },
+  ]);
+
+  const run = await value.service.run({
+    prompt: "delegate visibly",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["native_child", "read"],
+  });
+  assert.equal(run.results.at(-1)?.finalText, "parent continued");
+  assert.equal(value.provider.callCount, 3);
+
+  const trace = (globalThis as Record<string, any>).__nativeChildTrace;
+  assert.ok(trace.session.threadId);
+  assert.equal(trace.order[0], "start");
+  assert.equal(trace.events.some((entry: any) =>
+    entry.event.type === "reasoning_delta" && entry.event.visibility === "provider_trace"), false);
+  assert.equal(trace.events.some((entry: any) =>
+    entry.event.type === "reasoning_delta" && entry.event.visibility === "summary"), true);
+  assert.equal(trace.events.some((entry: any) => entry.event.type === "text_delta"), true);
+
+  const progress = value.store.listEvents(run.threadId).filter((entry) =>
+    entry.event.type === "tool_progress" && entry.event.callId === "parent-native-child");
+  assert.ok(progress.length > 1);
+  assert.equal(progress.every((entry) => entry.event.type === "tool_progress" && entry.event.progress.type === "result"), true);
+  const lastProgress = progress.at(-1)?.event;
+  assert.equal(
+    lastProgress?.type === "tool_progress" && lastProgress.progress.type === "result"
+      ? lastProgress.progress.content.includes("child complete")
+      : false,
+    true,
+  );
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [run.threadId]);
+  delete (globalThis as Record<string, unknown>).__nativeChildTrace;
+});
+
+test("omitted child limits allow more than eight model turns and the parent continues", async (t) => {
+  const source = `export default (api) => {
+    api.registerTool({
+      name: "default_limit_child",
+      description: "Exercise the default child turn budget",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        const result = await api.runChild({
+          threadId: context.threadId,
+          branch: context.branch,
+          prompt: "inspect the extension across nine tool turns",
+          context: "fresh",
+          tools: ["read"],
+          signal: context.signal
+        });
+        globalThis.__defaultLimitChildResult = result;
+        return {
+          content: result.finalText,
+          isError: result.status !== "success",
+          summary: result.summary,
+          nextActions: result.nextActions
+        };
+      }
+    });
+  };\n`;
+  const childToolTurns = Array.from({ length: 9 }, (_entry, index) => ({
+    kind: "turn" as const,
+    content: [{
+      type: "tool_call" as const,
+      id: `child-read-${index}`,
+      name: "read",
+      arguments: { path: "child-extension.mjs", offset: 1, limit: 1 },
+    }],
+    terminal: { type: "finish" as const, reason: "tool_calls" as const },
+  }));
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "parent-default-child", name: "default_limit_child", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    ...childToolTurns,
+    { kind: "turn", content: [{ type: "text", text: "child completed after nine tool turns" }] },
+    { kind: "turn", content: [{ type: "text", text: "parent continued after child" }] },
+  ]);
+
+  const run = await value.service.run({
+    prompt: "delegate a longer coding task",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["default_limit_child", "read"],
+  });
+  const child = (globalThis as Record<string, any>).__defaultLimitChildResult;
+
+  assert.equal(child.status, "success");
+  assert.equal(child.steps, 10);
+  assert.equal(child.finalText, "child completed after nine tool turns");
+  assert.equal(run.results.at(-1)?.finalText, "parent continued after child");
+  assert.equal(value.provider.callCount, 12);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [run.threadId]);
+  delete (globalThis as Record<string, unknown>).__defaultLimitChildResult;
+});
+
+test("runtime child onStart can immediately abort the reserved child session", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "must not complete" }], eventDelayMs: 200 },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  let started: { threadId: string; branch: string } | undefined;
+  let abortResult: Promise<boolean> | undefined;
+
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "cancel immediately",
+    context: "fresh",
+    tools: ["read"],
+    onStart(session: { threadId: string; branch: string }) {
+      started = session;
+      abortResult = api.abort({
+        threadId: session.threadId,
+        branch: session.branch,
+        reason: "cancelled from onStart",
+      });
+    },
+  });
+
+  assert.ok(started?.threadId);
+  assert.equal(await abortResult, true);
+  assert.equal(result.status, "cancelled");
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("runtime child callbacks remain non-blocking and consume accidental async rejection", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "child completed" }] },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  let startCalls = 0;
+  let eventCalls = 0;
+
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "finish despite observer failures",
+    context: "fresh",
+    tools: ["read"],
+    async onStart() {
+      startCalls += 1;
+      await Promise.resolve();
+      throw new Error("async onStart failed");
+    },
+    async onEvent() {
+      eventCalls += 1;
+      await Promise.resolve();
+      throw new Error("async onEvent failed");
+    },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(result.status, "success");
+  assert.equal(result.finalText, "child completed");
+  assert.equal(startCalls, 1);
+  assert.ok(eventCalls > 0);
+});
+
+test("runtime child timeout cancels model work and removes the ephemeral session", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "too late" }], eventDelayMs: 200 },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  const result = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "time out",
+    context: "fresh",
+    tools: ["read"],
+    timeoutMs: 5,
+  });
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.finalText, "");
+  assert.equal(result.persisted, false);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("runtime child runs normalize authentication and provider crashes without leaking sessions", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      terminal: {
+        type: "error",
+        error: {
+          category: "authentication",
+          message: "child authentication required",
+          retryable: false,
+          partial: true,
+          bodyStarted: true,
+        },
+      },
+    },
+    () => { throw new Error("provider process crashed"); },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  const authentication = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "requires authentication",
+    context: "fresh",
+    tools: ["read"],
+  });
+  assert.equal(authentication.status, "error");
+  assert.match(authentication.error, /authentication required/u);
+  assert.ok(authentication.runId);
+  assert.deepEqual(authentication.artifacts, []);
+
+  const crash = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "provider crashes",
+    context: "fresh",
+    tools: ["read"],
+  });
+  assert.equal(crash.status, "error");
+  assert.match(crash.error, /provider process crashed/u);
+  assert.ok(crash.runId);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("runtime generation shutdown cancels active child work and cleanup completes", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "too late" }], eventDelayMs: 500 },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const running = api.runChild({
+    threadId: parent.threadId,
+    prompt: "cancel on reload",
+    context: "fresh",
+    tools: ["read"],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await value.host.close();
+  await assert.rejects(running, /closed|inactive|abort|cancel/iu);
+  for (let attempt = 0; attempt < 50 && value.store.listThreads({ workspaceRoot: value.root }).length > 1; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("persisted child sessions survive a service restart and can continue", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "before restart" }] },
+    { kind: "turn", content: [{ type: "text", text: "after restart" }] },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const child = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "persist across restart",
+    context: "fresh",
+    tools: ["read"],
+    session: "persisted",
+  });
+  assert.equal(child.status, "success");
+  await value.service.close();
+
+  const restarted = new HarnessService({
+    store: value.store,
+    workspace: value.root,
+    providers: new ProviderRegistry([value.provider]),
+    runtimeExtensions: value.host,
+    extraTools: value.host.tools(),
+    projectTrusted: false,
+  });
+  await restarted.initialize();
+  const continued = await restarted.run({
+    threadId: child.threadId,
+    branch: child.branch,
+    prompt: "continue after restart",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["read"],
+  });
+  assert.equal(continued.results.at(-1)?.finalText, "after restart");
+  assert.ok(value.store.listEvents(child.threadId, child.branch).some((event) =>
+    event.event.type === "message_appended" && event.event.message.role === "assistant" &&
+    event.event.message.content.some((block) => block.type === "text" && block.text === "before restart")));
+  await restarted.close();
+});
+
+test("runtime child concurrency is bounded and all admitted children settle independently", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, Array.from({ length: 4 }, (_entry, index) => ({
+    kind: "turn" as const,
+    content: [{ type: "text" as const, text: `child-${index}` }],
+    eventDelayMs: 100,
+  })));
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const admitted = Array.from({ length: 4 }, (_entry, index) => api.runChild({
+    threadId: parent.threadId,
+    prompt: `child ${index}`,
+    context: "fresh",
+    tools: ["read"],
+  }));
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "fifth child",
+    context: "fresh",
+    tools: ["read"],
+  }), /At most 4 runtime child runs/u);
+  const results = await Promise.all(admitted);
+  assert.deepEqual(results.map((result) => result.status), ["success", "success", "success", "success"]);
+  assert.equal(new Set(results.map((result) => result.threadId)).size, 4);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});

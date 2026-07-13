@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rigyn.local/schemas/extension-authoring-report-v1.json",
+  "title": "Rigyn offline extension-authoring verifier report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "suite", "purpose", "deterministic", "modelCalls", "maxAttempts", "tasks", "summary"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "suite": { "const": "extension-authoring-offline-v1" },
+    "purpose": { "const": "extension-authoring-verifier" },
+    "deterministic": { "const": true },
+    "modelCalls": { "const": 0 },
+    "maxAttempts": { "const": 3 },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "checks", "attempts", "passed"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "checks": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "attempts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attempt", "passed", "stage"],
+              "properties": {
+                "attempt": { "type": "integer", "minimum": 1, "maximum": 3 },
+                "passed": { "type": "boolean" },
+                "stage": { "enum": ["install", "discovery", "activation", "reload", "remove", "complete"] },
+                "failure": { "type": "string", "maxLength": 1024 }
+              }
+            }
+          },
+          "passed": { "type": "boolean" },
+          "passedAt": { "type": "integer", "minimum": 1, "maximum": 3 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskCount", "passed", "passAt1", "passAt3", "attempts"],
+      "properties": {
+        "taskCount": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "passAt1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "passAt3": { "type": "number", "minimum": 0, "maximum": 1 },
+        "attempts": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

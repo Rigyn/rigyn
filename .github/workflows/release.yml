@@ -1,0 +1,145 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify release tag
+        if: github.event_name == 'push'
+        run: node --eval "const expected='v'+require('./package.json').version; if (process.env.GITHUB_REF_NAME !== expected) throw new Error('Expected tag '+expected+', received '+process.env.GITHUB_REF_NAME)"
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm run release:stage -- --output .release
+      - name: Upload staged release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rigyn-release-${{ github.run_id }}
+          path: .release/
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: stage
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            runner: ubuntu-24.04
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin
+            arch: x64
+            runner: macos-15-intel
+          - platform: darwin
+            arch: arm64
+            runner: macos-15
+          - platform: win32
+            arch: x64
+            runner: windows-2025
+          - platform: win32
+            arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Download staged release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-release-${{ github.run_id }}
+          path: .release
+      - name: Verify Node-native release
+        run: >-
+          node scripts/verify-release-artifact.mjs
+          --directory .release
+          --expected-platform ${{ matrix.platform }}
+          --expected-arch ${{ matrix.arch }}
+
+  publish:
+    if: github.event_name == 'push'
+    needs:
+      - stage
+      - verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Download staged release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-release-${{ github.run_id }}
+          path: .release
+      - name: Verify staged checksum
+        working-directory: .release
+        run: sha256sum --check SHA256SUMS
+      - name: Create or update draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./.release/release-manifest.json').version")"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
+            test "$draft" = true
+            gh release edit "$GITHUB_REF_NAME" --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md --draft
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" .release/*.tgz .release/SHA256SUMS .release/release-manifest.json .release/RELEASE_NOTES.md --clobber
+      - name: Publish exact staged archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(node -p "require('./.release/release-manifest.json').product")"
+          version="$(node -p "require('./.release/release-manifest.json').version")"
+          archive="$(node -p "require('./.release/release-manifest.json').archive.file")"
+          expected="$(node -p "require('./.release/release-manifest.json').archive.integrity")"
+          if published="$(npm view "$package@$version" dist.integrity --json 2>/dev/null)"; then
+            PUBLISHED_INTEGRITY="$published" EXPECTED_INTEGRITY="$expected" node --eval '
+              const published = JSON.parse(process.env.PUBLISHED_INTEGRITY);
+              if (published !== process.env.EXPECTED_INTEGRITY) {
+                throw new Error("Published npm integrity differs from the staged archive");
+              }
+            '
+            echo "$package@$version already contains the staged bytes"
+          else
+            npm publish ".release/$archive" --access public --provenance
+          fi
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

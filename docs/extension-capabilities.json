@@ -1,0 +1,276 @@
+{
+  "schemaVersion": 1,
+  "hosts": ["tui", "print", "json", "rpc", "embedding"],
+  "capabilities": [
+    {
+      "id": "package-loading",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/packages.md", "docs/extensions.md"],
+      "examples": ["examples/package-starter", "examples/reference-package"],
+      "tests": ["test/extensions/packages.test.ts", "test/extensions/convention-packages.test.ts"]
+    },
+    {
+      "id": "package-author-tooling-and-discovery",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/packages.md", "docs/package-gallery.md"],
+      "examples": ["examples/package-starter"],
+      "tests": ["test/cli/extension-author.test.ts", "test/extensions/gallery-index.test.ts"]
+    },
+    {
+      "id": "tools-and-active-selection",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerTool", "getActiveTools", "getAllTools", "setActiveTools"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/custom-tool", "examples/tool-lifecycle", "examples/dynamic-tools", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-tool-contract.test.ts", "test/extensions/runtime-active-tools.test.ts", "test/extensions/package-gallery-examples.test.ts"]
+    },
+    {
+      "id": "tool-renderers",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["registerToolRenderer"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/tool-lifecycle", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/tui/component-kit.test.ts", "test/tui/controller.test.ts", "test/public-api/consumer.mts"]
+    },
+    {
+      "id": "runtime-commands",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "rpc"],
+      "apiMembers": ["registerCommand", "getCommands"],
+      "docs": ["docs/extensions.md"],
+      "examples": ["examples/package-starter", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/interfaces/rpc-extension-runtime.test.ts"]
+    },
+    {
+      "id": "runtime-shortcuts",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["registerShortcut"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/reference-package"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/cli/chat-startup.test.ts"]
+    },
+    {
+      "id": "invocation-flags",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json"],
+      "apiMembers": ["registerFlag", "getFlag"],
+      "docs": ["docs/extensions.md"],
+      "examples": ["examples/reference-package"],
+      "tests": ["test/cli/extension-flags.test.ts", "test/extensions/runtime-authoring.test.ts"]
+    },
+    {
+      "id": "providers-and-authentication",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerProvider", "registerProviderAuth", "auth"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/custom-provider", "examples/brokered-provider", "examples/reference-package"],
+      "tests": ["test/cli/runtime-reload.test.ts", "test/extensions/runtime.test.ts", "test/extensions/protocol-examples.test.ts"]
+    },
+    {
+      "id": "lifecycle-and-shared-events",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on", "onDispose", "events"],
+      "docs": ["docs/extensions.md"],
+      "examples": ["examples/tool-lifecycle", "examples/custom-compaction", "examples/shared-events", "examples/reload-safety", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-lifecycle-integration.test.ts", "test/extensions/runtime-core-integration.test.ts", "test/extensions/package-gallery-examples.test.ts", "test/extensions/protocol-examples.test.ts"]
+    },
+    {
+      "id": "durable-extension-state",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["session", "compareAndAppendState", "sendMessage"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-notes", "examples/state-migration", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-session-entries.test.ts", "test/extensions/runtime-session-metadata.test.ts", "test/extensions/protocol-examples.test.ts"]
+    },
+    {
+      "id": "extension-owned-data-paths",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["dataPaths"],
+      "docs": ["docs/extensions.md", "docs/packages.md"],
+      "examples": [],
+      "tests": ["test/extensions/runtime-data-sessions.test.ts"]
+    },
+    {
+      "id": "unified-resource-catalog",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["getResourceCatalog"],
+      "docs": ["docs/resource-catalog.md", "docs/extensions.md", "docs/rpc.md"],
+      "examples": [],
+      "tests": ["test/service/resource-catalog.test.ts", "test/extensions/resource-catalog-runtime.test.ts", "test/interfaces/rpc-command-export.test.ts"]
+    },
+    {
+      "id": "bounded-transcript-replay",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["getTranscript"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": [],
+      "tests": ["test/service/transcript-replay.test.ts", "test/extensions/runtime-transcript-replay.test.ts"]
+    },
+    {
+      "id": "workspace-session-discovery",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["listSessions"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": [],
+      "tests": ["test/extensions/runtime-data-sessions.test.ts"]
+    },
+    {
+      "id": "interactive-dialog-and-presentation-ui",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "rpc"],
+      "apiMembers": ["ui", "setWorkingMessage", "setWorkingVisible"],
+      "docs": ["docs/tui.md", "docs/extensions.md"],
+      "examples": ["examples/session-notes", "examples/reference-package"],
+      "tests": ["test/interfaces/rpc-extension-ui.test.ts", "test/extensions/runtime-authoring.test.ts"]
+    },
+    {
+      "id": "tui-input-components-and-theme",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["registerAutocompleteProvider", "registerEditorMiddleware", "getTheme", "setTheme", "custom", "showOverlay"],
+      "docs": ["docs/tui.md", "docs/extensions.md"],
+      "examples": ["examples/custom-overlay.mjs", "examples/input-assist", "examples/reference-package"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/tui/controller.test.ts"]
+    },
+    {
+      "id": "session-snapshots-and-flow-controls",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["getSession", "waitForIdle", "newSession", "forkSession", "getModel", "setModel", "setThinkingLevel", "compact", "abort", "runChild"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/reference-package"],
+      "tests": ["test/extensions/runtime-controls.test.ts", "test/service/public-runtime.test.ts"]
+    },
+    {
+      "id": "session-focus-switching",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui"],
+      "apiMembers": ["switchSession"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": [],
+      "tests": ["test/extensions/runtime-controls.test.ts", "test/cli/chat-startup.test.ts"]
+    },
+    {
+      "id": "graceful-shutdown",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "rpc", "embedding"],
+      "apiMembers": ["requestShutdown"],
+      "docs": ["docs/extensions.md", "docs/rpc.md"],
+      "examples": [],
+      "tests": ["test/extensions/runtime-controls.test.ts", "test/interfaces/rpc-extension-runtime.test.ts", "test/service/public-runtime.test.ts"]
+    },
+    {
+      "id": "resource-reload",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/extensions.md", "docs/embedding.md"],
+      "examples": [],
+      "tests": ["test/cli/runtime-reload.test.ts", "test/service/public-runtime.test.ts"]
+    },
+    {
+      "id": "skills-prompts-and-themes",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/extensions.md", "docs/packages.md", "docs/tui.md"],
+      "examples": ["examples/reference-package/skills", "examples/reference-package/prompts", "examples/reference-package/themes"],
+      "tests": ["test/extensions/reference-package.test.ts", "test/context/skills.test.ts", "test/tui/theme.test.ts"]
+    },
+    {
+      "id": "provider-native-deferred-tools",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerTool", "getAllTools"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/dynamic-tools"],
+      "tests": ["test/providers/deferred-tools.test.ts", "test/core/agent.test.ts", "test/extensions/runtime.test.ts"]
+    },
+    {
+      "id": "external-tool-backend",
+      "status": "implemented",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/execution-backends.md", "docs/configuration.md"],
+      "examples": [],
+      "tests": ["test/tools/backend.test.ts", "test/service/execution-backend.test.ts"]
+    },
+    {
+      "id": "bounded-process-execution",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["exec"],
+      "docs": ["docs/extensions.md", "docs/packages.md"],
+      "examples": ["examples/mcp-stdio"],
+      "tests": ["test/extensions/runtime-controls.test.ts", "test/process/command.test.ts", "test/extensions/package-gallery-examples.test.ts"]
+    },
+    {
+      "id": "browser-dashboard-guidance",
+      "status": "intentionally-different",
+      "authoring": false,
+      "hosts": ["tui", "rpc"],
+      "apiMembers": [],
+      "docs": ["resources/skills/build-extension/references/dashboard.md", "docs/rpc.md"],
+      "examples": [],
+      "tests": ["test/prompts/authoring-resources.test.ts"]
+    },
+    {
+      "id": "subagents",
+      "status": "intentionally-different",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["runChild"],
+      "docs": ["docs/extensions.md", "docs/extension-capabilities.md"],
+      "examples": [],
+      "tests": ["test/extensions/runtime-child-runs.test.ts", "test/extensions/capability-matrix.test.ts"]
+    },
+    {
+      "id": "raw-provider-credential-and-wire-mutation",
+      "status": "rejected-for-safety",
+      "authoring": false,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/extension-auth-threat-model.md", "docs/extensions.md"],
+      "examples": [],
+      "tests": ["test/auth/authenticated-fetch.test.ts", "test/extensions/runtime.test.ts"]
+    }
+  ]
+}

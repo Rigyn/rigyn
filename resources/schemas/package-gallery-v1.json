@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rigyn:schema:package-gallery:v1",
+  "title": "Rigyn extension package gallery index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "packages"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "packages": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/package" }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,62}$" },
+    "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "count": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "package", "version", "integrity"],
+          "properties": {
+            "kind": { "const": "npm" },
+            "package": { "type": "string", "maxLength": 214 },
+            "version": { "type": "string", "maxLength": 128 },
+            "integrity": { "type": "string", "pattern": "^(sha256|sha384|sha512)-" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "repository", "revision"],
+          "properties": {
+            "kind": { "const": "git" },
+            "repository": { "$ref": "#/$defs/url" },
+            "revision": { "type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$" }
+          }
+        }
+      ]
+    },
+    "contributions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "tools", "commands", "skills", "prompts", "themes", "providers"],
+      "properties": {
+        "runtime": { "$ref": "#/$defs/count" },
+        "tools": { "$ref": "#/$defs/count" },
+        "commands": { "$ref": "#/$defs/count" },
+        "skills": { "$ref": "#/$defs/count" },
+        "prompts": { "$ref": "#/$defs/count" },
+        "themes": { "$ref": "#/$defs/count" },
+        "providers": { "$ref": "#/$defs/count" }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "url"],
+      "properties": {
+        "kind": { "enum": ["image", "video"] },
+        "url": { "$ref": "#/$defs/url" },
+        "alt": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "name", "version", "source", "compatibility", "contributions", "readme", "media",
+        "publishedAt", "integrity", "provenance", "securityWarnings", "dependencyCount"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "maxLength": 256 },
+        "version": { "type": "string", "maxLength": 128 },
+        "description": { "type": "string", "maxLength": 2048 },
+        "source": { "$ref": "#/$defs/source" },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hostVersion"],
+          "properties": { "hostVersion": { "type": "string", "maxLength": 256 } }
+        },
+        "contributions": { "$ref": "#/$defs/contributions" },
+        "readme": { "$ref": "#/$defs/url" },
+        "homepage": { "$ref": "#/$defs/url" },
+        "media": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/media" } },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "enum": ["verified", "declared", "unverified"] },
+            "digest": { "type": "string", "pattern": "^(sha256|sha384|sha512)-" }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "enum": ["verified", "publisher-asserted", "unknown"] },
+            "detail": { "type": "string", "maxLength": 1024 }
+          }
+        },
+        "securityWarnings": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "maxLength": 1024 }
+        },
+        "dependencyCount": { "$ref": "#/$defs/count" }
+      }
+    }
+  }
+}

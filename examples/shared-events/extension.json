@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "shared-events-example",
+  "name": "Shared events example",
+  "version": "0.1.0",
+  "description": "Two in-process extension entries communicating through bounded JSON events.",
+  "compatibility": { "hostVersion": ">=0.1.0 <0.2.0" },
+  "contributions": {
+    "runtime": [
+      { "path": "runtime/receiver.mjs" },
+      { "path": "runtime/sender.mjs" }
+    ]
+  }
+}

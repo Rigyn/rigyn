@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rigyn.local/schemas/benchmark-report-v2.json",
+  "title": "Rigyn benchmark report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "suite", "purpose", "deterministic", "tasks", "probes", "summary"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "suite": { "const": "offline-v2" },
+    "purpose": { "const": "harness-plumbing" },
+    "deterministic": { "const": true },
+    "tasks": { "type": "array", "items": { "$ref": "#/$defs/task" } },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compaction", "crashRecovery"],
+      "properties": {
+        "compaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["passed", "completed", "sourceMessages"],
+          "properties": {
+            "passed": { "type": "boolean" },
+            "completed": { "$ref": "#/$defs/count" },
+            "sourceMessages": { "$ref": "#/$defs/count" }
+          }
+        },
+        "crashRecovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["passed", "recoveredRuns", "repairedToolCalls", "inDoubtToolCalls", "reconstructedToolCalls"],
+          "properties": {
+            "passed": { "type": "boolean" },
+            "recoveredRuns": { "$ref": "#/$defs/count" },
+            "repairedToolCalls": { "$ref": "#/$defs/count" },
+            "inDoubtToolCalls": { "$ref": "#/$defs/count" },
+            "reconstructedToolCalls": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    },
+    "summary": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/measurements" },
+        {
+          "type": "object",
+          "required": ["taskCount", "completed", "passed", "completionRate", "passAt1"],
+          "properties": {
+            "taskCount": { "$ref": "#/$defs/count" },
+            "completed": { "$ref": "#/$defs/count" },
+            "passed": { "$ref": "#/$defs/count" },
+            "completionRate": { "$ref": "#/$defs/rate" },
+            "passAt1": { "$ref": "#/$defs/rate" }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "check": {
+      "enum": [
+        "file-creation",
+        "model-visible-tool-recovery",
+        "multi-file-work",
+        "mutation-preservation",
+        "parallel-tool-batch",
+        "session-continuation",
+        "tool-error-recovery",
+        "transport-retry",
+        "unknown-tool-recovery",
+        "verification"
+      ]
+    },
+    "nullableCount": { "type": ["integer", "null"], "minimum": 0 },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "costUsd"],
+      "properties": {
+        "inputTokens": { "$ref": "#/$defs/nullableCount" },
+        "outputTokens": { "$ref": "#/$defs/nullableCount" },
+        "totalTokens": { "$ref": "#/$defs/nullableCount" },
+        "cacheReadTokens": { "$ref": "#/$defs/nullableCount" },
+        "cacheWriteTokens": { "$ref": "#/$defs/nullableCount" },
+        "reasoningTokens": { "$ref": "#/$defs/nullableCount" },
+        "costUsd": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "required": ["runAttempts", "harnessRuns", "providerAttempts", "providerRetries", "toolCalls", "toolCallErrors", "parallelToolBatches", "compactions", "toolCallsInDoubt", "usage"],
+      "properties": {
+        "runAttempts": { "$ref": "#/$defs/count" },
+        "harnessRuns": { "$ref": "#/$defs/count" },
+        "providerAttempts": { "$ref": "#/$defs/count" },
+        "providerRetries": { "$ref": "#/$defs/count" },
+        "toolCalls": { "$ref": "#/$defs/count" },
+        "toolCallErrors": { "$ref": "#/$defs/count" },
+        "parallelToolBatches": { "$ref": "#/$defs/count" },
+        "compactions": { "$ref": "#/$defs/count" },
+        "toolCallsInDoubt": { "$ref": "#/$defs/count" },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    },
+    "task": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/measurements" },
+        {
+          "type": "object",
+          "required": ["id", "checks", "completed", "passed", "steps"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "checks": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/check" }
+            },
+            "completed": { "type": "boolean" },
+            "passed": { "type": "boolean" },
+            "steps": { "$ref": "#/$defs/count" },
+            "failure": { "type": "string", "maxLength": 1024 }
+          }
+        }
+      ]
+    }
+  }
+}

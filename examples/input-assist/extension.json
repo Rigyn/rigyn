@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "input-assist-example",
+  "name": "Safe input assistance example",
+  "contributions": {
+    "runtime": [{ "path": "runtime/index.mjs" }]
+  }
+}

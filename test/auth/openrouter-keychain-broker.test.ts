@@ -1,0 +1,164 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { describeAmbientIdentity } from "../../src/auth/ambient.js";
+import {
+  CrossProcessFileLock,
+} from "../../src/auth/file-store.js";
+import {
+  CredentialBroker,
+  EnvironmentCredentialSource,
+  ExplicitCredentialSource,
+} from "../../src/auth/broker.js";
+import {
+  KeychainCredentialStore,
+  PlatformKeychainAdapter,
+  type KeychainAdapter,
+  type KeychainCommandRunner,
+} from "../../src/auth/keychain.js";
+import {
+  createOpenRouterAuthorization,
+  exchangeOpenRouterCode,
+} from "../../src/auth/openrouter.js";
+import { verifyS256Challenge } from "../../src/auth/pkce.js";
+
+test("credential broker honors explicit precedence over environment", async () => {
+  const explicit = new ExplicitCredentialSource(
+    new Map([
+      ["openai", { kind: "api_key" as const, provider: "openai", apiKey: "explicit-key" }],
+    ]),
+  );
+  const environment = new EnvironmentCredentialSource({
+    environment: { OPENAI_API_KEY: "environment-key" },
+  });
+  const resolved = await new CredentialBroker([explicit, environment]).resolve({ provider: "openai" });
+  assert.equal(resolved?.source, "explicit");
+  assert.equal(resolved?.credential.kind === "api_key" ? resolved.credential.apiKey : undefined, "explicit-key");
+});
+
+test("built-in compatible providers resolve their documented environment credentials", async () => {
+  const variables = {
+    groq: "GROQ_API_KEY",
+    together: "TOGETHER_API_KEY",
+    deepseek: "DEEPSEEK_API_KEY",
+    cerebras: "CEREBRAS_API_KEY",
+    xai: "XAI_API_KEY",
+    fireworks: "FIREWORKS_API_KEY",
+    huggingface: "HF_TOKEN",
+    "vercel-ai-gateway": "AI_GATEWAY_API_KEY",
+    zai: "ZAI_API_KEY",
+    "zai-coding-cn": "ZAI_CODING_CN_API_KEY",
+    opencode: "OPENCODE_API_KEY",
+    "opencode-go": "OPENCODE_API_KEY",
+    "kimi-coding": "KIMI_API_KEY",
+    minimax: "MINIMAX_API_KEY",
+    "minimax-cn": "MINIMAX_CN_API_KEY",
+    "cloudflare-ai-gateway": "CLOUDFLARE_API_KEY",
+    "cloudflare-workers-ai": "CLOUDFLARE_API_KEY",
+  } as const;
+  const environment = Object.fromEntries(Object.values(variables).map((variable) => [variable, `fixture-${variable}`]));
+  const source = new EnvironmentCredentialSource({ environment });
+  for (const [provider, variable] of Object.entries(variables)) {
+    const credential = await source.resolve({ provider });
+    assert.equal(credential?.kind, "api_key");
+    assert.equal(credential?.kind === "api_key" ? credential.apiKey : undefined, `fixture-${variable}`);
+  }
+});
+
+test("ambient descriptors expose only presence hints", () => {
+  const aws = describeAmbientIdentity("aws", {
+    AWS_ACCESS_KEY_ID: "AKIASECRET",
+    AWS_SECRET_ACCESS_KEY: "very-secret",
+  });
+  assert.equal(aws.hints.staticEnvironmentCredentialsConfigured, true);
+  assert.doesNotMatch(JSON.stringify(aws), /AKIASECRET|very-secret/);
+});
+
+test("OpenRouter flow uses the documented S256 key exchange", async () => {
+  const authorization = createOpenRouterAuthorization("http://127.0.0.1:54321/callback");
+  const challenge = authorization.authorizationUrl.searchParams.get("code_challenge");
+  assert.ok(challenge !== null);
+  assert.equal(verifyS256Challenge(authorization.verifier, challenge), true);
+  assert.equal(authorization.authorizationUrl.searchParams.get("code_challenge_method"), "S256");
+
+  let requestBody = "";
+  const key = await exchangeOpenRouterCode({
+    code: "authorization-code",
+    verifier: authorization.verifier,
+    fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = String(init?.body);
+      return new Response(JSON.stringify({ key: "openrouter-user-key" }), { status: 200 });
+    }) as typeof fetch,
+  });
+  assert.equal(key, "openrouter-user-key");
+  assert.match(requestBody, /"code_challenge_method":"S256"/);
+  assert.doesNotMatch(authorization.authorizationUrl.toString(), /client_id|client_secret/);
+});
+
+test("macOS keychain set keeps the secret out of argv", async () => {
+  const calls: Parameters<KeychainCommandRunner>[0][] = [];
+  const runner: KeychainCommandRunner = async (options) => {
+    calls.push(options);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const keychain = new PlatformKeychainAdapter({ platform: "darwin", runner });
+  await keychain.set("rigyn", "user", "keychain-secret");
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(JSON.stringify(calls[0]?.args), /keychain-secret/);
+  assert.equal(calls[0]?.input, "keychain-secret\n");
+  assert.equal(calls[0]?.command, "/usr/bin/security");
+});
+
+test("keychain credential store persists typed credentials", async () => {
+  const values = new Map<string, string>();
+  const adapter: KeychainAdapter = {
+    get: async (service, account) => values.get(`${service}:${account}`),
+    set: async (service, account, secret) => {
+      values.set(`${service}:${account}`, secret);
+    },
+    delete: async (service, account) => {
+      values.delete(`${service}:${account}`);
+    },
+  };
+  const store = new KeychainCredentialStore({ adapter, service: `test-${process.pid}-${Date.now()}` });
+  await store.write("openai", { kind: "api_key", provider: "openai", apiKey: "stored-key" });
+  assert.deepEqual(await store.read("openai"), {
+    kind: "api_key",
+    provider: "openai",
+    apiKey: "stored-key",
+  });
+  await store.delete("openai");
+  assert.equal(await store.read("openai"), undefined);
+});
+
+test("keychain writes detach caller data before waiting for the shared lock", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "harness-keychain-snapshot-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const lockPath = join(directory, "keychain.lock");
+  const values = new Map<string, string>();
+  const adapter: KeychainAdapter = {
+    get: async (service, account) => values.get(`${service}:${account}`),
+    set: async (service, account, secret) => { values.set(`${service}:${account}`, secret); },
+    delete: async (service, account) => { values.delete(`${service}:${account}`); },
+  };
+  const lock = new CrossProcessFileLock(lockPath, { timeoutMs: 2_000 });
+  let release!: () => void;
+  let acquired!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const ready = new Promise<void>((resolve) => { acquired = resolve; });
+  const holding = lock.run(async () => { acquired(); await gate; });
+  await ready;
+
+  const store = new KeychainCredentialStore({ adapter, service: "fixture", lockPath, lock: { timeoutMs: 2_000 } });
+  const value = { kind: "api_key" as const, provider: "example", apiKey: "original-secret" };
+  const writing = store.write("account", value);
+  value.apiKey = "mutated-secret";
+  release();
+  await holding;
+  await writing;
+  const stored = await store.read("account");
+  assert.equal(stored?.kind === "api_key" ? stored.apiKey : undefined, "original-secret");
+});

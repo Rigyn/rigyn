@@ -1,0 +1,167 @@
+{
+  "name": "rigyn",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A local-first, multi-provider terminal coding agent runtime",
+  "license": "MIT",
+  "homepage": "https://github.com/Rigyn/rigyn#readme",
+  "bugs": {
+    "url": "https://github.com/Rigyn/rigyn/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rigyn/rigyn.git"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli",
+    "terminal",
+    "developer-tools",
+    "extensions"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "import": "./dist/auth/index.js"
+    },
+    "./config": {
+      "types": "./dist/config/index.d.ts",
+      "import": "./dist/config/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./embedding": {
+      "types": "./dist/embedding/index.d.ts",
+      "import": "./dist/embedding/index.js"
+    },
+    "./extensions": {
+      "types": "./dist/extensions/index.d.ts",
+      "import": "./dist/extensions/index.js"
+    },
+    "./images": {
+      "types": "./dist/images/index.d.ts",
+      "import": "./dist/images/index.js"
+    },
+    "./interfaces": {
+      "types": "./dist/interfaces/index.d.ts",
+      "import": "./dist/interfaces/index.js"
+    },
+    "./net": {
+      "types": "./dist/net/index.d.ts",
+      "import": "./dist/net/index.js"
+    },
+    "./process": {
+      "types": "./dist/process/index.d.ts",
+      "import": "./dist/process/index.js"
+    },
+    "./prompts": {
+      "types": "./dist/prompts/index.d.ts",
+      "import": "./dist/prompts/index.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js"
+    },
+    "./service": {
+      "types": "./dist/service/index.d.ts",
+      "import": "./dist/service/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/index.d.ts",
+      "import": "./dist/storage/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui/index.d.ts",
+      "import": "./dist/tui/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "rigyn": "dist/bin/rigyn.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples",
+    "resources",
+    "scripts/lifecycle-common.mjs",
+    "scripts/install-user.mjs",
+    "scripts/update-user.mjs",
+    "scripts/uninstall-user.mjs",
+    "CHANGELOG.md",
+    "LICENSE",
+    "SECURITY.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^24.15.0 || >=26.0.0"
+  },
+  "scripts": {
+    "benchmark:extensions": "tsx benchmarks/extension-authoring.ts",
+    "benchmark:offline": "tsx benchmarks/offline.ts",
+    "build": "npm run clean && tsc -p tsconfig.json && node --eval \"require('node:fs').chmodSync('dist/bin/rigyn.js', 0o755)\"",
+    "check": "npm run check:dependencies && npm run check:release && npm run typecheck && npm run typecheck:test && npm run test && npm run test:release && npm run test:consumer && npm run test:dist && npm run test:pack",
+    "check:dependencies": "node scripts/check-dependency-policy.mjs",
+    "check:release": "node scripts/check-release-metadata.mjs",
+    "clean": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "dev": "tsx src/bin/rigyn.ts",
+    "install:user": "node scripts/install-user.mjs",
+    "update:user": "node scripts/update-user.mjs",
+    "uninstall:user": "node scripts/uninstall-user.mjs --yes",
+    "prepack": "npm run build",
+    "release:stage": "node scripts/stage-release.mjs",
+    "release:verify": "node scripts/verify-release-artifact.mjs",
+    "start": "node dist/bin/rigyn.js",
+    "pretest": "npm run build",
+    "test": "tsx --test --test-concurrency=4 test/**/*.test.ts",
+    "test:dogfood": "node --env-file-if-exists=.env.local --env-file-if-exists=.env --import tsx --test --test-concurrency=1 test/live/coding-agent-dogfood.live.test.ts",
+    "test:live": "node --env-file-if-exists=.env.local --env-file-if-exists=.env --import tsx --test --test-concurrency=1 test/live/provider-smoke.live.test.ts",
+    "test:release": "node --test test/release/release-metadata.test.mjs",
+    "test:consumer": "tsc -p test/public-api/tsconfig.json",
+    "test:dist": "node --test test/public-api-dist.test.mjs",
+    "test:pack": "node --test test/release/packed-artifact.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@vscode/ripgrep": "1.18.0",
+    "bmp-js": "0.1.0",
+    "ignore": "7.0.6",
+    "jsonc-parser": "3.3.1",
+    "minimatch": "10.2.5",
+    "semver": "7.8.5",
+    "sharp": "0.35.3",
+    "tsx": "4.23.1",
+    "undici": "8.7.0",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/semver": "7.7.1",
+    "typescript": "7.0.2"
+  }
+}

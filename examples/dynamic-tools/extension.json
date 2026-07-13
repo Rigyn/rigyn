@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "dynamic-tools-example",
+  "name": "Dynamic tools example",
+  "version": "1.0.0",
+  "description": "A loader tool that atomically changes the next provider turn's active tools.",
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "session-notes-example",
+  "name": "Session notes example",
+  "version": "1.0.0",
+  "description": "A durable session note with an interactive editor and structural renderer.",
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

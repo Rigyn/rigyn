@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false
+  },
+  "include": [
+    "authoring-consumer.mts",
+    "consumer.mts",
+    "embedding-consumer.mts",
+    "layer-consumer.mts",
+    "testing-consumer.mts"
+  ],
+  "exclude": []
+}

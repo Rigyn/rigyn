@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "reference-package",
+  "name": "Reference package",
+  "version": "1.0.0",
+  "description": "A self-contained example of Rigyn runtime and declarative extensions.",
+  "contributions": {
+    "skillRoots": [
+      {
+        "path": "skills"
+      }
+    ],
+    "prompts": [
+      {
+        "id": "reference-review",
+        "path": "prompts/reference-review.md",
+        "description": "Turn an input into a short, evidence-led review."
+      }
+    ],
+    "themes": [
+      {
+        "name": "reference-ocean",
+        "path": "themes/reference-ocean.json",
+        "description": "A restrained blue and green terminal palette."
+      }
+    ],
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

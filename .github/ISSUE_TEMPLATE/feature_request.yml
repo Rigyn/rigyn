@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a user-visible capability or compatibility improvement
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe what a user should be able to accomplish.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Concrete use case
+      description: Show the workflow, input, and visible result that motivate the request.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: Explain the present limitation and any workaround you use.
+    validations:
+      required: true
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: Primary area
+      options:
+        - Terminal interface
+        - Provider or authentication
+        - Sessions or compaction
+        - Extensions, packages, skills, prompts, or themes
+        - Tools or process execution
+        - RPC or embedding API
+        - Installation or platform support
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility considerations
+      description: Note any public API, configuration, storage, provider, extension, or platform behavior this might change.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe simpler approaches or existing extension points that do not satisfy the use case.

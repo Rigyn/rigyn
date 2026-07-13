@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "reload-safety-example",
+  "name": "Reload safety example",
+  "version": "0.1.0",
+  "description": "A minimal probe for candidate-first reload and generation disposal.",
+  "compatibility": { "hostVersion": ">=0.1.0 <0.2.0" },
+  "contributions": {
+    "runtime": [{ "path": "runtime/index.mjs" }]
+  }
+}
