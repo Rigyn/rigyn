@@ -393,6 +393,10 @@ test("packed artifact installs into a blank home and completes an offline extens
     npm_config_global: "true",
     npm_config_omit: "dev optional",
   };
+  const bootstrapEnvironment = {
+    ...installerEnvironment,
+    npm_config_offline: "false",
+  };
   const globalSentinel = join(paths.fakeGlobal, "global-sentinel.txt");
   await writeFile(globalSentinel, "must remain untouched\n");
   const immutableSourcePaths = ["package.json", "package-lock.json", "dist/bin/rigyn.js"];
@@ -441,7 +445,7 @@ test("packed artifact installs into a blank home and completes an offline extens
     tarball,
   ], {
     cwd: paths.installDriver,
-    env: installerEnvironment,
+    env: bootstrapEnvironment,
     timeoutMs: 60_000,
     label: "packed installer bootstrap",
   });
@@ -653,7 +657,7 @@ export default function activate(api: any) {
   }, null, 2)}\n`);
   await runCommand(process.execPath, [join(PROJECT_ROOT, "scripts", "install-user.mjs")], {
     cwd: PROJECT_ROOT,
-    env: installerEnvironment,
+    env: bootstrapEnvironment,
     timeoutMs: 120_000,
     label: "repeat self-contained user install after interrupted swap",
   });
