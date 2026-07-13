@@ -11,10 +11,19 @@ node --version
 npm --version
 ```
 
-Install the private per-user copy:
+After the first npm package release, install the private per-user copy:
 
 ```sh
 npx --yes rigyn@latest self-install
+rigyn --version
+```
+
+Until then, install from the public source checkout:
+
+```sh
+git clone https://github.com/Rigyn/rigyn.git
+cd rigyn
+node scripts/install-user.mjs
 rigyn --version
 ```
 

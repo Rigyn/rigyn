@@ -8,16 +8,17 @@ The project is pre-release. Node.js 24.15 or a current Node.js 26-or-newer relea
 
 ## Install
 
-From the published package:
+From npm after the first package release:
 
 ```sh
 npx --yes rigyn@latest self-install
 rigyn
 ```
 
-Or from a source checkout:
+From the public source checkout today:
 
 ```sh
+git clone https://github.com/Rigyn/rigyn.git
 cd rigyn
 node scripts/install-user.mjs
 rigyn
