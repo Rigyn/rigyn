@@ -22,6 +22,7 @@ import { decodeSSE } from "./sse.js";
 import { toolResultText } from "./tool-results.js";
 import { normalizeUsage } from "./usage.js";
 import { baseModelCompatibility, mergeModelCompatibility, modelEvidence } from "./model-metadata.js";
+import { createOpenAISdkEventStream } from "./openai-sdk-transport.js";
 import {
   asArray,
   asNumber,
@@ -113,6 +114,17 @@ interface ToolAccumulator {
   ended: boolean;
 }
 
+const parsedResponsesWireEvents = new WeakMap<ResponsesWireEvent, unknown>();
+
+function responsesWireEventFromValue(value: unknown, requestId?: string): ResponsesWireEvent {
+  const wire: ResponsesWireEvent = {
+    data: "",
+    ...(requestId === undefined ? {} : { requestId }),
+  };
+  parsedResponsesWireEvents.set(wire, value);
+  return wire;
+}
+
 export class ResponsesAdapter implements ProviderAdapter {
   readonly id: ProviderId;
   readonly #transport: ResponsesTransportConfig;
@@ -163,8 +175,11 @@ export class ResponsesAdapter implements ProviderAdapter {
 
       for await (const wire of wireEvents) {
         requestId ??= wire.requestId;
-        if (wire.data.trim() === "[DONE]") break;
-        const parsed: unknown = parseJson(wire.data, "OpenAI Responses stream event");
+        const hasParsedEvent = parsedResponsesWireEvents.has(wire);
+        if (!hasParsedEvent && wire.data.trim() === "[DONE]") break;
+        const parsed: unknown = hasParsedEvent
+          ? parsedResponsesWireEvents.get(wire)
+          : parseJson(wire.data, "OpenAI Responses stream event");
         const event = asRecord(parsed);
         if (event === undefined) throw new ProtocolError("Responses event was not an object", jsonValueOrString(parsed));
         const type = asString(event.type) ?? wire.event;
@@ -428,6 +443,16 @@ export class OpenAIResponsesAdapter extends ResponsesAdapter {
         if (config.organization !== undefined) headers.set("openai-organization", config.organization);
         if (config.project !== undefined) headers.set("openai-project", config.project);
       },
+      ...(baseUrl === "https://api.openai.com/v1"
+        ? {
+            streamEvents: createOpenAISdkEventStream({
+              baseUrl,
+              fetch: fetchImplementation,
+              fallback: httpResponsesWireEvents,
+              eventFromValue: responsesWireEventFromValue,
+            }),
+          }
+        : {}),
       stateful: config.store ?? false,
       promptCache: true,
       deferredToolLoading: config.deferredToolLoading ?? baseUrl === "https://api.openai.com/v1",

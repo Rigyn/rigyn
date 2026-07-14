@@ -6,7 +6,7 @@ Rigyn is both an interactive application and an extensible runtime. The same ins
 
 "Local-first" describes where the runtime, tools, configuration, credentials, and session database live. Requests still go to the model provider you select unless you use a local provider. `bash` and runtime extensions execute with your operating-system user privileges, so Rigyn is not an isolation boundary and installed code should be reviewed.
 
-The agent loop and provider wire clients are implemented in this repository without provider SDKs. Small third-party dependencies are used for HTTP transport, image conversion, JSONC/YAML parsing, ignore matching, and the bundled ripgrep executable.
+The agent loop, canonical provider mappings, normalized events, and subscription transports are implemented in this repository. Exact-pinned official SDKs dispatch first-party OpenAI Responses calls and Anthropic API-key calls; Codex OAuth, compatible endpoints, and the remaining provider transports stay within Rigyn. Other third-party dependencies provide HTTP transport, image conversion, JSONC/YAML parsing, ignore matching, and the bundled ripgrep executable.
 
 The project is pre-release. Node.js 24.15 or a current Node.js 26-or-newer release is required.
 

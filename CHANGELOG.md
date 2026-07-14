@@ -4,6 +4,10 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+### Changed
+
+- First-party OpenAI Responses and Anthropic API-key requests use exact-pinned official SDK transports while Rigyn retains canonical mapping, streaming bounds, retry policy, OAuth transports, and normalized events.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added

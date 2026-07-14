@@ -49,7 +49,7 @@ test("Gemini uses stable Interactions by default with an explicit GenerateConten
   assert.ok(createProviderAdapter({ kind: "gemini", protocol: "generate-content" }, broker([["gemini", "api_key", "test-key"]])) instanceof GeminiAdapter);
 });
 
-test("cloud-backed provider factories construct without provider SDKs", () => {
+test("cloud-backed provider factories preserve their configured protocols", () => {
   assert.equal(createProviderAdapter({ kind: "azure-openai", endpoint: "https://example.openai.azure.com" }, broker([["azure-openai", "api_key", "test-key"]])).id, "azure-openai");
   assert.equal(createProviderAdapter({ kind: "vertex", project: "project-id" }, broker([["vertex", "bearer", "test-token"]])).id, "vertex");
   assert.equal(createProviderAdapter({ kind: "bedrock", region: "us-east-1" }, broker([["bedrock", "bearer", "test-token"]])).id, "bedrock");

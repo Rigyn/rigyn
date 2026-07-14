@@ -75,11 +75,13 @@ const PUBLIC_LAYER_DIRECTORIES = [
   "tui",
 ];
 const DIRECT_DEPENDENCY_LICENSE_FILES = [
+  ["@anthropic-ai/sdk", "LICENSE"],
   ["@vscode/ripgrep", "LICENSE"],
   ["bmp-js", "LICENSE"],
   ["ignore", "LICENSE-MIT"],
   ["jsonc-parser", "LICENSE.md"],
   ["minimatch", "LICENSE.md"],
+  ["openai", "LICENSE"],
   ["semver", "LICENSE"],
   ["sharp", "LICENSE"],
   ["tsx", "LICENSE"],

@@ -15,6 +15,7 @@ import { normalizeImageSource, requireImageMediaType, requireImageUrlProtocol } 
 import { stringifyProviderJson } from "./json.js";
 import { providerWireRequest } from "./messages.js";
 import { decodeSSE } from "./sse.js";
+import { requestAnthropicWithSdk } from "./anthropic-sdk-transport.js";
 import { toolResultText } from "./tool-results.js";
 import { mergeUsageSnapshots, normalizeUsage } from "./usage.js";
 import {
@@ -83,6 +84,7 @@ interface ToolAccumulator {
 
 // Source for the explicit-marker limits: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 const MAX_CACHE_BREAKPOINTS = 4;
+const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const CACHE_LOOKBACK_BLOCKS = 20;
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 const TOOL_SEARCH_TYPE = "tool_search_tool_bm25_20251119";
@@ -167,7 +169,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (config.deferredToolLoading !== undefined && typeof config.deferredToolLoading !== "boolean") {
       throw new TypeError("Anthropic deferredToolLoading must be a boolean");
     }
-    const baseUrl = trimSlash(config.baseUrl ?? "https://api.anthropic.com/v1");
+    const baseUrl = trimSlash(config.baseUrl ?? DEFAULT_ANTHROPIC_BASE_URL);
     assertSecureEndpoint(baseUrl, "Anthropic base URL");
     const thinking = normalizeAnthropicThinkingConfig(config.thinking);
     this.#config = {
@@ -176,7 +178,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       baseUrl,
       version: config.version ?? "2023-06-01",
       defaultMaxOutputTokens: config.defaultMaxOutputTokens ?? 8192,
-      deferredToolLoading: config.deferredToolLoading ?? baseUrl === "https://api.anthropic.com/v1",
+      deferredToolLoading: config.deferredToolLoading ?? baseUrl === DEFAULT_ANTHROPIC_BASE_URL,
     };
     this.#fetch = config.fetch ?? globalThis.fetch;
   }
@@ -193,7 +195,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       const headers = auth.headers;
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      const response = await this.#fetch(`${this.#config.baseUrl}/messages`, {
+      const response = await this.#request("/messages", {
         method: "POST",
         headers,
         body: stringifyProviderJson(buildAnthropicBody(
@@ -206,8 +208,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.#config.deferredToolLoading,
         )),
         signal,
-        redirect: "error",
-      });
+      }, auth.apiKey);
       requestId = requestIdFromHeaders(response.headers);
       await assertResponseOk(response);
 
@@ -438,16 +439,20 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const { headers } = await this.#headers(signal);
+    const auth = await this.#headers(signal);
+    const headers = auth.headers;
     headers.set("accept", "application/json");
     const entries: unknown[] = [];
     const seen = new Set<string>();
     let afterId: string | undefined;
     for (let page = 0; page < 100; page += 1) {
-      const url = new URL(`${this.#config.baseUrl}/models`);
-      url.searchParams.set("limit", "100");
-      if (afterId !== undefined) url.searchParams.set("after_id", afterId);
-      const response = await this.#fetch(url, { headers, signal, redirect: "error" });
+      const query = new URLSearchParams({ limit: "100" });
+      if (afterId !== undefined) query.set("after_id", afterId);
+      const response = await this.#request(`/models?${query.toString()}`, {
+        method: "GET",
+        headers,
+        signal,
+      }, auth.apiKey);
       await assertResponseOk(response);
       const body = asRecord(await readJsonResponse(response));
       entries.push(...asArray(body?.data));
@@ -509,7 +514,10 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
   }
 
-  async #headers(signal: AbortSignal, additionalBeta: readonly string[] = []): Promise<{ headers: Headers; oauth: boolean }> {
+  async #headers(
+    signal: AbortSignal,
+    additionalBeta: readonly string[] = [],
+  ): Promise<{ headers: Headers; oauth: boolean; apiKey?: string }> {
     const headers = new Headers(this.#config.headers);
     headers.set("anthropic-version", this.#config.version);
     const accessToken = await resolveToken(this.#config.accessToken, signal);
@@ -533,7 +541,28 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (beta.size > 0) headers.set("anthropic-beta", [...beta].join(","));
     const apiKey = await resolveToken(this.#config.apiKey, signal);
     if (apiKey !== undefined) headers.set("x-api-key", apiKey);
-    return { headers, oauth: false };
+    return { headers, oauth: false, ...(apiKey === undefined ? {} : { apiKey }) };
+  }
+
+  async #request(
+    path: string,
+    init: { method: "GET" | "POST"; headers: Headers; body?: string; signal: AbortSignal },
+    apiKey?: string,
+  ): Promise<Response> {
+    if (this.#config.baseUrl === DEFAULT_ANTHROPIC_BASE_URL && apiKey !== undefined && apiKey !== "") {
+      return await requestAnthropicWithSdk({
+        apiKey,
+        baseUrl: this.#config.baseUrl,
+        path,
+        method: init.method,
+        headers: init.headers,
+        stream: init.headers.get("accept") === "text/event-stream",
+        signal: init.signal,
+        fetch: this.#fetch,
+        ...(init.body === undefined ? {} : { body: init.body }),
+      });
+    }
+    return await this.#fetch(`${this.#config.baseUrl}${path}`, { ...init, redirect: "error" });
   }
 }
 
