@@ -1,6 +1,11 @@
 import { join } from "node:path";
 
-import { runSafeProcess, type SafeProcessOptions, type SafeProcessResult } from "./process.js";
+import {
+  minimalProcessEnvironment,
+  runSafeProcess,
+  type SafeProcessOptions,
+  type SafeProcessResult,
+} from "./process.js";
 import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 
 const PREFIX = "dpapi:v1:";
@@ -57,11 +62,15 @@ async function invoke(
 ): Promise<string> {
   const redactor = options.redactor ?? defaultSecretRedactor;
   redactor.register(input);
+  const environment = minimalProcessEnvironment({}, {
+    ...process.env,
+    ...options.environment,
+  });
   const result = await (options.runner ?? runSafeProcess)({
     command: command(options),
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
     input: `${input}\n`,
-    ...(options.environment === undefined ? {} : { environment: options.environment }),
+    environment,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     timeoutMs: 10_000,
     maxOutputBytes: 16 * 1024,

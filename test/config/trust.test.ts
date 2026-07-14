@@ -15,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 
@@ -124,6 +124,7 @@ test("recursive trust is explicit, inherited by descendants, and revocable at it
 test("trust store rejects corrupt, oversized, non-canonical, and over-count data", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "harness-trust-bounds-"));
   context.after(() => rm(root, { recursive: true, force: true }));
+  const validWorkspace = join(root, "workspace");
 
   const malformed = join(root, "malformed.json");
   await writeFile(malformed, "{", { mode: 0o600 });
@@ -135,35 +136,35 @@ test("trust store rejects corrupt, oversized, non-canonical, and over-count data
   const invalidTimestamp = join(root, "timestamp.json");
   await writeFile(invalidTimestamp, JSON.stringify({
     version: 1,
-    workspaces: { "/workspace": { trustedAt: "not-a-timestamp" } },
+    workspaces: { [validWorkspace]: { trustedAt: "not-a-timestamp" } },
   }), { mode: 0o600 });
   await assert.rejects(new TrustStore(invalidTimestamp).list(), /invalid entry/u);
 
   const invalidDescendants = join(root, "descendants.json");
   await writeFile(invalidDescendants, JSON.stringify({
     version: 1,
-    workspaces: { "/workspace": { trustedAt: FIXED_TIME, descendants: false } },
+    workspaces: { [validWorkspace]: { trustedAt: FIXED_TIME, descendants: false } },
   }), { mode: 0o600 });
   await assert.rejects(new TrustStore(invalidDescendants).list(), /invalid entry/u);
 
   const invalidDecision = join(root, "decision.json");
   await writeFile(invalidDecision, JSON.stringify({
     version: 2,
-    workspaces: { "/workspace": { decision: "maybe", decidedAt: FIXED_TIME } },
+    workspaces: { [validWorkspace]: { decision: "maybe", decidedAt: FIXED_TIME } },
   }), { mode: 0o600 });
   await assert.rejects(new TrustStore(invalidDecision).listDecisions(), /invalid entry/u);
 
   const deniedDescendants = join(root, "denied-descendants.json");
   await writeFile(deniedDescendants, JSON.stringify({
     version: 2,
-    workspaces: { "/workspace": { decision: "untrusted", decidedAt: FIXED_TIME, descendants: true } },
+    workspaces: { [validWorkspace]: { decision: "untrusted", decidedAt: FIXED_TIME, descendants: true } },
   }), { mode: 0o600 });
   await assert.rejects(new TrustStore(deniedDescendants).listDecisions(), /invalid entry/u);
 
   const recursiveRoot = join(root, "recursive-root.json");
   await writeFile(recursiveRoot, JSON.stringify({
     version: 1,
-    workspaces: { "/": { trustedAt: FIXED_TIME, descendants: true } },
+    workspaces: { [parse(root).root]: { trustedAt: FIXED_TIME, descendants: true } },
   }), { mode: 0o600 });
   await assert.rejects(new TrustStore(recursiveRoot).list(), /invalid entry/u);
 
@@ -177,7 +178,7 @@ test("trust store rejects corrupt, oversized, non-canonical, and over-count data
   const tooMany = join(root, "count.json");
   const workspaces = Object.fromEntries(Array.from(
     { length: 4097 },
-    (_, index) => [`/workspace-${index}`, { trustedAt: FIXED_TIME }],
+    (_, index) => [join(root, `workspace-${index}`), { trustedAt: FIXED_TIME }],
   ));
   await writeFile(tooMany, JSON.stringify({ version: 1, workspaces }), { mode: 0o600 });
   await assert.rejects(new TrustStore(tooMany).list(), /4096 workspace limit/u);

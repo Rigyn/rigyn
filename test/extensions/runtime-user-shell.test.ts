@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 
 import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
@@ -52,7 +52,7 @@ test("before_user_shell chains transforms, preserves hidden, and can prevent exe
     api.on("before_user_shell", (event) => {
       globalThis.__runtimeUserShellSeen.push({ ...event, frozen: Object.isFrozen(event) });
       try { event.hidden = false; } catch {}
-      return { action: "transform", command: event.command + ":transformed", cwd: event.cwd + "/nested" };
+      return { action: "transform", command: event.command + ":transformed", cwd: event.cwd + ${JSON.stringify(sep)} + "nested" };
     });
     api.on("before_user_shell", () => ({ action: "continue", command: "silently ignored typo" }));
     api.on("before_user_shell", () => ({ action: "transform" }));

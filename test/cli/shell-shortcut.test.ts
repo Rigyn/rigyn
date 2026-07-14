@@ -5,9 +5,7 @@ import type { ToolProgress } from "../../src/core/events.js";
 import { runShellShortcut, shellShortcutEnvironment, shellShortcutProgressStatus } from "../../src/cli/main.js";
 
 test("shell shortcut captures stdout, stderr, and exit without interpolation by the parent", async () => {
-  const command = process.platform === "win32"
-    ? "echo hello & echo problem 1>&2 & exit /b 7"
-    : "printf hello; printf problem >&2; exit 7";
+  const command = "printf hello; printf problem >&2; exit 7";
   const result = await runShellShortcut(command, process.cwd(), new AbortController().signal);
   assert.equal(result.exitCode, 7);
   assert.match(result.text, /hello/u);
@@ -69,7 +67,7 @@ test("shell shortcut force-stops a process group that ignores SIGTERM", { skip: 
 });
 
 test("shell shortcut has a bounded execution timeout", async () => {
-  const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 >NUL" : "sleep 30";
+  const command = process.platform === "win32" ? "ping -n 30 127.0.0.1 >/dev/null" : "sleep 30";
   const started = Date.now();
   await assert.rejects(runShellShortcut(command, process.cwd(), new AbortController().signal, 100), /timed out after 100 ms/u);
   assert.ok(Date.now() - started < 5_000);
@@ -87,9 +85,7 @@ test("shell shortcuts scrub credential environments and redact credential-shaped
     PATH: process.env.PATH,
     SAFE_VALUE: "visible-value",
   });
-  const command = process.platform === "win32"
-    ? `echo %SAFE_VALUE% & echo %OPENAI_API_KEY% & echo ${secret}`
-    : `printf '%s\\n' "$SAFE_VALUE" "$OPENAI_API_KEY" '${secret}'`;
+  const command = `printf '%s\\n' "$SAFE_VALUE" "$OPENAI_API_KEY" '${secret}'`;
   const result = await runShellShortcut(command, process.cwd(), new AbortController().signal, 5_000, environment);
   assert.match(result.text, /visible-value/u);
   assert.match(result.text, /\[REDACTED\]/u);

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { commandShellArgv } from "../process/command-shell.js";
 import { trackActiveProcessGroup } from "../process/active-groups.js";
+import { terminateProcessTree } from "../process/process-tree.js";
 import {
   withGracefulTermination,
   type GracefulTerminationContext,
@@ -851,13 +852,8 @@ export async function runShellShortcut(
       let timedOut = false;
       let settled = false;
       const kill = (signalValue: NodeJS.Signals): void => {
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        try {
-          if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signalValue);
-          else child.kill(signalValue);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
+        if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
+        terminateProcessTree(child.pid, signalValue);
       };
       const terminate = (): void => {
         kill("SIGTERM");

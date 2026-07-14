@@ -112,7 +112,7 @@ test("local package lifecycle installs, discovers, updates, and removes every de
   controller.setTheme("reference");
   assert.equal(controller.selectedThemeName(), "reference");
   assert.equal(firstBundle.runtime[0]?.extensionId, "reference");
-  assert.match(firstBundle.runtime[0]?.sourcePath ?? "", /runtime\/index\.mjs$/u);
+  assert.match(firstBundle.runtime[0]?.sourcePath ?? "", /runtime[\\/]index\.mjs$/u);
   assert.equal(firstBundle.runtime[0]?.sha256.length, 64);
   const skills = await discoverSkills(firstBundle.skillRoots);
   assert.equal(skills[0]?.name, "reference-skill");

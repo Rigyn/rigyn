@@ -300,6 +300,17 @@ export async function readFileSnapshotBounded(path: string, maxBytes: number): P
   }
 }
 
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, constants.O_RDONLY);
+  try {
+    await directory.sync();
+  } catch (error) {
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+  } finally {
+    await directory.close();
+  }
+}
+
 export async function atomicWritePath(
   input: string,
   data: Uint8Array,
@@ -364,12 +375,7 @@ export async function atomicWritePath(
     }
 
     await rename(temporary, target);
-    const directory = await open(parent, constants.O_RDONLY);
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await syncDirectory(parent);
     return target;
   } catch (error) {
     if (!closed) await handle.close().catch(() => undefined);
@@ -407,12 +413,7 @@ export async function atomicWriteFile(
     if (existingMode !== undefined) await chmod(temporary, existingMode);
     await boundary.assertUnchangedParent(target);
     await rename(temporary, target);
-    const directory = await open(parent, constants.O_RDONLY);
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await syncDirectory(parent);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
@@ -429,10 +430,5 @@ export async function deleteFile(
   if (!information.isFile()) throw new Error("Delete target is not a regular file");
   await boundary.assertUnchangedParent(target);
   await unlink(target);
-  const directory = await open(dirname(target), constants.O_RDONLY);
-  try {
-    await directory.sync();
-  } finally {
-    await directory.close();
-  }
+  await syncDirectory(dirname(target));
 }

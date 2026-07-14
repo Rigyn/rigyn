@@ -132,7 +132,7 @@ test("frame renderer produces a stable transcript, editor, and footer layout", (
     "----------------------------------------------------",
     " next step",
     "----------------------------------------------------",
-    " ~/rigyn • parser fix",
+    ` ${join("~", "rigyn")} • parser fix`,
     "↑10 ↓5 50.0%/20k (auto)            (openai) gpt-test",
   ].join("\n"));
   assert.deepEqual(frame.cursor, { row: 13, column: 6 });

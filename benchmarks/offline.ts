@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -803,7 +803,7 @@ function aggregateUsage(tasks: readonly BenchmarkTaskReport[]): BenchmarkUsage {
 }
 
 export async function runOfflineBenchmark(): Promise<BenchmarkReport> {
-  const root = await mkdtemp(join(tmpdir(), "rigyn-benchmark-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "rigyn-benchmark-")));
   try {
     const tasks: BenchmarkTaskReport[] = [];
     for (const task of OFFLINE_CORPUS) tasks.push(await runTask(task, root));

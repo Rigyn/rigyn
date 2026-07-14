@@ -105,7 +105,7 @@ test("atomic snapshots provide last-known-good models while a provider is offlin
   const first = new ProviderRegistry([online], { catalogStore: store, cacheTtlMs: 10, now: () => now });
 
   assert.equal((await first.refreshModels("durable", new AbortController().signal)).ok, true);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal(JSON.parse(await readFile(path, "utf8")).providers[0].provenance, "live");
 
   const offline = new MutableProvider("durable");

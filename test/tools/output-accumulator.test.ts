@@ -17,7 +17,7 @@ test("full tool output uses a private directory and exclusive private file", asy
   const snapshot = output.snapshot(true);
   await output.close();
 
-  assert.ok(snapshot.fullOutputPath?.startsWith(`${root}/rigyn-`));
+  assert.ok(snapshot.fullOutputPath?.startsWith(join(root, "rigyn-")));
   assert.equal((await lstat(root)).mode & 0o777, process.platform === "win32" ? (await lstat(root)).mode & 0o777 : 0o700);
   if (process.platform !== "win32") assert.equal((await lstat(snapshot.fullOutputPath!)).mode & 0o777, 0o600);
 });

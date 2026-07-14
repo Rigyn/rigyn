@@ -25,13 +25,13 @@ test("typed protocol exhaustively matches dispatcher methods and emitted notific
 });
 
 test("published RPC method reference is rendered from the typed contract", async () => {
-  const documentation = await readFile(new URL("../../docs/rpc.md", import.meta.url), "utf8");
+  const documentation = (await readFile(new URL("../../docs/rpc.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
   const section = /<!-- rpc-methods:start -->\n([\s\S]*?)\n<!-- rpc-methods:end -->/u.exec(documentation)?.[1];
   assert.equal(section, renderRpcMethodReference());
 });
 
 test("published RPC notification and error references are rendered from the typed contract", async () => {
-  const documentation = await readFile(new URL("../../docs/rpc.md", import.meta.url), "utf8");
+  const documentation = (await readFile(new URL("../../docs/rpc.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n");
   const notifications = /<!-- rpc-notifications:start -->\n([\s\S]*?)\n<!-- rpc-notifications:end -->/u.exec(documentation)?.[1];
   const errors = /<!-- rpc-errors:start -->\n([\s\S]*?)\n<!-- rpc-errors:end -->/u.exec(documentation)?.[1];
   assert.equal(notifications, renderRpcNotificationReference());

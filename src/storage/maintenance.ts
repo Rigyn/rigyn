@@ -307,7 +307,7 @@ function syncBackup(path: string, identity: FileIdentity): void {
   if (current.device !== identity.device || current.inode !== identity.inode) {
     throw new HarnessError("STORAGE_BACKUP", "Session database backup changed while it was being written");
   }
-  const file = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+  const file = openSync(path, (process.platform === "win32" ? constants.O_RDWR : constants.O_RDONLY) | NO_FOLLOW);
   try {
     fsyncSync(file);
   } finally {

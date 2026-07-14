@@ -224,7 +224,7 @@ test("paste-image hotkey emits an app action without inserting text", async () =
   const { input, controller } = fullController({ actions });
   controller.start();
   const answer = controller.question("you> ");
-  input.write(Buffer.from([22]));
+  input.write(Buffer.from(process.platform === "win32" ? [27, 118] : [22]));
   await tick();
   assert.deepEqual(actions, [{ type: "paste_image" }]);
   input.write("hello\r");

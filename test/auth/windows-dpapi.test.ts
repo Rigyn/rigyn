@@ -12,6 +12,11 @@ import {
 test("Windows DPAPI keeps the credential key out of argv and round-trips a current-user envelope", async () => {
   const key = Buffer.alloc(32, 17);
   const protectedValue = Buffer.alloc(96, 23).toString("base64");
+  const environment = {
+    SystemRoot: "C:\\Windows",
+    TEMP: "C:\\Temp",
+    OPENAI_API_KEY: "must-not-reach-powershell",
+  };
   const calls: Parameters<WindowsDpapiRunner>[0][] = [];
   const runner: WindowsDpapiRunner = async (options) => {
     calls.push(options);
@@ -22,14 +27,17 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
       stderr: "",
     };
   };
-  const envelope = await protectWindowsCredentialKey(key, { runner, command: "powershell.exe" });
+  const envelope = await protectWindowsCredentialKey(key, { runner, command: "powershell.exe", environment });
   assert.equal(isWindowsDpapiEnvelope(envelope), true);
   assert.equal(envelope, `dpapi:v1:${protectedValue}`);
   assert.equal(calls[0]?.input, `${key.toString("base64")}\n`);
   assert.doesNotMatch(JSON.stringify(calls[0]?.args), new RegExp(key.toString("base64"), "u"));
   assert.match(calls[0]?.args?.at(-1) ?? "", /CurrentUser/u);
+  assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
+  assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);
+  assert.equal(calls[0]?.environment?.OPENAI_API_KEY, undefined);
 
-  const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe" });
+  const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe", environment });
   assert.deepEqual(restored, key);
   assert.equal(calls[1]?.input, `${protectedValue}\n`);
   assert.match(calls[1]?.args?.at(-1) ?? "", /Unprotect/u);
@@ -64,4 +72,3 @@ test("Windows DPAPI validates envelopes, plaintext size, and redacts command fai
     /32-byte credential key/u,
   );
 });
-

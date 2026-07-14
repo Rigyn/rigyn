@@ -19,7 +19,6 @@ async function fixture(
   options: { toolBackend?: ToolExecutionBackend } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-child-"));
-  t.after(async () => await rm(root, { recursive: true, force: true }));
   const sourcePath = join(root, "child-extension.mjs");
   await writeFile(sourcePath, source);
   const host = await loadRuntimeExtensions([{
@@ -48,6 +47,7 @@ async function fixture(
     store.close();
     await host.close();
     delete (globalThis as Record<string, unknown>).__runtimeChildApi;
+    await rm(root, { recursive: true, force: true });
   });
   return { root, host, provider, service, store };
 }
