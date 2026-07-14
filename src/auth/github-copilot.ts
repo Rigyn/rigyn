@@ -4,6 +4,7 @@ import { oauthErrorCode } from "./oauth-token.js";
 import { defaultSecretRedactor } from "./redaction.js";
 import type { OAuthRefreshResult } from "./refresh.js";
 import type { OAuthCredential } from "./types.js";
+import { RIGYN_VERSION } from "../version.js";
 
 export const GITHUB_COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98";
 export const GITHUB_COPILOT_DEFAULT_HOST = "github.com";
@@ -49,9 +50,9 @@ function githubEndpoints(host: string): { device: string; token: string; copilot
 function copilotHeaders(): HeadersInit {
   return {
     accept: "application/json",
-        "user-agent": "Rigyn/0.1.0",
-    "editor-version": "rigyn/0.1.0",
-    "editor-plugin-version": "rigyn/0.1.0",
+    "user-agent": `Rigyn/${RIGYN_VERSION}`,
+    "editor-version": `rigyn/${RIGYN_VERSION}`,
+    "editor-plugin-version": `rigyn/${RIGYN_VERSION}`,
     "copilot-integration-id": "vscode-chat",
   };
 }

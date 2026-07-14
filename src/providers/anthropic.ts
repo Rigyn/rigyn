@@ -1,4 +1,5 @@
 import type { JsonValue } from "../core/json.js";
+import { RIGYN_VERSION } from "../version.js";
 import type {
   AdapterEvent,
   FinishReason,
@@ -531,7 +532,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (beta.size > 0) headers.set("anthropic-beta", [...beta].join(","));
       if (oauth) {
         headers.set("anthropic-dangerous-direct-browser-access", "true");
-        headers.set("user-agent", "rigyn/0.1.0");
+        headers.set("user-agent", `rigyn/${RIGYN_VERSION}`);
         headers.set("x-app", "cli");
       }
       headers.set("authorization", `Bearer ${accessToken}`);

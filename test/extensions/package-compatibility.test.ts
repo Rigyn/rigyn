@@ -42,7 +42,7 @@ test("extension host compatibility uses semantic-version ranges and produces act
   assert.equal(catalog.list().find((entry) => entry.id === "future")?.status, "invalid");
   assert.match(
     catalog.doctor().diagnostics.find((entry) => entry.extensionId === "future")?.message ?? "",
-    /requires Rigyn >=9\.0\.0; current version is 0\.1\.0/u,
+    /requires Rigyn >=9\.0\.0; current version is 0\.1\.1/u,
   );
 });
 
