@@ -11,7 +11,7 @@ import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 const PREFIX = "dpapi:v1:";
 const ENTROPY = "rigyn-credential-key-v1";
 const INPUT_ENVIRONMENT_NAME = "RIGYN_DPAPI_INPUT";
-const DPAPI_TIMEOUT_MS = 10_000;
+const DPAPI_TIMEOUT_MS = 60_000;
 const PROTECT_SCRIPT = [
   `$source=$env:${INPUT_ENVIRONMENT_NAME};Remove-Item Env:${INPUT_ENVIRONMENT_NAME}`,
   "Add-Type -AssemblyName System.Security",
