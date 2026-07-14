@@ -123,7 +123,7 @@
   "scripts": {
     "benchmark:extensions": "tsx benchmarks/extension-authoring.ts",
     "benchmark:offline": "tsx benchmarks/offline.ts",
-    "build": "npm run clean && tsc -p tsconfig.json && node --eval \"require('node:fs').chmodSync('dist/bin/rigyn.js', 0o755)\"",
+    "build": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node --eval \"require('node:fs').chmodSync('dist/bin/rigyn.js', 0o755)\"",
     "check": "npm run check:dependencies && npm run check:release && npm run typecheck && npm run typecheck:test && npm run test && npm run test:release && npm run test:consumer && npm run test:dist && npm run test:pack",
     "check:dependencies": "node scripts/check-dependency-policy.mjs",
     "check:release": "node scripts/check-release-metadata.mjs",

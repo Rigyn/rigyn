@@ -89,13 +89,26 @@ function errno(error) {
   return error instanceof Error && "code" in error ? error.code : undefined;
 }
 
+function environmentValue(environment, name) {
+  const target = name.toLowerCase();
+  return Object.entries(environment).find(([candidate, value]) =>
+    candidate.toLowerCase() === target && value !== undefined && value !== "")?.[1];
+}
+
+function prependEnvironmentPath(environment, entry, separator = delimiter) {
+  const inherited = environmentValue(environment, "PATH");
+  return {
+    ...Object.fromEntries(Object.entries(environment).filter(([name]) => name.toLowerCase() !== "path")),
+    PATH: inherited === undefined ? entry : `${entry}${separator}${inherited}`,
+  };
+}
+
 function commandInvocation(command, args, options = {}) {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32" || !command.toLowerCase().endsWith(".cmd")) {
     return { command, args };
   }
-  const comspec = Object.entries(options.environment ?? {}).find(([name, value]) =>
-    name.toLowerCase() === "comspec" && value !== undefined && value !== "")?.[1] ?? "cmd.exe";
+  const comspec = environmentValue(options.environment ?? {}, "ComSpec") ?? "cmd.exe";
   return {
     command: comspec,
     args: ["/d", "/s", "/v:off", "/c", command, ...args],
@@ -368,6 +381,16 @@ test("Windows command shims use the isolated command processor without a shell",
   );
 });
 
+test("installer PATH normalization preserves a mixed-case Windows Path once", () => {
+  const environment = prependEnvironmentPath(
+    { Path: String.raw`C:\hostedtoolcache\node`, HOME: String.raw`C:\home` },
+    String.raw`C:\home\.local\bin`,
+    ";",
+  );
+  assert.equal(environment.PATH, String.raw`C:\home\.local\bin;C:\hostedtoolcache\node`);
+  assert.deepEqual(Object.keys(environment).filter((name) => name.toLowerCase() === "path"), ["PATH"]);
+});
+
 test("packed artifact installs into a blank home and completes an offline extension run", {
   timeout: 240_000,
 }, async (context) => {
@@ -417,9 +440,8 @@ test("packed artifact installs into a blank home and completes an offline extens
     npm_config_prefix: paths.fakeGlobal,
   });
   const installerEnvironment = {
-    ...paths.environment,
+    ...prependEnvironmentPath(paths.environment, join(paths.home, ".local", "bin")),
     RIGYN_INSTALL_DIR: paths.installRoot,
-    PATH: `${join(paths.home, ".local", "bin")}${delimiter}${paths.environment.PATH ?? ""}`,
     npm_config_bin_links: "false",
     npm_config_global: "true",
     npm_config_omit: "dev optional",
@@ -500,6 +522,11 @@ test("packed artifact installs into a blank home and completes an offline extens
   assert.notEqual(await realpath(packageRoot), await realpath(PROJECT_ROOT), "installed package must not resolve to the source checkout");
   const packageManifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   assert.equal(packageManifest.version, packed[0].version);
+  assert.doesNotMatch(
+    String(packageManifest.scripts?.build ?? ""),
+    /\bnpm(?:\.cmd)?\s+run(?:\s|$)/iu,
+    "source builds must not resolve a nested npm executable from PATH",
+  );
   await Promise.all([
     access(join(packageRoot, "CHANGELOG.md"), constants.R_OK),
     access(join(packageRoot, "LICENSE"), constants.R_OK),
