@@ -760,6 +760,10 @@ export default function activate(api: any) {
     label: "offline self update from packed artifact",
   });
   assert.match(selfUpdate.stdout, /Updated Rigyn from .* to /u);
+  assert.equal(selfUpdate.stderr, "");
+  for (const residue of [".app-previous", ".app-install", ".build-install", ".install-transaction.json"]) {
+    await assert.rejects(access(join(paths.installRoot, residue)), (error) => errno(error) === "ENOENT");
+  }
   const updatedVersion = await runCommand(commandShim, ["--version"], {
     cwd: paths.workspace,
     env: paths.environment,
@@ -838,8 +842,9 @@ export default function activate(api: any) {
   assert.deepEqual(await readFile(installedExecutable), beforeFailedReinstall.executable);
   assert.deepEqual(await readFile(commandShim), beforeFailedReinstall.launcher);
   assert.deepEqual(await readFile(commandLink), beforeFailedReinstall.command);
-  assert.equal((await readdir(paths.installRoot)).some((entry) =>
-    entry === ".app-previous" || entry.startsWith(".app-install-") || entry.startsWith(".build-install-")), false);
+  for (const residue of [".app-previous", ".app-install", ".build-install", ".install-transaction.json"]) {
+    await assert.rejects(access(join(paths.installRoot, residue)), (error) => errno(error) === "ENOENT");
+  }
   const retainedVersion = await runCommand(commandShim, ["--version"], {
     cwd: paths.workspace,
     env: paths.environment,
@@ -949,6 +954,8 @@ export default function activate(api) { api.registerProvider(new BlockingProvide
   assert.match(uninstalled.stdout, /Removed the self-contained Rigyn installation/u);
   await assert.rejects(access(paths.installRoot), (error) => errno(error) === "ENOENT");
   await assert.rejects(access(commandLink), (error) => errno(error) === "ENOENT");
+  await assert.rejects(access(`${paths.installRoot}.uninstalling`), (error) => errno(error) === "ENOENT");
+  await assert.rejects(access(`${paths.installRoot}.uninstall.json`), (error) => errno(error) === "ENOENT");
   assert.equal(await readFile(globalSentinel, "utf8"), "must remain untouched\n");
 });
 

@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import sharp, { type SharpOptions } from "sharp";
+import type sharp from "sharp";
+import type { SharpOptions } from "sharp";
 
 import { inspectImage, MAX_TOOL_IMAGE_PIXELS } from "../tools/image-info.js";
 
@@ -152,6 +153,7 @@ function providerMediaType(format: string | undefined): PreprocessedImage["media
 }
 
 async function encodeCandidates(
+  sharpFactory: typeof sharp,
   input: Uint8Array,
   inputOptions: SharpOptions,
   width: number,
@@ -160,9 +162,9 @@ async function encodeCandidates(
   jpegQuality: number,
   limitInputPixels: number,
 ): Promise<EncodedCandidate[]> {
-  const base = sharp(input, { ...inputOptions, failOn: "warning", limitInputPixels, sequentialRead: true })
+  const base = sharpFactory(input, { ...inputOptions, failOn: "warning", limitInputPixels, sequentialRead: true })
     .autoOrient()
-    .resize({ width, height, fit: "fill", kernel: sharp.kernel.lanczos3 });
+    .resize({ width, height, fit: "fill", kernel: sharpFactory.kernel.lanczos3 });
   const candidates: EncodedCandidate[] = [];
   const png = await base.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
   candidates.push({ bytes: png, mediaType: "image/png" });
@@ -249,12 +251,13 @@ export async function preprocessImageInProcess(
   const selected = normalizeOptions(options);
   const sourceMediaType = sniffImageMediaType(input);
   if (sourceMediaType === undefined) throw new Error("Clipboard data is not a recognized image format");
+  const { default: sharpFactory } = await import("sharp");
 
   const prepared = sourceMediaType === "image/bmp"
     ? bmpRawInput(input, selected.maxInputPixels)
     : { data: input, options: {} as SharpOptions };
 
-  const metadata = await sharp(prepared.data, {
+  const metadata = await sharpFactory(prepared.data, {
     ...prepared.options,
     failOn: "warning",
     limitInputPixels: selected.maxInputPixels,
@@ -304,6 +307,7 @@ export async function preprocessImageInProcess(
   let selectedCandidate: EncodedCandidate | undefined;
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const candidates = await encodeCandidates(
+      sharpFactory,
       prepared.data,
       prepared.options,
       width,

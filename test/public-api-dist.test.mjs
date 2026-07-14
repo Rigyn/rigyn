@@ -160,6 +160,24 @@ test("built package root is an ESM consumer entry point", async (t) => {
   }
 });
 
+test("built package import defers the native image backend", async () => {
+  const entry = new URL("../dist/index.js", import.meta.url).href;
+  const script = `
+    import { registerHooks } from "node:module";
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (specifier === "sharp") throw new Error("Rigyn eagerly loaded Sharp");
+        return nextResolve(specifier, context);
+      },
+    });
+    await import(${JSON.stringify(entry)});
+    process.stdout.write("native image backend deferred\\n");
+  `;
+  const result = await execute(process.execPath, ["--input-type=module", "--eval", script]);
+  assert.equal(result.stdout, "native image backend deferred\n");
+  assert.equal(result.stderr, "");
+});
+
 test("built testing subpath exposes the deterministic provider without changing the root API", async () => {
   assert.deepEqual(Object.keys(testing).sort(), [
     "SCRIPTED_PROVIDER_LIMITS",

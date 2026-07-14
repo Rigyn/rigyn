@@ -34,6 +34,7 @@ Release-impacting changes are recorded here. The version policy and release proc
 - The public RPC client can launch the packaged CLI through Node on every supported platform without depending on a shell or command shim.
 - Added a new-user getting-started path and documentation map covering workspaces, providers, sessions, tools, skills, extensions, packages, data ownership, updates, and removal.
 - Windows credential encryption now avoids PowerShell module discovery, keeps its child environment minimal, and completes under the original bounded timeout.
+- Native image processing now loads only inside its worker, preventing Windows self-update and uninstall from locking the previous application's Sharp DLLs.
 - Versioned GitHub archives can be installed directly with `npm exec`; npm publication is an explicit independently authorized release step.
 
 ### Security
