@@ -33,6 +33,7 @@ jobs:
         with:
           name: rigyn-release-${{ github.run_id }}
           path: .release/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 

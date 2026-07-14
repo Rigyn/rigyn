@@ -254,9 +254,7 @@ export async function readSecretFrom(
   }
   if (input.setRawMode === undefined) throw new Error("Terminal does not support hidden input");
   signal?.throwIfAborted();
-  output.write(prompt);
   input.setRawMode(true);
-  input.resume();
   return new Promise<string>((resolve, reject) => {
     const value: number[] = [];
     const cleanup = (): void => {
@@ -317,6 +315,12 @@ export async function readSecretFrom(
     input.once("end", onEnd);
     input.once("error", onError);
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted === true) {
+      onAbort();
+      return;
+    }
+    output.write(prompt);
+    input.resume();
   });
 }
 

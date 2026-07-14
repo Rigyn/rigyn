@@ -70,6 +70,25 @@ test("TTY secret input preserves UTF-8 and backspaces one complete character", a
   assert.equal(await secret, "sëcret");
 });
 
+test("TTY secret prompt appears only after echo is disabled and input is ready", async () => {
+  const input = new PassThrough() as PassThrough & { isTTY: boolean; setRawMode(mode: boolean): void };
+  input.isTTY = true;
+  let raw = false;
+  input.setRawMode = (mode) => { raw = mode; };
+  const output = new PassThrough();
+  let promptObserved = false;
+  output.on("data", (chunk: Buffer) => {
+    if (!chunk.toString("utf8").includes("Secret: ")) return;
+    promptObserved = true;
+    assert.equal(raw, true);
+    assert.ok(input.listenerCount("data") > 0);
+    input.write("hidden-value\n");
+  });
+  assert.equal(await readSecretFrom(input, output, "Secret: "), "hidden-value");
+  assert.equal(promptObserved, true);
+  assert.equal(raw, false);
+});
+
 test("TTY secret input cancels on Escape or Ctrl-C without revealing partial input", async () => {
   for (const key of [27, 3]) {
     const input = new PassThrough() as PassThrough & { isTTY: boolean; setRawMode(mode: boolean): void };

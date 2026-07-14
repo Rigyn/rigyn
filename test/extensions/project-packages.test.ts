@@ -199,6 +199,7 @@ test("aborting reconciliation terminates dependency commands and preserves activ
   const source = join(workspace, "package-source");
   const block = join(workspace, "block-npm");
   const started = join(workspace, "npm-started");
+  const release = join(workspace, "release-child");
   const survivor = join(workspace, "child-survived");
   const fakeNpm = join(workspace, "fake-npm.mjs");
   await mkdir(source);
@@ -214,14 +215,13 @@ test("aborting reconciliation terminates dependency commands and preserves activ
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-const [block, started, survivor] = process.argv.slice(2);
+const [block, started, release, survivor] = process.argv.slice(2);
 let blocked = false;
 try { await access(block); blocked = true; } catch (error) {
   if (error?.code !== "ENOENT") throw error;
 }
 if (blocked) {
-  await writeFile(started, "started");
-  spawn(process.execPath, ["-e", ${JSON.stringify("setTimeout(() => process.getBuiltinModule('node:fs').writeFileSync(process.argv[1], 'survived'), 500)")}, survivor], { stdio: "ignore" });
+  spawn(process.execPath, ["-e", ${JSON.stringify("const fs = process.getBuiltinModule('node:fs'); fs.writeFileSync(process.argv[1], 'started'); const timer = setInterval(() => { if (!fs.existsSync(process.argv[2])) return; clearInterval(timer); fs.writeFileSync(process.argv[3], 'survived'); }, 10)")}, started, release, survivor], { stdio: "ignore" });
   await new Promise(() => {});
 }
 const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
@@ -235,7 +235,7 @@ for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
   const manager = new ProjectPackageManager({
     workspace,
     projectTrusted: true,
-    commands: { npm: { command: process.execPath, prefix: [fakeNpm, block, started, survivor] } },
+    commands: { npm: { command: process.execPath, prefix: [fakeNpm, block, started, release, survivor] } },
   });
   await manager.update({ all: true });
 
@@ -271,7 +271,8 @@ for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
   ]);
   assert.deepEqual(after, before);
   await assert.rejects(access(join(workspace, ".rigyn", ".packages-stage")), /ENOENT/u);
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 650));
+  await writeFile(release, "release");
+  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 250));
   await assert.rejects(access(survivor), /ENOENT/u);
 });
 

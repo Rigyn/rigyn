@@ -36,9 +36,11 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Windows credential encryption now avoids PowerShell module discovery, keeps its child environment minimal, and completes under the original bounded timeout.
 - Native image processing now loads only inside its worker, preventing Windows self-update and uninstall from locking the previous application's Sharp DLLs.
 - Versioned GitHub archives can be installed directly with `npm exec`; npm publication is an explicit independently authorized release step.
+- Release artifact transfer now preserves the hidden ownership marker required by every platform-verification job.
 
 ### Security
 
+- TTY credential prompts now disable terminal echo and attach their bounded input listener before rendering the prompt.
 - External-process environment filtering now preserves required Windows variables and rejects unsafe additions independent of name casing.
 - Runtime extensions now authenticate provider requests through an exact-origin host broker. The brokered auth API never returns provider credentials, authorization headers, cloud signing keys, or reusable secret handles; installed extension code remains trusted same-process code as documented in the threat model.
 - External execution rejects missing, malformed, oversized, timed-out, or unauthorized backend results without retrying the tool locally.

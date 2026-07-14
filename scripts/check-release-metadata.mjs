@@ -190,6 +190,13 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
 
   const releaseWorkflow = await readText(projectRoot, ".github/workflows/release.yml");
   for (const target of EXPECTED_TARGETS) assert.ok(releaseWorkflow.includes(target.runner), `release.yml must use ${target.runner}`);
+  const releaseDocument = parseYaml(releaseWorkflow);
+  const stagedUpload = releaseDocument?.jobs?.stage?.steps?.find((step) => step?.name === "Upload staged release");
+  assert.equal(
+    stagedUpload?.with?.["include-hidden-files"],
+    true,
+    "release.yml must preserve the hidden staged-release ownership marker",
+  );
   for (const fragment of [
     "npm run release:stage",
     "scripts/verify-release-artifact.mjs",
