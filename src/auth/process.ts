@@ -221,7 +221,11 @@ export function minimalProcessEnvironment(
     "TEMP",
     "LANG",
   ]) {
-    const value = source[name];
+    const value = source[name] ?? (process.platform === "win32"
+      ? Object.entries(source).find(
+        ([candidate, selected]) => selected !== undefined && candidate.toUpperCase() === name.toUpperCase(),
+      )?.[1]
+      : undefined);
     if (value !== undefined) environment[name] = value;
   }
   for (const [name, value] of Object.entries(additions)) {
@@ -234,7 +238,7 @@ export function minimalProcessEnvironment(
         "LD_LIBRARY_PATH",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_LIBRARY_PATH",
-      ]).has(name)
+      ]).has(name.toUpperCase())
     ) {
       throw new TypeError(`Unsafe external command environment name: ${name}`);
     }

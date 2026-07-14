@@ -25,14 +25,16 @@ node --version
 npm --version
 ```
 
-After the first npm release, install a private per-user copy:
+Install a private per-user copy from the v0.1.0 GitHub release:
 
 ```sh
-npx --yes rigyn@latest self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.0/rigyn-0.1.0.tgz -- rigyn self-install
 rigyn --version
 ```
 
-Until then, install from the public source checkout:
+This uses npm's one-shot package executor rather than a global npm installation. After the package is also published to npm, replace the URL with `rigyn@latest`.
+
+To install from the public source checkout instead:
 
 ```sh
 git clone https://github.com/Rigyn/rigyn.git
@@ -186,7 +188,7 @@ rigyn extensions doctor
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest`; before that package exists, update the source checkout and rerun `node scripts/install-user.mjs`. Close other running Rigyn processes before update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration, credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
+`self-update` installs `rigyn@latest`; before that package exists, rerun the versioned GitHub release command above, or update the source checkout and rerun `node scripts/install-user.mjs`. Close other running Rigyn processes before update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration, credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
 
 For common failures, see [Troubleshooting](troubleshooting.md), [Platform notes](platforms.md), and [Local diagnostics](diagnostics.md).
 

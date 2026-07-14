@@ -14,12 +14,14 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From npm after the first package release:
+From the v0.1.0 GitHub release:
 
 ```sh
-npx --yes rigyn@latest self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.0/rigyn-0.1.0.tgz -- rigyn self-install
 rigyn
 ```
+
+This uses npm's one-shot package executor; it does not create a global npm installation. After the package is also published to npm, `npm exec --yes --package=rigyn@latest -- rigyn self-install` installs the latest registry release.
 
 From the public source checkout today:
 
@@ -41,7 +43,7 @@ rigyn self-update
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest` from npm. Until that package exists, update the source checkout and rerun `node scripts/install-user.mjs`; the installer replaces only its marker-owned application files.
+`self-update` installs `rigyn@latest` from npm. Until that package exists, rerun the versioned GitHub release command above, or update the source checkout and rerun `node scripts/install-user.mjs`; the installer replaces only its marker-owned application files.
 
 Uninstall is marker-verified and removes the installed application, configuration, OAuth/API-key profiles, sessions, cache, and its managed command. It never deletes the source checkout or unrelated files.
 

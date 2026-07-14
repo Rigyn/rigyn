@@ -11,18 +11,18 @@ import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 const PREFIX = "dpapi:v1:";
 const ENTROPY = "rigyn-credential-key-v1";
 const INPUT_ENVIRONMENT_NAME = "RIGYN_DPAPI_INPUT";
-const DPAPI_TIMEOUT_MS = 60_000;
+const DPAPI_TIMEOUT_MS = 10_000;
 const PROTECT_SCRIPT = [
-  `$source=$env:${INPUT_ENVIRONMENT_NAME};Remove-Item Env:${INPUT_ENVIRONMENT_NAME}`,
-  "Add-Type -AssemblyName System.Security",
+  `$source=$env:${INPUT_ENVIRONMENT_NAME};$env:${INPUT_ENVIRONMENT_NAME}=$null`,
+  "[void][System.Reflection.Assembly]::Load('System.Security, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a')",
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$protected=[Security.Cryptography.ProtectedData]::Protect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
   "[Console]::Out.Write([Convert]::ToBase64String($protected))",
 ].join(";");
 const UNPROTECT_SCRIPT = [
-  `$source=$env:${INPUT_ENVIRONMENT_NAME};Remove-Item Env:${INPUT_ENVIRONMENT_NAME}`,
-  "Add-Type -AssemblyName System.Security",
+  `$source=$env:${INPUT_ENVIRONMENT_NAME};$env:${INPUT_ENVIRONMENT_NAME}=$null`,
+  "[void][System.Reflection.Assembly]::Load('System.Security, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a')",
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$plain=[Security.Cryptography.ProtectedData]::Unprotect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",

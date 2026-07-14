@@ -25,7 +25,7 @@ The staged output contains:
 - `RELEASE_NOTES.md`, extracted from the matching changelog section.
 - `.rigyn-release-output.json`, which marks the directory as staging-owned before a later run may replace it.
 
-Staging refuses to replace a directory without that exact ownership marker and swaps a completed staging directory into place without first deleting the previous output. It includes no timestamp, host path, credentials, or generated release prose. The archive is built once and the same bytes are verified, published to npm, and attached to the GitHub release.
+Staging refuses to replace a directory without that exact ownership marker and swaps a completed staging directory into place without first deleting the previous output. It includes no timestamp, host path, credentials, or generated release prose. The archive is built once and attached to the GitHub release after verification. When npm publishing is enabled, those same bytes are also published to npm.
 
 ## Maintainer checklist
 
@@ -37,7 +37,9 @@ Staging refuses to replace a directory without that exact ownership marker and s
 6. Create and push the exact `v<version>` tag. Do not move or reuse a published tag.
 7. Let the release workflow verify the single archive on every declared target.
 
-On a tag, the workflow creates or updates a draft GitHub release, uploads the staged files, publishes the same archive to npm with provenance, and then makes the release public. A rerun accepts an already-published npm version only when its registry integrity exactly matches the staged archive.
+On a tag, the workflow creates or updates a draft GitHub release, uploads the staged files, and then makes the release public. Setting the repository variable `NPM_PUBLISH_ENABLED` to `true` also publishes the exact staged archive to npm with provenance before the GitHub release becomes public. Configure npm trusted publishing for `Rigyn/rigyn` and `release.yml` before enabling that variable. A rerun accepts an already-published npm version only when its registry integrity exactly matches the staged archive.
+
+The first npm publication requires an npm owner to bootstrap the package. Publish only the exact verified archive, then configure the trusted publisher, remove the bootstrap credential, and enable `NPM_PUBLISH_ENABLED` for later releases. A GitHub-only release remains valid while npm publication is disabled; `rigyn self-update` becomes available after the registry package exists.
 
 Manual workflow dispatch performs staging and the full platform verification without publishing.
 

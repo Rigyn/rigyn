@@ -119,7 +119,8 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md
           fi
           gh release upload "$GITHUB_REF_NAME" .release/*.tgz .release/SHA256SUMS .release/release-manifest.json .release/RELEASE_NOTES.md --clobber
-      - name: Publish exact staged archive
+      - name: Publish exact staged archive to npm
+        if: vars.NPM_PUBLISH_ENABLED == 'true'
         shell: bash
         run: |
           set -euo pipefail

@@ -143,7 +143,9 @@ test("before_user_shell replaces or handles shortcuts without breaking hidden tr
   const sessionOffset = output.length;
   submit("/session");
   await waitFor(() => output.slice(sessionOffset).includes("Messages: 1 user"), () => output.slice(-16 * 1024));
+  await waitFor(() => output.slice(sessionOffset).includes("you> "), () => output.slice(-16 * 1024));
 
+  const transformedOffset = output.length;
   submit(`!!printf transform-original > ${shellQuote(transformedOriginalMarker)}`);
   await waitFor(() => pathExists(transformedMarker), () => output.slice(-16 * 1024));
   assert.equal((await readFile(transformedMarker, "utf8")).trim(), "transformed");
@@ -156,6 +158,7 @@ test("before_user_shell replaces or handles shortcuts without breaking hidden tr
     }
   }, () => output.slice(-16 * 1024));
   assert.match(await readFile(postLog, "utf8"), /"command":"printf transformed > transformed\.txt"/u);
+  await waitFor(() => output.slice(transformedOffset).includes("you> "), () => output.slice(-16 * 1024));
 
   submit("/exit");
   const exitCode = await new Promise<number | null>((resolveExit, reject) => {

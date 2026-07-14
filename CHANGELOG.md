@@ -33,9 +33,12 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Invalid derived cross-workspace session indexes rebuild from untouched durable session history; busy, unsafe, and source-database failures remain fail-closed.
 - The public RPC client can launch the packaged CLI through Node on every supported platform without depending on a shell or command shim.
 - Added a new-user getting-started path and documentation map covering workspaces, providers, sessions, tools, skills, extensions, packages, data ownership, updates, and removal.
+- Windows credential encryption now avoids PowerShell module discovery, keeps its child environment minimal, and completes under the original bounded timeout.
+- Versioned GitHub archives can be installed directly with `npm exec`; npm publication is an explicit independently authorized release step.
 
 ### Security
 
+- External-process environment filtering now preserves required Windows variables and rejects unsafe additions independent of name casing.
 - Runtime extensions now authenticate provider requests through an exact-origin host broker. The brokered auth API never returns provider credentials, authorization headers, cloud signing keys, or reusable secret handles; installed extension code remains trusted same-process code as documented in the threat model.
 - External execution rejects missing, malformed, oversized, timed-out, or unauthorized backend results without retrying the tool locally.
 - Project package fetch and activation require trust, exact immutable versions or revisions, integrity verification, disabled lifecycle scripts, atomic reconciliation, and rollback.

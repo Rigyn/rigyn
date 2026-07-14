@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import test from "node:test";
 
 import { SecretRedactor } from "../../src/auth/redaction.js";
@@ -35,19 +36,29 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   assert.equal(calls[0]?.environment?.RIGYN_DPAPI_INPUT, key.toString("base64"));
   assert.match(
     calls[0]?.args?.at(-1) ?? "",
-    /^\$source=\$env:RIGYN_DPAPI_INPUT;Remove-Item Env:RIGYN_DPAPI_INPUT;Add-Type/u,
+    /^\$source=\$env:RIGYN_DPAPI_INPUT;\$env:RIGYN_DPAPI_INPUT=\$null;\[void\]\[System\.Reflection\.Assembly\]::Load\('System\.Security,/u,
   );
   assert.match(calls[0]?.args?.at(-1) ?? "", /CurrentUser/u);
   assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
   assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);
   assert.equal(calls[0]?.environment?.OPENAI_API_KEY, undefined);
-  assert.equal(calls[0]?.timeoutMs, 60_000);
+  assert.equal(calls[0]?.timeoutMs, 10_000);
 
   const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe", environment });
   assert.deepEqual(restored, key);
   assert.equal(calls[1]?.input, undefined);
   assert.equal(calls[1]?.environment?.RIGYN_DPAPI_INPUT, protectedValue);
   assert.match(calls[1]?.args?.at(-1) ?? "", /Unprotect/u);
+});
+
+test("Windows DPAPI performs a real current-user Protect and Unprotect round trip", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const key = randomBytes(32);
+  const envelope = await protectWindowsCredentialKey(key);
+  assert.equal(isWindowsDpapiEnvelope(envelope), true);
+  assert.doesNotMatch(envelope, new RegExp(key.toString("base64"), "u"));
+  assert.deepEqual(await unprotectWindowsCredentialKey(envelope), key);
 });
 
 test("Windows DPAPI validates envelopes, plaintext size, and redacts command failures", async () => {
