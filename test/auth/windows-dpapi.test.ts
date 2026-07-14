@@ -41,7 +41,7 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
   assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);
   assert.equal(calls[0]?.environment?.OPENAI_API_KEY, undefined);
-  assert.equal(calls[0]?.timeoutMs, 30_000);
+  assert.equal(calls[0]?.timeoutMs, 10_000);
 
   const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe", environment });
   assert.deepEqual(restored, key);

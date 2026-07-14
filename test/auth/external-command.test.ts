@@ -28,6 +28,22 @@ test("external auth uses argv without a shell and a minimal environment", async 
   await assert.rejects(access(marker));
 });
 
+test("external auth returns after the command exits when a descendant retains its output pipes", async () => {
+  const descendant = "setTimeout(() => {}, 3000)";
+  const script = [
+    "const { spawn } = require('node:child_process')",
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 'inherit', 'inherit'] })`,
+    "child.unref()",
+    `process.stdout.write(${JSON.stringify(JSON.stringify({ type: "bearer", accessToken: "bounded-drain-token" }))})`,
+  ].join(";");
+  const credential = await resolveExternalCommandCredential({
+    provider: "example",
+    argv: [process.execPath, "-e", script],
+    timeoutMs: 2_000,
+  });
+  assert.equal(credential.kind, "bearer");
+});
+
 test("external auth enforces timeout and output bounds", async () => {
   await assert.rejects(
     resolveExternalCommandCredential({
@@ -54,18 +70,27 @@ test("external auth timeout reaps the child process group before rejecting", asy
   }
   const directory = await mkdtemp(join(tmpdir(), "harness-auth-reap-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
+  const ready = join(directory, "ready");
   const marker = join(directory, "survived");
-  const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'bad'), 250)`;
-  const parent = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}]);setTimeout(()=>{},10000)`;
+  const grandchild = [
+    "const fs=require('node:fs')",
+    "process.on('SIGTERM',()=>{})",
+    `fs.writeFileSync(${JSON.stringify(ready)},'ready')`,
+    `setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},'bad'),1800)`,
+  ].join(";");
+  const parent = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:['ignore','inherit','inherit']});setTimeout(()=>{},10000)`;
+  const startedAt = Date.now();
   await assert.rejects(
     resolveExternalCommandCredential({
       provider: "example",
       argv: [process.execPath, "-e", parent],
-      timeoutMs: 50,
+      timeoutMs: 500,
     }),
     /timed out/u,
   );
-  await new Promise<void>((resolve) => setTimeout(resolve, 350));
+  await access(ready);
+  const remaining = 2_300 - (Date.now() - startedAt);
+  if (remaining > 0) await new Promise<void>((resolve) => setTimeout(resolve, remaining));
   await assert.rejects(access(marker));
 });
 

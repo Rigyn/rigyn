@@ -3,6 +3,9 @@ import { spawn } from "node:child_process";
 import { trackActiveProcessGroup } from "../process/active-groups.js";
 import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 
+const OUTPUT_DRAIN_IDLE_MS = 250;
+const OUTPUT_DRAIN_MAX_MS = 1_000;
+
 export interface SafeProcessOptions {
   command: string;
   args?: readonly string[];
@@ -62,15 +65,61 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
     let settled = false;
     let pendingError: Error | undefined;
     let escalation: NodeJS.Timeout | undefined;
+    let parentOutcome: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let drainIdle: NodeJS.Timeout | undefined;
+    let drainMaximum: NodeJS.Timeout | undefined;
+    let killEscalated = false;
 
-    const finish = (operation: () => void): void => {
+    const finish = (operation: () => void, destroyPipes = false): void => {
       if (settled) return;
       settled = true;
       releaseProcessGroup();
       clearTimeout(timeout);
       if (escalation !== undefined) clearTimeout(escalation);
+      if (drainIdle !== undefined) clearTimeout(drainIdle);
+      if (drainMaximum !== undefined) clearTimeout(drainMaximum);
       options.signal?.removeEventListener("abort", abort);
+      if (destroyPipes) {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
       operation();
+    };
+    const complete = (code: number | null, signal: NodeJS.Signals | null, destroyPipes = false): void => {
+      finish(() => {
+        if (pendingError !== undefined) {
+          reject(pendingError);
+          return;
+        }
+        if (code === null) {
+          reject(new SafeProcessError(`External command terminated by signal ${signal ?? "unknown"}`));
+          return;
+        }
+        resolve({
+          exitCode: code,
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: redactor.redact(Buffer.concat(stderr).toString("utf8")),
+        });
+      }, destroyPipes);
+    };
+    const rearmDrainIdle = (): void => {
+      if (settled || parentOutcome === undefined || drainMaximum === undefined) return;
+      if (drainIdle !== undefined) clearTimeout(drainIdle);
+      drainIdle = setTimeout(() => complete(parentOutcome!.code, parentOutcome!.signal, true), OUTPUT_DRAIN_IDLE_MS);
+    };
+    const beginDrain = (): void => {
+      if (settled || parentOutcome === undefined || drainMaximum !== undefined) return;
+      drainMaximum = setTimeout(
+        () => complete(parentOutcome!.code, parentOutcome!.signal, true),
+        OUTPUT_DRAIN_MAX_MS,
+      );
+      rearmDrainIdle();
+    };
+    const suspendDrain = (): void => {
+      if (drainIdle !== undefined) clearTimeout(drainIdle);
+      if (drainMaximum !== undefined) clearTimeout(drainMaximum);
+      drainIdle = undefined;
+      drainMaximum = undefined;
     };
     const signalProcess = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
@@ -83,6 +132,7 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
     const stopWithError = (error: Error): void => {
       if (settled || pendingError !== undefined) return;
       pendingError = error;
+      suspendDrain();
       try {
         signalProcess("SIGTERM");
       } catch (cause) {
@@ -90,11 +140,13 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
         return;
       }
       escalation = setTimeout(() => {
+        killEscalated = true;
         try {
           signalProcess("SIGKILL");
         } catch {
           // The original bounded-process error remains authoritative.
         }
+        beginDrain();
       }, 1_000);
       escalation.unref();
     };
@@ -106,6 +158,7 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
         return;
       }
       target.push(chunk);
+      rearmDrainIdle();
     };
     const abort = (): void => {
       stopWithError(options.signal?.reason instanceof Error ? options.signal.reason : new Error("Aborted"));
@@ -126,22 +179,14 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
         ),
       );
     });
+    child.once("exit", (code, signal) => {
+      parentOutcome = { code, signal };
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
+      if (pendingError === undefined || killEscalated) beginDrain();
+    });
     child.once("close", (code, signal) => {
-      finish(() => {
-        if (pendingError !== undefined) {
-          reject(pendingError);
-          return;
-        }
-        if (code === null) {
-          reject(new SafeProcessError(`External command terminated by signal ${signal ?? "unknown"}`));
-          return;
-        }
-        resolve({
-          exitCode: code,
-          stdout: Buffer.concat(stdout).toString("utf8"),
-          stderr: redactor.redact(Buffer.concat(stderr).toString("utf8")),
-        });
-      });
+      complete(parentOutcome?.code ?? code, parentOutcome?.signal ?? signal);
     });
 
     child.stdin.on("error", () => undefined);
