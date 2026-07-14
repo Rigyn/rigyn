@@ -12,7 +12,7 @@ const PREFIX = "dpapi:v1:";
 const ENTROPY = "rigyn-credential-key-v1";
 const PROTECT_SCRIPT = [
   "Add-Type -AssemblyName System.Security",
-  "$source=[Console]::In.ReadToEnd().Trim()",
+  "$source=[Console]::In.ReadLine().Trim()",
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$protected=[Security.Cryptography.ProtectedData]::Protect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
@@ -20,7 +20,7 @@ const PROTECT_SCRIPT = [
 ].join(";");
 const UNPROTECT_SCRIPT = [
   "Add-Type -AssemblyName System.Security",
-  "$source=[Console]::In.ReadToEnd().Trim()",
+  "$source=[Console]::In.ReadLine().Trim()",
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$plain=[Security.Cryptography.ProtectedData]::Unprotect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",

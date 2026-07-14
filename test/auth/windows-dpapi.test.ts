@@ -32,6 +32,8 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   assert.equal(envelope, `dpapi:v1:${protectedValue}`);
   assert.equal(calls[0]?.input, `${key.toString("base64")}\n`);
   assert.doesNotMatch(JSON.stringify(calls[0]?.args), new RegExp(key.toString("base64"), "u"));
+  assert.match(calls[0]?.args?.at(-1) ?? "", /ReadLine/u);
+  assert.doesNotMatch(calls[0]?.args?.at(-1) ?? "", /ReadToEnd/u);
   assert.match(calls[0]?.args?.at(-1) ?? "", /CurrentUser/u);
   assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
   assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);

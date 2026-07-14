@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { commandShellArgv } from "../process/command-shell.js";
-import { trackActiveProcessGroup } from "../process/active-groups.js";
-import { terminateProcessTree } from "../process/process-tree.js";
+import { runProcess } from "../process/runner.js";
 import {
   withGracefulTermination,
   type GracefulTerminationContext,
@@ -810,92 +809,36 @@ export async function runShellShortcut(
   });
   const childEnvironment = shellShortcutEnvironment(environment);
   const maximum = 512 * 1024;
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let stdoutTruncated = false;
-  let stderrTruncated = false;
   const progress = onProgress === undefined ? undefined : new CoalescedOutputProgress(onProgress);
-  let result: { exitCode: number | null; signal?: NodeJS.Signals };
+  let outcome: Awaited<ReturnType<typeof runProcess>>;
   try {
-    result = await new Promise<{ exitCode: number | null; signal?: NodeJS.Signals }>((resolveResult, reject) => {
-      const child = spawn(argv[0]!, argv.slice(1), {
-        cwd,
-        env: childEnvironment,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-        detached: process.platform !== "win32",
-      });
-      const releaseProcessGroup = trackActiveProcessGroup(child.pid);
-      const capture = (target: Buffer[], chunk: Buffer, kind: "stdout" | "stderr") => {
-        const used = kind === "stdout" ? stdoutBytes : stderrBytes;
-        const available = Math.max(0, maximum - used);
-        if (available > 0) target.push(chunk.subarray(0, available));
-        if (kind === "stdout") {
-          stdoutBytes += Math.min(chunk.length, available);
-          stdoutTruncated ||= chunk.length > available;
-        } else {
-          stderrBytes += Math.min(chunk.length, available);
-          stderrTruncated ||= chunk.length > available;
-        }
-      };
-      child.stdout.on("data", (chunk: Buffer) => {
-        capture(stdout, chunk, "stdout");
-        progress?.push("stdout", chunk);
-      });
-      child.stderr.on("data", (chunk: Buffer) => {
-        capture(stderr, chunk, "stderr");
-        progress?.push("stderr", chunk);
-      });
-      let killTimeout: NodeJS.Timeout | undefined;
-      let timedOut = false;
-      let settled = false;
-      const kill = (signalValue: NodeJS.Signals): void => {
-        if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return;
-        terminateProcessTree(child.pid, signalValue);
-      };
-      const terminate = (): void => {
-        kill("SIGTERM");
-        killTimeout ??= setTimeout(() => kill("SIGKILL"), 1_000);
-        killTimeout.unref();
-      };
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        terminate();
-      }, timeoutMs);
-      timeout.unref();
-      const abort = () => terminate();
-      const cleanup = () => {
-        releaseProcessGroup();
-        clearTimeout(timeout);
-        if (killTimeout !== undefined) clearTimeout(killTimeout);
-        signal.removeEventListener("abort", abort);
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      });
-      child.once("close", (exitCode, exitSignal) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        if (signal.aborted) reject(signal.reason ?? new Error("Shell shortcut cancelled"));
-        else if (timedOut) reject(new Error(`Shell shortcut timed out after ${timeoutMs} ms`));
-        else resolveResult({ exitCode, ...(exitSignal === null ? {} : { signal: exitSignal }) });
-      });
-    });
+    outcome = await runProcess({
+      argv,
+      cwd,
+      env: Object.fromEntries(
+        Object.entries(childEnvironment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+      ),
+      inheritEnv: false,
+      timeoutMs,
+      outputLimitBytes: maximum,
+      onOutput(stream, chunk) {
+        progress?.push(stream, Buffer.from(chunk));
+      },
+    }, signal);
   } finally {
     progress?.close();
   }
+  if (outcome.cancelled) throw signal.reason ?? new Error("Shell shortcut cancelled");
+  if (outcome.timedOut) throw new Error(`Shell shortcut timed out after ${timeoutMs} ms`);
+  const result = {
+    exitCode: outcome.exitCode,
+    ...(outcome.signal === null ? {} : { signal: outcome.signal }),
+  };
   const sections = [
     `$ ${defaultSecretRedactor.redact(command)}`,
-    stdout.length === 0 ? undefined : defaultSecretRedactor.redact(Buffer.concat(stdout).toString("utf8").replace(/\s+$/u, "")),
-    stderr.length === 0 ? undefined : `stderr:\n${defaultSecretRedactor.redact(Buffer.concat(stderr).toString("utf8").replace(/\s+$/u, ""))}`,
-    stdoutTruncated || stderrTruncated ? "… output truncated" : undefined,
+    outcome.stdout.length === 0 ? undefined : defaultSecretRedactor.redact(outcome.stdout.toString("utf8").replace(/\s+$/u, "")),
+    outcome.stderr.length === 0 ? undefined : `stderr:\n${defaultSecretRedactor.redact(outcome.stderr.toString("utf8").replace(/\s+$/u, ""))}`,
+    outcome.stdoutBytes > outcome.stdout.length || outcome.stderrBytes > outcome.stderr.length ? "… output truncated" : undefined,
     result.signal === undefined ? `exit ${result.exitCode ?? "unknown"}` : `signal ${result.signal}`,
   ].filter((value): value is string => value !== undefined && value !== "");
   return { text: sections.join("\n"), ...result };
