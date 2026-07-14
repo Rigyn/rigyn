@@ -850,30 +850,21 @@ async function runBoundedCommand(
     let bytes = 0;
     let settled = false;
     let failure: Error | undefined;
-    let escalation: NodeJS.Timeout | undefined;
     const finish = (operation: () => void): void => {
       if (settled) return;
       settled = true;
       releaseProcessGroup();
       clearTimeout(timeout);
-      if (escalation !== undefined) clearTimeout(escalation);
       operation();
     };
     const stop = (error: Error): void => {
       if (failure !== undefined || settled) return;
       failure = error;
       try {
-        stopProcess(child, "SIGTERM");
+        stopProcess(child, "SIGKILL");
       } catch (cause) {
         finish(() => reject(new Error(error.message, { cause })));
-        return;
       }
-      escalation = setTimeout(() => {
-        try {
-          stopProcess(child, "SIGKILL");
-        } catch {}
-      }, 1_000);
-      escalation.unref();
     };
     const capture = (chunk: Buffer): void => {
       if (failure !== undefined || settled) return;

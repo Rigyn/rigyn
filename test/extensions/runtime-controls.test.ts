@@ -13,7 +13,6 @@ import { sha256 } from "../../src/tools/hash.js";
 
 test("runtime extensions control sessions, messages, selection, queues, and host commands", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-controls-"));
-  t.after(async () => await rm(root, { recursive: true, force: true }));
   const sourcePath = join(root, "controls.mjs");
   const source = `export default (api) => {
     globalThis.__runtimeControlsApi = api;
@@ -61,6 +60,7 @@ test("runtime extensions control sessions, messages, selection, queues, and host
     await host.close();
     delete (globalThis as Record<string, unknown>).__runtimeControlsApi;
     delete (globalThis as Record<string, unknown>).__runtimeWaitForIdleError;
+    await rm(root, { recursive: true, force: true });
   });
 
   const focused: string[] = [];

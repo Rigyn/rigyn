@@ -180,6 +180,9 @@ export async function runProcess(spec: CommandSpec, signal: AbortSignal): Promis
     child.once("close", (exitCode, exitSignal) => {
       finish(parentOutcome ?? { exitCode, signal: exitSignal });
     });
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") fail(error);
+    });
 
     if (spec.stdin === undefined) child.stdin.end();
     else child.stdin.end(spec.stdin);

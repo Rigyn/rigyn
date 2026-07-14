@@ -114,7 +114,6 @@ test("service run uses the shared canonical model and thinking resolver before s
 
 test("runtime model and reasoning changes refresh the next safe provider turn", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "rigyn-safe-turn-selection-"));
-  t.after(async () => await rm(workspace, { recursive: true, force: true }));
   const sourcePath = join(workspace, "safe-turn.mjs");
   const source = `export default (api) => {
     let session;
@@ -167,6 +166,7 @@ test("runtime model and reasoning changes refresh the next safe provider turn", 
     await service.close("test complete");
     await host.close();
     store.close();
+    await rm(workspace, { recursive: true, force: true });
   });
 
   const modelRun = await service.run({

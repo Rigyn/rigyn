@@ -30,10 +30,10 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   const envelope = await protectWindowsCredentialKey(key, { runner, command: "powershell.exe", environment });
   assert.equal(isWindowsDpapiEnvelope(envelope), true);
   assert.equal(envelope, `dpapi:v1:${protectedValue}`);
-  assert.equal(calls[0]?.input, `${key.toString("base64")}\n`);
+  assert.equal(calls[0]?.input, undefined);
   assert.doesNotMatch(JSON.stringify(calls[0]?.args), new RegExp(key.toString("base64"), "u"));
-  assert.match(calls[0]?.args?.at(-1) ?? "", /ReadLine/u);
-  assert.doesNotMatch(calls[0]?.args?.at(-1) ?? "", /ReadToEnd/u);
+  assert.equal(calls[0]?.environment?.RIGYN_DPAPI_INPUT, key.toString("base64"));
+  assert.match(calls[0]?.args?.at(-1) ?? "", /Remove-Item Env:RIGYN_DPAPI_INPUT/u);
   assert.match(calls[0]?.args?.at(-1) ?? "", /CurrentUser/u);
   assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
   assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);
@@ -41,7 +41,8 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
 
   const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe", environment });
   assert.deepEqual(restored, key);
-  assert.equal(calls[1]?.input, `${protectedValue}\n`);
+  assert.equal(calls[1]?.input, undefined);
+  assert.equal(calls[1]?.environment?.RIGYN_DPAPI_INPUT, protectedValue);
   assert.match(calls[1]?.args?.at(-1) ?? "", /Unprotect/u);
 });
 

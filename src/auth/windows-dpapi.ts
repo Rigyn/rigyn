@@ -10,9 +10,10 @@ import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 
 const PREFIX = "dpapi:v1:";
 const ENTROPY = "rigyn-credential-key-v1";
+const INPUT_ENVIRONMENT_NAME = "RIGYN_DPAPI_INPUT";
 const PROTECT_SCRIPT = [
   "Add-Type -AssemblyName System.Security",
-  "$source=[Console]::In.ReadLine().Trim()",
+  `$source=$env:${INPUT_ENVIRONMENT_NAME};Remove-Item Env:${INPUT_ENVIRONMENT_NAME}`,
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$protected=[Security.Cryptography.ProtectedData]::Protect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
@@ -20,7 +21,7 @@ const PROTECT_SCRIPT = [
 ].join(";");
 const UNPROTECT_SCRIPT = [
   "Add-Type -AssemblyName System.Security",
-  "$source=[Console]::In.ReadLine().Trim()",
+  `$source=$env:${INPUT_ENVIRONMENT_NAME};Remove-Item Env:${INPUT_ENVIRONMENT_NAME}`,
   "$data=[Convert]::FromBase64String($source)",
   `$entropy=[Text.Encoding]::UTF8.GetBytes('${ENTROPY}')`,
   "$plain=[Security.Cryptography.ProtectedData]::Unprotect($data,$entropy,[Security.Cryptography.DataProtectionScope]::CurrentUser)",
@@ -62,14 +63,13 @@ async function invoke(
 ): Promise<string> {
   const redactor = options.redactor ?? defaultSecretRedactor;
   redactor.register(input);
-  const environment = minimalProcessEnvironment({}, {
+  const environment = minimalProcessEnvironment({ [INPUT_ENVIRONMENT_NAME]: input }, {
     ...process.env,
     ...options.environment,
   });
   const result = await (options.runner ?? runSafeProcess)({
     command: command(options),
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-    input: `${input}\n`,
     environment,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     timeoutMs: 10_000,
