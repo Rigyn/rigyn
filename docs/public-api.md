@@ -37,7 +37,7 @@ Public subpaths have these stability classes:
 
 All four classes are covered by the compatibility rules below; “advanced” and “test” describe scope, not permission for silent breaking changes. No exported subpath is currently experimental. A future experimental entry point must say so in both its public declarations and documentation.
 
-The machine-readable source of this list is [`release/public-subpaths.json`](../release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
+The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/Rigyn/rigyn/blob/main/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
 
 Each JavaScript entry point is ESM-only and Node-only and has a matching TypeScript declaration entry. No entry point is browser-safe. Browser clients should use the local RPC process or a reviewed loopback extension bridge. A browser-safe protocol/types package is a conditional non-goal until a concrete client requires it; do not bundle credential or filesystem authority into browser code.
 

@@ -16,6 +16,7 @@ import {
 import {
   KeychainCredentialStore,
   PlatformKeychainAdapter,
+  probePlatformKeychain,
   type KeychainAdapter,
   type KeychainCommandRunner,
 } from "../../src/auth/keychain.js";
@@ -110,6 +111,57 @@ test("macOS keychain set keeps the secret out of argv", async () => {
   assert.doesNotMatch(JSON.stringify(calls[0]?.args), /keychain-secret/);
   assert.equal(calls[0]?.input, "keychain-secret\n");
   assert.equal(calls[0]?.command, "/usr/bin/security");
+});
+
+test("Linux keychain preserves the user session environment and treats a missing item as absent", async () => {
+  const calls: Parameters<KeychainCommandRunner>[0][] = [];
+  const runner: KeychainCommandRunner = async (options) => {
+    calls.push(options);
+    return { exitCode: 1, stdout: "", stderr: "" };
+  };
+  const keychain = new PlatformKeychainAdapter({
+    platform: "linux",
+    runner,
+    environment: {
+      HOME: "/home/example",
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+      XDG_RUNTIME_DIR: "/run/user/1000",
+      LD_PRELOAD: "/untrusted.so",
+    },
+  });
+  assert.equal(await keychain.get("rigyn", "missing"), undefined);
+  assert.equal(calls[0]?.environment?.DBUS_SESSION_BUS_ADDRESS, "unix:path=/run/user/1000/bus");
+  assert.equal(calls[0]?.environment?.XDG_RUNTIME_DIR, "/run/user/1000");
+  assert.equal(calls[0]?.environment?.LD_PRELOAD, undefined);
+
+  const unavailable = new PlatformKeychainAdapter({
+    platform: "linux",
+    runner: async () => ({ exitCode: 1, stdout: "", stderr: "Secret Service is unavailable" }),
+  });
+  await assert.rejects(unavailable.get("rigyn", "missing"), /Secret Service is unavailable/u);
+});
+
+test("platform keychain probing rejects an unavailable desktop service", async () => {
+  const unavailable: KeychainAdapter = {
+    async get() { throw new Error("Secret Service is unavailable"); },
+    async set() { throw new Error("unused"); },
+    async delete() { throw new Error("unused"); },
+  };
+  assert.equal(await probePlatformKeychain(unavailable), false);
+});
+
+test("Linux keychain delete is idempotent for a missing item but preserves service errors", async () => {
+  const missing = new PlatformKeychainAdapter({
+    platform: "linux",
+    runner: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+  });
+  await missing.delete("rigyn", "missing");
+
+  const unavailable = new PlatformKeychainAdapter({
+    platform: "linux",
+    runner: async () => ({ exitCode: 1, stdout: "", stderr: "Secret Service is unavailable" }),
+  });
+  await assert.rejects(unavailable.delete("rigyn", "missing"), /Secret Service is unavailable/u);
 });
 
 test("keychain credential store persists typed credentials", async () => {

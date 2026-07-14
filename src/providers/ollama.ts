@@ -71,7 +71,7 @@ export class OllamaAdapter implements ProviderAdapter {
     let requestId: string | undefined;
 
     try {
-      const headers = await this.#headers();
+      const headers = await this.#headers(signal);
       headers.set("content-type", "application/json");
       headers.set("accept", "application/x-ndjson");
       const response = await this.#fetch(`${this.#host}/api/chat`, {
@@ -177,7 +177,7 @@ export class OllamaAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const headers = await this.#headers();
+    const headers = await this.#headers(signal);
     headers.set("accept", "application/json");
     const response = await this.#fetch(`${this.#host}/api/tags`, { headers, signal, redirect: "error" });
     await assertResponseOk(response);
@@ -205,7 +205,7 @@ export class OllamaAdapter implements ProviderAdapter {
   ): Promise<ModelInfo | undefined> {
     let show: Record<string, unknown> | undefined;
     try {
-      const headers = await this.#headers();
+      const headers = await this.#headers(signal);
       headers.set("content-type", "application/json");
       const response = await this.#fetch(`${this.#host}/api/show`, {
         method: "POST",
@@ -237,9 +237,9 @@ export class OllamaAdapter implements ProviderAdapter {
     return info;
   }
 
-  async #headers(): Promise<Headers> {
+  async #headers(signal: AbortSignal): Promise<Headers> {
     const headers = new Headers(this.#headersInit);
-    const apiKey = await resolveToken(this.#apiKey);
+    const apiKey = await resolveToken(this.#apiKey, signal);
     if (apiKey !== undefined) headers.set("authorization", `Bearer ${apiKey}`);
     return headers;
   }

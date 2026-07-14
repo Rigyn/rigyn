@@ -8,6 +8,7 @@ import {
   lstatSync,
   openSync,
   realpathSync,
+  unlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import {
@@ -94,6 +95,55 @@ export class SessionIndexError extends Error {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "SessionIndexError";
     this.code = code;
+  }
+}
+
+export function discardInvalidSessionIndex(path: string, error: unknown): boolean {
+  if (!recoverableIndexOpenError(error)) return false;
+  const selected = validateAbsolutePath(path, "Session index path");
+  const directory = openSecureIndexDirectory(dirname(selected));
+  try {
+    const identity = secureIndexFile(selected, directory);
+    assertIndexGuards(selected, identity, directory);
+    for (const suffix of ["-journal", "-wal", "-shm"]) unlinkIfPresent(`${selected}${suffix}`);
+    assertIndexGuards(selected, identity, directory);
+    unlinkIfPresent(selected);
+    fsyncFileOrDirectory(directory.fd);
+    return true;
+  } catch (failure) {
+    if (failure instanceof SessionIndexError) throw failure;
+    throw new SessionIndexError("SESSION_INDEX_PATH", `Could not discard invalid session index ${selected}`, failure);
+  } finally {
+    closeSync(directory.fd);
+  }
+}
+
+function recoverableIndexOpenError(error: unknown): boolean {
+  if (!(error instanceof SessionIndexError)) return false;
+  if (error.code === "SESSION_INDEX_CORRUPT") return true;
+  if (error.code !== "SESSION_INDEX_SCHEMA") return false;
+  if (error.cause === undefined) return true;
+  const code = sqliteErrorCode(error.cause);
+  return code === 1 || code === 11 || code === 26;
+}
+
+function sqliteErrorCode(error: unknown): number | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const code = (current as { errcode?: unknown }).errcode;
+    if (typeof code === "number" && Number.isInteger(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+function unlinkIfPresent(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    if (errno(error) !== "ENOENT") throw error;
   }
 }
 

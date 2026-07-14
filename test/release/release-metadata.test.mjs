@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,7 +11,14 @@ import {
   checkReleaseMetadata,
   extractReleaseNotes,
 } from "../../scripts/check-release-metadata.mjs";
-import { managedCommand, posixLauncher, windowsLauncher } from "../../scripts/lifecycle-common.mjs";
+import {
+  lifecycleProcessTreeTerminationPlan,
+  managedCommand,
+  posixLauncher,
+  resolveNpmInvocation,
+  terminateLifecycleProcessTree,
+  windowsLauncher,
+} from "../../scripts/lifecycle-common.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -58,6 +65,124 @@ test("release note extraction rejects an undated or empty release", () => {
     () => extractReleaseNotes("## [0.1.0] - 2026-07-12\n", "0.1.0"),
     /must not be empty/u,
   );
+});
+
+test("Windows npm invocation resolves npm-cli beside Node without a command shell", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-windows-npm-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const execPath = join(root, "node.exe");
+  const npmCli = join(dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  await mkdir(dirname(npmCli), { recursive: true });
+  await writeFile(npmCli, "");
+
+  assert.deepEqual(
+    await resolveNpmInvocation(["install", "archive.tgz"], {
+      platform: "win32",
+      execPath,
+      environment: {},
+    }),
+    {
+      command: execPath,
+      args: [resolve(npmCli), "install", "archive.tgz"],
+    },
+  );
+});
+
+test("Windows lifecycle termination uses a bounded absolute taskkill tree command", () => {
+  assert.deepEqual(
+    lifecycleProcessTreeTerminationPlan(4321, "SIGTERM", {
+      platform: "win32",
+      environment: { SystemRoot: "C:\\Windows" },
+    }),
+    {
+      kind: "taskkill",
+      command: "C:\\Windows\\System32\\taskkill.exe",
+      args: ["/PID", "4321", "/T", "/F"],
+      fallbackPid: 4321,
+      fallbackSignal: "SIGTERM",
+    },
+  );
+
+  const calls = [];
+  assert.equal(terminateLifecycleProcessTree(4321, "SIGTERM", {
+    platform: "win32",
+    environment: { WINDIR: "D:\\Windows" },
+    spawnSync(command, args, options) {
+      calls.push([command, [...args], options]);
+      return { status: 0 };
+    },
+    kill() { assert.fail("direct fallback must not run after taskkill succeeds"); },
+  }), true);
+  assert.deepEqual(calls, [[
+    "D:\\Windows\\System32\\taskkill.exe",
+    ["/PID", "4321", "/T", "/F"],
+    { shell: false, stdio: "ignore", timeout: 2_000, windowsHide: true },
+  ]]);
+});
+
+test("Windows lifecycle termination falls back to the direct child after taskkill fails", () => {
+  const killed = [];
+  assert.equal(terminateLifecycleProcessTree(7654, "SIGINT", {
+    platform: "win32",
+    environment: { SystemRoot: "C:\\Windows" },
+    spawnSync() { return { status: 1 }; },
+    kill(pid, signal) { killed.push([pid, signal]); },
+  }), true);
+  assert.deepEqual(killed, [[7654, "SIGINT"]]);
+});
+
+test("Windows lifecycle termination kills a spawned parent and grandchild", {
+  skip: process.platform !== "win32",
+  timeout: 10_000,
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-lifecycle-tree-"));
+  const survived = join(root, "grandchild-survived");
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_500)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parentProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `const child = spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
+    `child.once("spawn", () => process.stdout.write("ready\\n"))`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parent = spawn(process.execPath, ["--eval", parentProgram], {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  context.after(async () => {
+    if (parent.pid !== undefined && parent.exitCode === null) {
+      terminateLifecycleProcessTree(parent.pid, "SIGKILL");
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  let stdout = "";
+  let stderr = "";
+  parent.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+  parent.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  await new Promise((resolveReady, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`lifecycle fixture did not become ready: ${stderr}`)), 5_000);
+    parent.stdout.on("data", () => {
+      if (!stdout.includes("ready\n")) return;
+      clearTimeout(timeout);
+      resolveReady();
+    });
+    parent.once("error", reject);
+    parent.once("close", (code) => reject(new Error(`lifecycle fixture exited before termination with ${code}: ${stderr}`)));
+  });
+  const closed = new Promise((resolveClose, reject) => {
+    const timeout = setTimeout(() => reject(new Error("lifecycle fixture did not terminate")), 5_000);
+    parent.once("close", (code) => {
+      clearTimeout(timeout);
+      resolveClose(code);
+    });
+  });
+  assert.equal(terminateLifecycleProcessTree(parent.pid, "SIGTERM"), true);
+  await closed;
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_750));
+  await assert.rejects(access(survived), { code: "ENOENT" });
 });
 
 test("release staging refuses a markerless output without deleting it", async (context) => {

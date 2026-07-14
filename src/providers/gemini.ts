@@ -64,7 +64,7 @@ interface GenerateContentTransport {
   id: "gemini" | "vertex";
   headers: HeadersInit | undefined;
   fetch: FetchLike;
-  authorize: (headers: Headers) => Promise<void>;
+  authorize: (headers: Headers, signal: AbortSignal) => Promise<void>;
   streamUrl: (model: string) => string;
   modelsUrl: string;
 }
@@ -94,7 +94,7 @@ class GenerateContentAdapter implements ProviderAdapter {
       const headers = new Headers(this.#transport.headers);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      await this.#transport.authorize(headers);
+      await this.#transport.authorize(headers, signal);
       const response = await this.#transport.fetch(this.#transport.streamUrl(request.model), {
         method: "POST",
         headers,
@@ -241,7 +241,7 @@ class GenerateContentAdapter implements ProviderAdapter {
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
     const headers = new Headers(this.#transport.headers);
     headers.set("accept", "application/json");
-    await this.#transport.authorize(headers);
+    await this.#transport.authorize(headers, signal);
     const entries: unknown[] = [];
     const seen = new Set<string>();
     let pageToken: string | undefined;
@@ -310,15 +310,15 @@ export class GeminiAdapter extends GenerateContentAdapter {
       id: "gemini",
       headers: config.headers,
       fetch: config.fetch ?? globalThis.fetch,
-      authorize: async (headers) => {
-        const accessToken = await resolveToken(config.accessToken);
+      authorize: async (headers, signal) => {
+        const accessToken = await resolveToken(config.accessToken, signal);
         if (accessToken !== undefined) {
           headers.set("authorization", `Bearer ${accessToken}`);
-          const userProject = await resolveToken(config.userProject);
+          const userProject = await resolveToken(config.userProject, signal);
           if (userProject !== undefined) headers.set("x-goog-user-project", userProject);
           return;
         }
-        const apiKey = await resolveToken(config.apiKey);
+        const apiKey = await resolveToken(config.apiKey, signal);
         if (apiKey !== undefined) headers.set("x-goog-api-key", apiKey);
       },
       streamUrl: (model) => `${baseUrl}/models/${encodeURIComponent(stripModelPrefix(model))}:streamGenerateContent?alt=sse`,
@@ -340,11 +340,11 @@ export class VertexAdapter extends GenerateContentAdapter {
       id: "vertex",
       headers: config.headers,
       fetch: config.fetch ?? globalThis.fetch,
-      authorize: async (headers) => {
-        const token = await resolveToken(config.accessToken);
+      authorize: async (headers, signal) => {
+        const token = await resolveToken(config.accessToken, signal);
         if (token !== undefined) {
           headers.set("authorization", `Bearer ${token}`);
-          const userProject = await resolveToken(config.userProject);
+          const userProject = await resolveToken(config.userProject, signal);
           if (userProject !== undefined) headers.set("x-goog-user-project", userProject);
         }
       },

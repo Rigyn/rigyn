@@ -19,7 +19,7 @@ import {
   loadRuntimeExtensions,
   LocalExtensionPackageManager,
 } from "../../src/extensions/index.js";
-import { packageProcessTerminationPlan } from "../../src/extensions/packages.js";
+import { packageCommandArgv, packageProcessTerminationPlan } from "../../src/extensions/packages.js";
 
 async function temporary(t: TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "harness-package-dependencies-"));
@@ -482,6 +482,24 @@ test("package command termination plans target process groups and Windows trees 
     pid: 1234,
     signal: "SIGKILL",
   });
+});
+
+test("configured Windows package commands reject batch wrappers and metacharacter injection", () => {
+  for (const command of [String.raw`C:\Program Files\nodejs\npm.CMD`, String.raw`C:\Tools\git.BAT`]) {
+    assert.throws(
+      () => packageCommandArgv(command, ["literal&whoami"], "win32", {}),
+      /batch command wrappers are unsupported/u,
+    );
+  }
+});
+
+test("configured package commands remain direct argv outside Windows", () => {
+  assert.deepEqual(packageCommandArgv(
+    "/opt/tools/npm.cmd",
+    ["install", "--ignore-scripts=true"],
+    "linux",
+    { ComSpec: "/should/not/run" },
+  ), ["/opt/tools/npm.cmd", "install", "--ignore-scripts=true"]);
 });
 
 test("a failed dependency update leaves the installed version active", async (t) => {

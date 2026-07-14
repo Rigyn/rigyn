@@ -31,7 +31,7 @@ export interface GitHubCopilotCredential {
 }
 
 export interface GitHubCopilotConfig {
-  credential: () => Promise<GitHubCopilotCredential>;
+  credential: (signal?: AbortSignal) => Promise<GitHubCopilotCredential>;
   fetch?: FetchLike;
 }
 
@@ -117,7 +117,7 @@ function mapEvent(event: AdapterEvent): AdapterEvent {
 
 export class GitHubCopilotAdapter implements ProviderAdapter {
   readonly id = "github-copilot" as const;
-  readonly #credential: () => Promise<GitHubCopilotCredential>;
+  readonly #credential: (signal?: AbortSignal) => Promise<GitHubCopilotCredential>;
   readonly #fetch: FetchLike;
   readonly #protocols = new Map<string, CopilotProtocol>();
 
@@ -135,7 +135,7 @@ export class GitHubCopilotAdapter implements ProviderAdapter {
       } catch {}
       protocol = this.#protocols.get(request.model) ?? protocolFor(request.model);
     }
-    const credential = await this.#credential();
+    const credential = await this.#credential(signal);
     const baseUrl = githubCopilotBaseUrl(credential.accessToken, credential.enterpriseHost);
     assertSecureEndpoint(baseUrl, "GitHub Copilot API base URL");
     const headers = requestHeaders(credential.accessToken, request);
@@ -168,7 +168,7 @@ export class GitHubCopilotAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const credential = await this.#credential();
+    const credential = await this.#credential(signal);
     const baseUrl = githubCopilotBaseUrl(credential.accessToken, credential.enterpriseHost);
     assertSecureEndpoint(baseUrl, "GitHub Copilot API base URL");
     const response = await this.#fetch(`${baseUrl}/models`, {

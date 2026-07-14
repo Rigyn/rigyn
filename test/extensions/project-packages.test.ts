@@ -21,6 +21,20 @@ async function fixture(context: TestContext): Promise<string> {
   return workspace;
 }
 
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
 async function writePackage(root: string, version: string, text: string): Promise<void> {
   await mkdir(join(root, "runtime"), { recursive: true });
   await writeFile(join(root, "runtime", "index.mjs"), `export default (api) => api.registerCommand({ name: "declared", execute: () => ${JSON.stringify(text)} });\n`);
@@ -178,6 +192,87 @@ test("concurrent reconcilers serialize and repair only from the immutable lock",
   assert.deepEqual(results.map((entry) => entry.packages[0]?.version), ["1.0.0", "1.0.0"]);
   await access(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "runtime", "index.mjs"));
   assert.equal((await first.check()).status, "ready");
+});
+
+test("aborting reconciliation terminates dependency commands and preserves active packages", { timeout: 10_000 }, async (context) => {
+  const workspace = await fixture(context);
+  const source = join(workspace, "package-source");
+  const block = join(workspace, "block-npm");
+  const started = join(workspace, "npm-started");
+  const survivor = join(workspace, "child-survived");
+  const fakeNpm = join(workspace, "fake-npm.mjs");
+  await mkdir(source);
+  await writePackage(source, "1.0.0", "first");
+  await writeFile(join(source, "package.json"), `${JSON.stringify({
+    name: "declared-package",
+    version: "1.0.0",
+    type: "module",
+    dependencies: { "fixture-dependency": "1.0.0" },
+  }, null, 2)}\n`);
+  await writeDeclaration(workspace, []);
+  await writeFile(fakeNpm, `
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+const [block, started, survivor] = process.argv.slice(2);
+let blocked = false;
+try { await access(block); blocked = true; } catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+if (blocked) {
+  await writeFile(started, "started");
+  spawn(process.execPath, ["-e", ${JSON.stringify("setTimeout(() => process.getBuiltinModule('node:fs').writeFileSync(process.argv[1], 'survived'), 500)")}, survivor], { stdio: "ignore" });
+  await new Promise(() => {});
+}
+const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
+for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
+  const root = join(process.cwd(), "node_modules", name);
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, "package.json"), JSON.stringify({ name, version, type: "module", exports: "./index.mjs" }));
+  await writeFile(join(root, "index.mjs"), "export const value = " + JSON.stringify(name + "@" + version) + ";\\n");
+}
+`);
+  const manager = new ProjectPackageManager({
+    workspace,
+    projectTrusted: true,
+    commands: { npm: { command: process.execPath, prefix: [fakeNpm, block, started, survivor] } },
+  });
+  await manager.update({ all: true });
+
+  const packageRoot = join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared");
+  const before = await Promise.all([
+    readFile(join(workspace, PROJECT_PACKAGE_LOCK)),
+    readFile(join(packageRoot, ".rigyn-package.json")),
+    readFile(join(packageRoot, "extension.json")),
+    readFile(join(packageRoot, "package.json")),
+    readFile(join(packageRoot, "runtime", "index.mjs")),
+    readFile(join(packageRoot, "node_modules", "fixture-dependency", "package.json")),
+    readFile(join(packageRoot, "node_modules", "fixture-dependency", "index.mjs")),
+  ]);
+  await mkdir(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "unexpected"));
+  await writeFile(block, "block");
+
+  const controller = new AbortController();
+  const reconciliation = manager.reconcile(controller.signal);
+  await waitForFile(started);
+  const abortedAt = Date.now();
+  controller.abort(new Error("cancel project package reconciliation"));
+  await assert.rejects(reconciliation, /cancel project package reconciliation/u);
+  assert.ok(Date.now() - abortedAt < 2_000, "reconciliation should reject promptly after cancellation");
+
+  const after = await Promise.all([
+    readFile(join(workspace, PROJECT_PACKAGE_LOCK)),
+    readFile(join(packageRoot, ".rigyn-package.json")),
+    readFile(join(packageRoot, "extension.json")),
+    readFile(join(packageRoot, "package.json")),
+    readFile(join(packageRoot, "runtime", "index.mjs")),
+    readFile(join(packageRoot, "node_modules", "fixture-dependency", "package.json")),
+    readFile(join(packageRoot, "node_modules", "fixture-dependency", "index.mjs")),
+  ]);
+  assert.deepEqual(after, before);
+  await assert.rejects(access(join(workspace, ".rigyn", ".packages-stage")), /ENOENT/u);
+  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 650));
+  await assert.rejects(access(survivor), /ENOENT/u);
 });
 
 test("declaration changes require intentional lock updates and partial updates cannot bless unrelated changes", async (context) => {

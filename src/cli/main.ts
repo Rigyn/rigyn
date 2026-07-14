@@ -116,6 +116,7 @@ import {
   resolveSessionReference,
 } from "./session-resolution.js";
 import {
+  discardInvalidSessionIndex,
   MAX_INDEX_WORKSPACES,
   WorkspaceSessionIndex,
   type IndexedSessionRecord,
@@ -1289,8 +1290,18 @@ async function pickIndexedThread(
   return resolveIndexedSessionReference(index, selected);
 }
 
-async function openSessionIndex(runtime: LoadedRuntime): Promise<WorkspaceSessionIndex> {
-  return await WorkspaceSessionIndex.open(join(runtime.paths.stateDirectory, "session-index.sqlite"));
+async function openSessionIndex(
+  runtime: LoadedRuntime,
+  warn?: (message: string) => void,
+): Promise<WorkspaceSessionIndex> {
+  const path = join(runtime.paths.stateDirectory, "session-index.sqlite");
+  try {
+    return await WorkspaceSessionIndex.open(path);
+  } catch (error) {
+    if (!discardInvalidSessionIndex(path, error)) throw error;
+    warn?.("Rebuilt the derived cross-workspace session index; saved session history was not changed.");
+    return await WorkspaceSessionIndex.open(path);
+  }
 }
 
 async function refreshSessionIndex(index: WorkspaceSessionIndex, runtime: LoadedRuntime): Promise<void> {
@@ -1304,7 +1315,7 @@ async function initializeSessionIndex(
 ): Promise<WorkspaceSessionIndex | undefined> {
   let index: WorkspaceSessionIndex | undefined;
   try {
-    index = await openSessionIndex(runtime);
+    index = await openSessionIndex(runtime, warn);
     const indexedWorkspaces = new Set(index.listWorkspaceRoots());
     for (const workspaceRoot of runtime.store.listDurableWorkspaceRoots(MAX_INDEX_WORKSPACES)) {
       if (workspaceRoot === runtime.workspace || indexedWorkspaces.has(workspaceRoot)) continue;
@@ -1555,6 +1566,7 @@ async function pickLoginProvider(
   runtime: LoadedRuntime,
   terminal: TerminalPrompter,
   path: LoginPath,
+  signal?: AbortSignal,
 ): Promise<ProviderId> {
   const choices = (await Promise.all(runtime.providers.list().map(async (adapter) => {
     const methods = (await runtime.auth.loginMethods(adapter.id)).filter((method) => authMethodLoginPath(method) === path);
@@ -1577,13 +1589,16 @@ async function pickLoginProvider(
       ? "No subscription login is registered. Provider extensions can add OAuth login methods."
       : "No API-key or provider-managed login is registered.");
   }
-  return terminal.choose(path === "subscription" ? "Select subscription provider" : "Select API-key provider", choices);
+  return terminal.choose(path === "subscription" ? "Select subscription provider" : "Select API-key provider", choices, signal);
 }
 
 async function pickModel(runtime: LoadedRuntime, provider: ProviderId, terminal: TerminalPrompter): Promise<string> {
   let models: ModelInfo[];
   try {
-    models = await runtime.providers.listModels(provider, AbortSignal.timeout(30_000), { refresh: true });
+    const signal = AbortSignal.timeout(30_000);
+    const refresh = await runtime.providers.refreshModels(provider, signal);
+    if (!refresh.ok) throw new Error(refresh.status.error?.message ?? "model discovery failed");
+    models = await runtime.providers.listModels(provider, signal, { verifiedOnly: true });
   } catch (error) {
     const message = `Could not load ${provider} models: ${error instanceof Error ? error.message : String(error)}`;
     if (terminal instanceof TuiController) terminal.notify(message, "warning");
@@ -1892,7 +1907,7 @@ async function chooseInteractiveLoginProfile(
   return { action: "authenticate", profile };
 }
 
-async function loginInteractively(
+export async function loginInteractively(
   runtime: LoadedRuntime,
   terminal: TuiController,
   requested?: string,
@@ -1905,8 +1920,8 @@ async function loginInteractively(
     path = await terminal.choose("Select authentication method", [
       { label: loginPathLabel("subscription"), value: "subscription" as const },
       { label: loginPathLabel("api_key"), value: "api_key" as const },
-    ]);
-    provider = await pickLoginProvider(runtime, terminal, path);
+    ], signal);
+    provider = await pickLoginProvider(runtime, terminal, path, signal);
   } else {
     provider = requested;
   }
@@ -1920,7 +1935,7 @@ async function loginInteractively(
     path = await terminal.choose(`Connect ${provider}`, availablePaths.map((candidate) => ({
       label: loginPathLabel(candidate),
       value: candidate,
-    })));
+    })), signal);
   }
   path ??= availablePaths[0];
   const methods = path === undefined
@@ -1933,7 +1948,7 @@ async function loginInteractively(
         label: entry.label,
         detail: entry.detail,
         value: entry,
-      })));
+      })), signal);
   if (method === undefined) throw new Error(`${provider} does not expose an interactive login method`);
   const binding = runtime.auth.binding(provider);
   if (method.kind === "local" || method.kind === "external") {
@@ -2035,7 +2050,7 @@ async function loginInteractively(
     await runtime.auth.storeCredential(provider, credential, storeOptions);
     return provider;
   }
-  const secret = await terminal.readSecret(`${provider} ${method.kind === "api_key" ? "API key" : "bearer token"}: `);
+  const secret = await terminal.readSecret(`${provider} ${method.kind === "api_key" ? "API key" : "bearer token"}: `, signal);
   if (secret === "") throw new Error("Credential is empty");
   defaultSecretRedactor.register(secret);
   await runtime.auth.storeCredential(provider, method.kind === "api_key"
@@ -2394,20 +2409,23 @@ async function chatCommandOperation(
     }).catch(() => undefined);
   };
 
-  const stop = (signal: NodeJS.Signals): void => {
-    catalogAbort.abort(new Error(`terminal interrupted by ${signal}`));
-    shellAbort?.abort(new Error(`shell shortcut interrupted by ${signal}`));
-    branchSummaryAbort?.abort(new Error(`branch summary interrupted by ${signal}`));
-    authAbort?.abort(new Error(`authorization interrupted by ${signal}`));
-    reloadAbort?.abort(new Error(`reload interrupted by ${signal}`));
-    activeRunAbort?.abort(new Error(`run interrupted by ${signal}`));
-    extensionActionAbort?.abort(new Error(`extension action interrupted by ${signal}`));
+  const shutdownInteractiveHost = (source: string, serviceReason: string): void => {
+    catalogAbort.abort(new Error(`terminal interrupted by ${source}`));
+    shellAbort?.abort(new Error(`shell shortcut interrupted by ${source}`));
+    branchSummaryAbort?.abort(new Error(`branch summary interrupted by ${source}`));
+    authAbort?.abort(new Error(`authorization interrupted by ${source}`));
+    reloadAbort?.abort(new Error(`reload interrupted by ${source}`));
+    activeRunAbort?.abort(new Error(`run interrupted by ${source}`));
+    extensionActionAbort?.abort(new Error(`extension action interrupted by ${source}`));
     if (active && runtime !== undefined && threadId !== "") {
       try {
-        runtime.service.cancel(threadId, `interrupted by ${signal}`);
+        runtime.service.cancel(threadId, serviceReason);
       } catch {}
     }
     terminal.close();
+  };
+  const stop = (signal: NodeJS.Signals): void => {
+    shutdownInteractiveHost(signal, `interrupted by ${signal}`);
   };
   const uninstallTermination = termination.onTerminate(stop);
 
@@ -2426,11 +2444,9 @@ async function chatCommandOperation(
       recover: !startupAllWorkspaces,
     });
     runtime.setExtensionShutdownHandler(async (request) => {
+      const reason = request.reason ?? `Shutdown requested by ${request.extensionId}`;
       setImmediate(() => {
-        if (active && threadId !== "") {
-          try { runtime?.service.cancel(threadId, request.reason ?? `Shutdown requested by ${request.extensionId}`); } catch {}
-        }
-        terminal.close();
+        shutdownInteractiveHost(`extension shutdown: ${reason}`, reason);
       });
       return {
         accepted: true,
@@ -2787,11 +2803,15 @@ async function chatCommandOperation(
         let defaultSelectionError: unknown;
         if (choice === undefined) {
           try {
-            const models = await runtime!.providers.listModels(
-              provider,
-              AbortSignal.any([catalogAbort.signal, runtime!.generationSignal, controller.signal, AbortSignal.timeout(30_000)]),
-              { refresh: true },
-            );
+            const signal = AbortSignal.any([
+              catalogAbort.signal,
+              runtime!.generationSignal,
+              controller.signal,
+              AbortSignal.timeout(30_000),
+            ]);
+            const refresh = await runtime!.providers.refreshModels(provider, signal);
+            if (!refresh.ok) throw new Error(refresh.status.error?.message ?? "model discovery failed");
+            const models = await runtime!.providers.listModels(provider, signal, { verifiedOnly: true });
             for (const model of models) modelCatalog.set(`${model.provider}\u0000${model.id}`, model);
             const configuredDefault = runtime!.config.defaultProvider === provider && runtime!.config.defaultModel !== undefined
               ? { provider, model: runtime!.config.defaultModel }
@@ -3314,7 +3334,9 @@ async function chatCommandOperation(
 
     const requireAllWorkspaceIndex = async (): Promise<WorkspaceSessionIndex> => {
       await sessionIndexTail;
-      if (sessionIndex === undefined) sessionIndex = await openSessionIndex(runtime!);
+      if (sessionIndex === undefined) {
+        sessionIndex = await openSessionIndex(runtime!, (message) => terminal.notify(message, "warning"));
+      }
       await refreshSessionIndex(sessionIndex, runtime!);
       return sessionIndex;
     };
@@ -4993,11 +5015,15 @@ async function listModelsFlagCommand(argumentsValue: ParsedArguments): Promise<v
         && state.error === undefined
       )) available.push(adapter.id);
     }
+    const offline = flagBoolean(argumentsValue, "offline");
     const catalogs = await Promise.all(available.map(async (provider) => {
       try {
-        return await runtime.providers.listModels(provider, AbortSignal.timeout(30_000), {
-          refresh: !flagBoolean(argumentsValue, "offline"),
-        });
+        const signal = AbortSignal.timeout(30_000);
+        if (!offline) {
+          const refresh = await runtime.providers.refreshModels(provider, signal);
+          if (!refresh.ok) return [];
+        }
+        return await runtime.providers.listModels(provider, signal, { verifiedOnly: !offline });
       } catch {
         return [];
       }

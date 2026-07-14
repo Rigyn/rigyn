@@ -3,13 +3,6 @@ export interface CommandPlatformOptions {
   environment?: NodeJS.ProcessEnv;
 }
 
-function environmentValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
-  const direct = environment[name];
-  if (direct !== undefined) return direct;
-  const normalized = name.toLowerCase();
-  return Object.entries(environment).find(([key, value]) => value !== undefined && key.toLowerCase() === normalized)?.[1];
-}
-
 function windowsBatchCommand(command: string): boolean {
   const normalized = command.toLowerCase();
   return normalized.endsWith(".cmd") || normalized.endsWith(".bat");
@@ -17,8 +10,8 @@ function windowsBatchCommand(command: string): boolean {
 
 /**
  * Produces an argv suitable for child_process.spawn without enabling a shell.
- * Windows batch files require cmd.exe, so they are passed to ComSpec as
- * individual arguments instead of interpolating a command string.
+ * Windows batch files are rejected because cmd.exe interprets metacharacters
+ * even when Node itself is spawned with shell:false.
  */
 export function normalizeCommandArgv(
   argv: readonly string[],
@@ -31,7 +24,5 @@ export function normalizeCommandArgv(
   if ((options.platform ?? process.platform) !== "win32" || !windowsBatchCommand(command)) {
     return [command, ...args];
   }
-  const environment = options.environment ?? process.env;
-  const comspec = environmentValue(environment, "ComSpec") || "cmd.exe";
-  return [comspec, "/d", "/s", "/v:off", "/c", command, ...args];
+  throw new Error("Windows batch command wrappers are unsupported; configure a native executable or invoke a script through its interpreter");
 }

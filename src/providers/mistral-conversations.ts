@@ -156,7 +156,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
       const url = append
         ? `${this.#baseUrl}/conversations/${encodeConversationId(previous.conversationId!)}`
         : `${this.#baseUrl}/conversations`;
-      const headers = await this.#headers();
+      const headers = await this.#headers(signal);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
       const response = await this.#fetch(url, {
@@ -323,7 +323,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const headers = await this.#headers();
+    const headers = await this.#headers(signal);
     headers.set("accept", "application/json");
     const response = await this.#fetch(`${this.#baseUrl}/models`, {
       method: "GET",
@@ -370,7 +370,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
 
   /** Deletes explicitly selected remote state; normal adapter shutdown intentionally preserves resumability. */
   async deleteConversation(conversationId: string, signal: AbortSignal): Promise<void> {
-    const headers = await this.#headers();
+    const headers = await this.#headers(signal);
     headers.set("accept", "application/json");
     const response = await this.#fetch(
       `${this.#baseUrl}/conversations/${encodeConversationId(conversationId)}`,
@@ -379,9 +379,9 @@ export class MistralConversationsAdapter implements ProviderAdapter {
     await assertResponseOk(response);
   }
 
-  async #headers(): Promise<Headers> {
+  async #headers(signal: AbortSignal): Promise<Headers> {
     const headers = new Headers(this.#headersInit);
-    const token = await resolveToken(this.#token);
+    const token = await resolveToken(this.#token, signal);
     if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
     return headers;
   }

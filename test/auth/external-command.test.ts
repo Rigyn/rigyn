@@ -63,11 +63,7 @@ test("external auth enforces timeout and output bounds", async () => {
   );
 });
 
-test("external auth timeout reaps the child process group before rejecting", async (context) => {
-  if (process.platform === "win32") {
-    context.skip("Windows process-tree termination uses platform process handles");
-    return;
-  }
+test("external auth cancellation reaps the child process tree before rejecting", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "harness-auth-reap-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const ready = join(directory, "ready");
@@ -79,17 +75,28 @@ test("external auth timeout reaps the child process group before rejecting", asy
     `setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},'bad'),1800)`,
   ].join(";");
   const parent = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{stdio:['ignore','inherit','inherit']});setTimeout(()=>{},10000)`;
-  const startedAt = Date.now();
-  await assert.rejects(
-    resolveExternalCommandCredential({
-      provider: "example",
-      argv: [process.execPath, "-e", parent],
-      timeoutMs: 500,
-    }),
-    /timed out/u,
-  );
-  await access(ready);
-  const remaining = 2_300 - (Date.now() - startedAt);
+  const controller = new AbortController();
+  const pending = resolveExternalCommandCredential({
+    provider: "example",
+    argv: [process.execPath, "-e", parent],
+    timeoutMs: 10_000,
+    signal: controller.signal,
+  });
+  const rejected = assert.rejects(pending, /cancel external credential command/u);
+  const readyDeadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      await access(ready);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || Date.now() >= readyDeadline) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  const readyAt = Date.now();
+  controller.abort(new Error("cancel external credential command"));
+  await rejected;
+  const remaining = 2_300 - (Date.now() - readyAt);
   if (remaining > 0) await new Promise<void>((resolve) => setTimeout(resolve, remaining));
   await assert.rejects(access(marker));
 });

@@ -28,12 +28,19 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Canonical bundled schema identifiers use stable Rigyn URNs rather than an unowned web domain.
 - Runtime snapshots, resource discovery, and child-run results now use bounded contracts across TUI, print, JSON, RPC, and embedding hosts; interactive extension UI is shared by TUI and negotiated RPC owners, while graceful shutdown is acknowledged by TUI, RPC, and embedding owners.
 - Release staging, dependency policy, packed-file verification, platform guidance, RPC documentation, troubleshooting, and compaction documentation now form one deterministic release gate.
+- Provider credential resolution, package reloads, extension-requested shutdown, login prompts, and lifecycle subprocesses now propagate cancellation through their active network, process, and UI work.
+- Model pickers and post-login defaults use successful live discovery as the available set, while retained or cached IDs remain usable internally without being presented as current entitlements.
+- Invalid derived cross-workspace session indexes rebuild from untouched durable session history; busy, unsafe, and source-database failures remain fail-closed.
+- The public RPC client can launch the packaged CLI through Node on every supported platform without depending on a shell or command shim.
+- Added a new-user getting-started path and documentation map covering workspaces, providers, sessions, tools, skills, extensions, packages, data ownership, updates, and removal.
 
 ### Security
 
 - Runtime extensions now authenticate provider requests through an exact-origin host broker. The brokered auth API never returns provider credentials, authorization headers, cloud signing keys, or reusable secret handles; installed extension code remains trusted same-process code as documented in the threat model.
 - External execution rejects missing, malformed, oversized, timed-out, or unauthorized backend results without retrying the tool locally.
 - Project package fetch and activation require trust, exact immutable versions or revisions, integrity verification, disabled lifecycle scripts, atomic reconciliation, and rollback.
+- Linux keychain selection now requires a functional Secret Service probe and preserves only the desktop-session environment needed by `secret-tool`; unavailable services fall back to the encrypted local store.
+- Windows batch wrappers are rejected at structured command boundaries instead of passing untrusted arguments through `cmd.exe` metacharacter parsing.
 
 ### Breaking
 

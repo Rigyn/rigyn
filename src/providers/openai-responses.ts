@@ -75,7 +75,7 @@ export interface ResponsesTransportConfig {
   baseUrl: string;
   headers: HeadersInit | undefined;
   fetch: FetchLike;
-  authorize: (headers: Headers) => Promise<void>;
+  authorize: (headers: Headers, signal: AbortSignal) => Promise<void>;
   prepareHeaders?: (headers: Headers, request: ProviderRequest) => void | Promise<void>;
   buildBody?: (request: ProviderRequest) => Record<string, unknown>;
   streamEvents?: (input: ResponsesEventStreamInput) => AsyncIterable<ResponsesWireEvent>;
@@ -131,7 +131,7 @@ export class ResponsesAdapter implements ProviderAdapter {
       const headers = new Headers(this.#transport.headers);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      await this.#transport.authorize(headers);
+      await this.#transport.authorize(headers, signal);
       await this.#transport.prepareHeaders?.(headers, request);
 
       const url = `${this.#transport.baseUrl}/responses`;
@@ -348,7 +348,7 @@ export class ResponsesAdapter implements ProviderAdapter {
     if (this.#transport.listModels !== undefined) return this.#transport.listModels(signal);
     const headers = new Headers(this.#transport.headers);
     headers.set("accept", "application/json");
-    await this.#transport.authorize(headers);
+    await this.#transport.authorize(headers, signal);
     const response = await this.#transport.fetch(`${this.#transport.baseUrl}/models`, { headers, signal, redirect: "error" });
     await assertResponseOk(response);
     const body = await readJsonResponse(response);
@@ -422,8 +422,8 @@ export class OpenAIResponsesAdapter extends ResponsesAdapter {
       baseUrl,
       headers: config.headers,
       fetch: fetchImplementation,
-      authorize: async (headers) => {
-        const token = (await resolveToken(config.accessToken)) ?? (await resolveToken(config.apiKey));
+      authorize: async (headers, signal) => {
+        const token = (await resolveToken(config.accessToken, signal)) ?? (await resolveToken(config.apiKey, signal));
         if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
         if (config.organization !== undefined) headers.set("openai-organization", config.organization);
         if (config.project !== undefined) headers.set("openai-project", config.project);
@@ -451,13 +451,13 @@ export class AzureOpenAIResponsesAdapter extends ResponsesAdapter {
       baseUrl,
       headers: config.headers,
       fetch: fetchImplementation,
-      authorize: async (headers) => {
-        const accessToken = await resolveToken(config.accessToken);
+      authorize: async (headers, signal) => {
+        const accessToken = await resolveToken(config.accessToken, signal);
         if (accessToken !== undefined) {
           headers.set("authorization", `Bearer ${accessToken}`);
           return;
         }
-        const apiKey = await resolveToken(config.apiKey);
+        const apiKey = await resolveToken(config.apiKey, signal);
         if (apiKey !== undefined) headers.set("api-key", apiKey);
       },
       stateful: config.store ?? false,

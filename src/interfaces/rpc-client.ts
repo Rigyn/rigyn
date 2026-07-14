@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import type { EventEnvelope } from "../core/events.js";
 import { decodeRpcLines, RpcWriter, type RpcId } from "./rpc.js";
@@ -425,7 +426,7 @@ export interface SpawnedRpcClient {
   child: ChildProcess;
 }
 
-/** Spawns and owns a newline-delimited RPC subprocess. Use args `["rpc"]` for the Rigyn CLI. */
+/** Spawns and owns a newline-delimited RPC subprocess from an explicit executable and argument vector. */
 export function spawnRpcClient(options: SpawnRpcClientOptions): SpawnedRpcClient {
   if (options.command === "" || options.command.includes("\0") || Buffer.byteLength(options.command, "utf8") > 16 * 1024) {
     throw new TypeError("RPC child command is invalid");
@@ -482,4 +483,18 @@ export function spawnRpcClient(options: SpawnRpcClientOptions): SpawnedRpcClient
     void client.close(`RPC child process failed: ${cause.message}`);
   });
   return { client, child };
+}
+
+export interface SpawnRigynRpcClientOptions extends Omit<SpawnRpcClientOptions, "command" | "shell"> {}
+
+/** Spawns this package's Rigyn RPC CLI through Node without relying on a shell or platform command shim. */
+export function spawnRigynRpcClient(options: SpawnRigynRpcClientOptions = {}): SpawnedRpcClient {
+  const { args = [], ...spawnOptions } = options;
+  const entry = fileURLToPath(new URL("../../dist/bin/rigyn.js", import.meta.url));
+  return spawnRpcClient({
+    ...spawnOptions,
+    command: process.execPath,
+    args: [entry, "rpc", ...args],
+    shell: false,
+  });
 }

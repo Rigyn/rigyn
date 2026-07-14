@@ -70,6 +70,23 @@ test("TTY secret input preserves UTF-8 and backspaces one complete character", a
   assert.equal(await secret, "sëcret");
 });
 
+test("TTY secret input cancels on Escape or Ctrl-C without revealing partial input", async () => {
+  for (const key of [27, 3]) {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean; setRawMode(mode: boolean): void };
+    input.isTTY = true;
+    let raw = false;
+    input.setRawMode = (mode) => { raw = mode; };
+    const output = new PassThrough();
+    const rendered: Buffer[] = [];
+    output.on("data", (chunk: Buffer) => rendered.push(Buffer.from(chunk)));
+    const secret = readSecretFrom(input, output, "Secret: ");
+    input.write(Buffer.concat([Buffer.from("partial-secret"), Buffer.from([key])]));
+    await assert.rejects(secret, /Secret input cancelled/u);
+    assert.equal(raw, false);
+    assert.doesNotMatch(Buffer.concat(rendered).toString("utf8"), /partial-secret/u);
+  }
+});
+
 test("terminal secret input is hidden and ordinary questions resume in a PTY", {
   skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
 }, async () => {

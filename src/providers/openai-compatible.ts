@@ -224,7 +224,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
     let requestId: string | undefined;
 
     try {
-      const headers = await this.#headers();
+      const headers = await this.#headers(signal);
       const generatedCacheKey = this.#config.mistral && this.#config.mistralPromptCache
         ? mistralCacheKey(request.sessionId)
         : undefined;
@@ -439,7 +439,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const headers = await this.#headers();
+    const headers = await this.#headers(signal);
     headers.set("accept", "application/json");
     const response = await this.#config.fetch(`${this.#config.baseUrl}/models`, { headers, signal, redirect: "error" });
     await assertResponseOk(response);
@@ -508,9 +508,9 @@ class ChatCompletionsAdapter implements ProviderAdapter {
     });
   }
 
-  async #headers(): Promise<Headers> {
+  async #headers(signal: AbortSignal): Promise<Headers> {
     const headers = new Headers(this.#config.headers);
-    const token = await resolveToken(this.#config.token);
+    const token = await resolveToken(this.#config.token, signal);
     if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
     return headers;
   }

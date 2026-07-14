@@ -269,7 +269,7 @@ export async function readSecretFrom(
     };
     const onData = (chunk: Buffer): void => {
       for (const byte of chunk) {
-        if (byte === 3) {
+        if (byte === 3 || byte === 27) {
           cleanup();
           reject(new Error("Secret input cancelled"));
           return;

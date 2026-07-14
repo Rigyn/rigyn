@@ -2,7 +2,7 @@ import { isJsonValue, type JsonValue } from "../core/json.js";
 import type { AdapterError, ProviderId } from "../core/types.js";
 
 export type FetchLike = typeof fetch;
-export type TokenSource = string | (() => string | undefined | Promise<string | undefined>);
+export type TokenSource = string | ((signal?: AbortSignal) => string | undefined | Promise<string | undefined>);
 
 export const MAX_PROVIDER_ERROR_BODY_BYTES = 64 * 1024;
 export const MAX_PERSISTED_PROVIDER_ERROR_BYTES = 16 * 1024;
@@ -61,9 +61,9 @@ export class InvalidProviderRequestError extends Error {
   }
 }
 
-export async function resolveToken(source: TokenSource | undefined): Promise<string | undefined> {
+export async function resolveToken(source: TokenSource | undefined, signal?: AbortSignal): Promise<string | undefined> {
   if (source === undefined) return undefined;
-  return typeof source === "function" ? await source() : source;
+  return typeof source === "function" ? await source(signal) : source;
 }
 
 export async function assertResponseOk(response: Response): Promise<void> {

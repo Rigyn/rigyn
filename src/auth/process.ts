@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { trackActiveProcessGroup } from "../process/active-groups.js";
+import { terminateProcessTree } from "../process/process-tree.js";
 import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
 
 const OUTPUT_DRAIN_IDLE_MS = 250;
@@ -123,8 +124,12 @@ export async function runSafeProcess(options: SafeProcessOptions): Promise<SafeP
     };
     const signalProcess = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return;
+      if (process.platform === "win32") {
+        terminateProcessTree(child.pid, signal);
+        return;
+      }
       try {
-        process.kill(process.platform === "win32" ? child.pid : -child.pid, signal);
+        process.kill(-child.pid, signal);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }

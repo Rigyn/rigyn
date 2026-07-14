@@ -27,7 +27,7 @@ The repository examples below are protocol references, not preinstalled optional
 | [Reload safety](../examples/reload-safety/README.md) | Candidate-first repeated activation, rollback probe, and disposal | None |
 | [Custom overlay](../examples/custom-overlay.mjs) | Focused structural TUI component | None |
 
-Install a local example from its own directory, inspect it, and remove it when finished. This form works in both a source checkout and the bundled examples beside an installed harness:
+Install a local example from its own directory, inspect it, and remove it when finished. Examples live under `examples/` in a source checkout and under `~/.rigyn/app/node_modules/rigyn/examples/` in the default self-contained install; replace `~/.rigyn` with a custom `RIGYN_INSTALL_DIR`. This form works from either location:
 
 ```sh
 rigyn install .
@@ -169,6 +169,8 @@ Set package-manager wrappers as argv arrays in configuration. No shell parses th
   "gitCommand": ["/usr/bin/git"]
 }
 ```
+
+On Windows, use a native executable or invoke a JavaScript wrapper through `node.exe`; `.cmd` and `.bat` package-manager wrappers are rejected rather than passed through `cmd.exe`.
 
 Exact npm versions and full Git commit IDs are immutable pins. `update --all` reports and skips them; provide a new source to `update PACKAGE_ID SOURCE` when intentionally changing a pin. Moving npm tags/ranges, Git branches/tags, and local sources remain updateable.
 

@@ -1324,6 +1324,7 @@ export class ProviderRegistry {
       const fetchedAt = this.#now();
       const fetchedAtIso = new Date(fetchedAt).toISOString();
       let models = normalizeModels(values, provider, fetchedAtIso, this.#maxModelsPerProvider, true);
+      const liveIds = new Set(models.map((model) => model.id));
       const previous = this.#catalogs.get(provider);
       const retained = this.#retained.get(provider);
       if (previous !== undefined && retained !== undefined) {
@@ -1333,7 +1334,6 @@ export class ProviderRegistry {
         }
         models.sort((left, right) => left.id.localeCompare(right.id));
       }
-      const liveIds = new Set(models.map((model) => model.id));
       const configuredAdditions = [...(this.#configuredModels.get(provider)?.keys() ?? [])]
         .filter((id) => !liveIds.has(id)).length;
       if (models.length + configuredAdditions > this.#maxModelsPerProvider) {

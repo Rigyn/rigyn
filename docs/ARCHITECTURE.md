@@ -116,4 +116,4 @@ The package is a Node.js 24.15+/26+ local-runtime library. None of its entry poi
 
 The test suite combines focused unit tests with SQLite crash recovery, provider wire fixtures, extension reload and package transactions, TUI component tests, PTY terminal scenarios, public API compilation, built-distribution execution, and an isolated packed-artifact install. Release checks run against built JavaScript rather than only TypeScript source.
 
-The deterministic [offline outcome benchmark](../benchmarks/README.md) complements correctness tests by exercising real service, tool, compaction, and recovery paths while reporting completion, pass@1, attempts, retries, normalized usage/cost, and safety signals in a versioned machine-readable format.
+The deterministic [offline outcome benchmark](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md) complements correctness tests by exercising real service, tool, compaction, and recovery paths while reporting completion, pass@1, attempts, retries, normalized usage/cost, and safety signals in a versioned machine-readable format.

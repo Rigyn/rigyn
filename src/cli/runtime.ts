@@ -12,6 +12,7 @@ import {
   ExplicitCredentialSource,
   KeychainCredentialStore,
   PlatformKeychainAdapter,
+  probePlatformKeychain,
   ProfiledRefreshingStoredCredentialSource,
   ProviderAuthRegistry,
   providerDisplayName,
@@ -174,7 +175,7 @@ function credentialKey(value: string): Buffer {
   return decoded;
 }
 
-async function platformKeychainAvailable(): Promise<boolean> {
+async function platformKeychainAvailable(environment: NodeJS.ProcessEnv): Promise<boolean> {
   const command = process.platform === "darwin"
     ? "/usr/bin/security"
     : process.platform === "linux"
@@ -183,7 +184,7 @@ async function platformKeychainAvailable(): Promise<boolean> {
   if (command === undefined) return false;
   try {
     await access(command, constants.X_OK);
-    return true;
+    return await probePlatformKeychain(new PlatformKeychainAdapter({ environment }));
   } catch {
     return false;
   }
@@ -321,8 +322,8 @@ export async function createCredentialStore(
   if (key !== undefined && key !== "") return new EncryptedFileCredentialStore({ path: paths.credentialStore, key: credentialKey(key) });
   const local = await readLocalCredentialKey(paths.credentialKey, environment);
   if (local !== undefined) return new EncryptedFileCredentialStore({ path: paths.credentialStore, key: local });
-  if (options.allowPlatformKeychain !== false && await platformKeychainAvailable()) {
-    return new KeychainCredentialStore({ adapter: new PlatformKeychainAdapter(), service: "rigyn" });
+  if (options.allowPlatformKeychain !== false && await platformKeychainAvailable(environment)) {
+    return new KeychainCredentialStore({ adapter: new PlatformKeychainAdapter({ environment }), service: "rigyn" });
   }
   if (options.createLocalKey === true) {
     return new LazyEncryptedFileCredentialStore(paths, environment, true);
@@ -741,7 +742,10 @@ async function loadResourceGeneration(
       const selected = !isAbsolute(source) && !/^(?:npm|git|https|ssh):/u.test(source)
         ? resolve(workspace, source)
         : source;
-      const installed = await manager.install(selected, "user", { allowScripts: options.allowPackageScripts === true });
+      const installed = await manager.install(selected, "user", {
+        allowScripts: options.allowPackageScripts === true,
+        ...(signal === undefined ? {} : { signal }),
+      });
       installedPackages.push({ ...installed, scope: "invocation" });
     }
   }

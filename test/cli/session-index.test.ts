@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
+  discardInvalidSessionIndex,
   SessionIndexError,
   WorkspaceSessionIndex,
 } from "../../src/cli/session-index.js";
@@ -387,10 +388,17 @@ test("session index rejects symlinks, foreign schemas, corrupt rows, and oversiz
     CREATE TABLE sessions(foo TEXT) STRICT;
   `);
   foreign.close();
-  await assert.rejects(
-    WorkspaceSessionIndex.open(foreignPath),
-    (error: unknown) => error instanceof SessionIndexError && error.code === "SESSION_INDEX_SCHEMA",
-  );
+  let foreignError: unknown;
+  try {
+    await WorkspaceSessionIndex.open(foreignPath);
+    assert.fail("foreign session index unexpectedly opened");
+  } catch (error) {
+    foreignError = error;
+  }
+  assert.ok(foreignError instanceof SessionIndexError && foreignError.code === "SESSION_INDEX_SCHEMA");
+  assert.equal(discardInvalidSessionIndex(foreignPath, foreignError), true);
+  const rebuiltForeign = await WorkspaceSessionIndex.open(foreignPath);
+  rebuiltForeign.close();
 
   const indexPath = join(root, "valid.sqlite");
   const index = await WorkspaceSessionIndex.open(indexPath);
@@ -507,10 +515,15 @@ test("session index honors a bounded SQLite lock timeout", async (t) => {
   blocker.exec("BEGIN EXCLUSIVE");
   const started = performance.now();
   try {
-    await assert.rejects(
-      WorkspaceSessionIndex.open(indexPath, { busyTimeoutMs: 20 }),
-      (error: unknown) => error instanceof SessionIndexError && error.code === "SESSION_INDEX_SCHEMA",
-    );
+    let busyError: unknown;
+    try {
+      await WorkspaceSessionIndex.open(indexPath, { busyTimeoutMs: 20 });
+      assert.fail("locked session index unexpectedly opened");
+    } catch (error) {
+      busyError = error;
+    }
+    assert.ok(busyError instanceof SessionIndexError && busyError.code === "SESSION_INDEX_SCHEMA");
+    assert.equal(discardInvalidSessionIndex(indexPath, busyError), false);
     assert.ok(performance.now() - started < 1_000, "opening a locked index must honor the configured timeout");
   } finally {
     blocker.exec("ROLLBACK");

@@ -163,6 +163,10 @@ test("selected exact IDs survive entitlement refresh while unselected stale entr
     (await registry.listModels(provider.id, new AbortController().signal)).map((entry) => entry.id),
     ["new", "selected"],
   );
+  assert.deepEqual(
+    (await registry.listModels(provider.id, new AbortController().signal, { verifiedOnly: true })).map((entry) => entry.id),
+    ["new"],
+  );
   assert.equal(registry.releaseModel(provider.id, "selected"), true);
   registry.invalidateModels(provider.id);
   await registry.refreshModels(provider.id, new AbortController().signal);

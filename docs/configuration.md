@@ -72,7 +72,7 @@ Object keys merge recursively. Later scalar and array values replace earlier val
 | `oauthRegistrations` | object | `{}` | Custom PKCE or device OAuth clients. |
 | `httpTransport` | object | `{}` | Proxy and network timeout controls. |
 
-Package-manager command values are argv arrays, not shell command strings. For example, `"npmCommand": ["mise", "exec", "node@24", "--", "npm"]` selects a version-manager wrapper without enabling shell interpolation. Package installation still adds bounded arguments and disables lifecycle scripts by default; `--allow-scripts` is an explicit, per-transaction exception for reviewed production dependencies.
+Package-manager command values are argv arrays, not shell command strings. For example, `"npmCommand": ["mise", "exec", "node@24", "--", "npm"]` selects a version-manager wrapper without enabling shell interpolation. On Windows, configure a native executable or an interpreter plus script path; `.cmd` and `.bat` wrappers are rejected because they require shell parsing. Package installation still adds bounded arguments and disables lifecycle scripts by default; `--allow-scripts` is an explicit, per-transaction exception for reviewed production dependencies.
 
 ## External tool execution boundary
 

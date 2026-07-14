@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import type { EventEnvelope } from "../../src/core/events.js";
 import {
   RpcClient,
   RpcClientClosedError,
   RpcRemoteError,
+  spawnRigynRpcClient,
   spawnRpcClient,
 } from "../../src/interfaces/rpc-client.js";
 import { decodeRpcLines, type RpcRequest } from "../../src/interfaces/rpc.js";
@@ -195,6 +200,35 @@ test("spawned RPC client owns a stdio child and closes it deterministically", as
     await new Promise<void>((resolve) => spawned.child.once("exit", () => resolve()));
   }
   assert.ok(spawned.child.exitCode !== null || spawned.child.signalCode !== null);
+});
+
+test("Rigyn RPC client resolves the packaged CLI and bypasses platform command shims", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-rpc-client-"));
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    XDG_CONFIG_HOME: join(root, "config"),
+    XDG_STATE_HOME: join(root, "state"),
+  };
+  delete environment.RIGYN_RECURSION_DEPTH;
+  const spawned = spawnRigynRpcClient({
+    args: ["--workspace", root],
+    env: environment,
+    stderr: "pipe",
+    killTimeoutMs: 2_000,
+  });
+  t.after(async () => {
+    await spawned.client.close("test cleanup");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const entry = fileURLToPath(new URL("../../dist/bin/rigyn.js", import.meta.url));
+  assert.equal(spawned.child.spawnfile, process.execPath);
+  assert.deepEqual(spawned.child.spawnargs.slice(1), [entry, "rpc", "--workspace", root]);
+  assert.equal((await spawned.client.request("health")).status, "ok");
+  await spawned.client.request("shutdown");
+  await spawned.client.close("test complete");
 });
 
 test("spawned RPC client rejects shell and hostile argv transport options", () => {

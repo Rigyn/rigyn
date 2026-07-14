@@ -2,7 +2,7 @@
 
 Rigyn speaks provider protocols directly and normalizes their streaming events, tool calls, reasoning, usage, cache accounting, errors, and continuation state into one agent contract.
 
-## Built-in providers
+## Provider adapters
 
 | Provider ID | Protocol | Authentication choices |
 | --- | --- | --- |
@@ -24,6 +24,20 @@ Rigyn speaks provider protocols directly and normalizes their streaming events, 
 | `minimax` | MiniMax global OpenAI-compatible API | `MINIMAX_API_KEY` |
 | `minimax-cn` | MiniMax China OpenAI-compatible API | `MINIMAX_CN_API_KEY` |
 
+All of these protocols are implemented in Rigyn, but not every adapter is preconfigured. `vertex` needs a Google Cloud project, `azure-openai` needs the resource endpoint, and `bedrock` needs a region. Add them to global configuration before expecting them in `/login` or `/model`:
+
+```jsonc
+{
+  "providers": {
+    "vertex": { "kind": "vertex", "project": "YOUR_PROJECT", "location": "us-central1" },
+    "azure-openai": { "kind": "azure-openai", "endpoint": "https://YOUR_RESOURCE.openai.azure.com" },
+    "bedrock": { "kind": "bedrock", "region": "us-east-1" }
+  }
+}
+```
+
+Bedrock is also configured automatically when `AWS_REGION` or `AWS_DEFAULT_REGION` is present. An API key or ambient cloud identity does not by itself supply the missing Azure endpoint or Vertex project.
+
 The `openai-codex`, Claude Pro/Max OAuth, and `github-copilot` paths are compatibility transports for provider subscription services, not provider-endorsed Rigyn integrations. Their client registrations, endpoints, eligibility rules, and availability may change or be restricted by the provider. Users are responsible for complying with the applicable provider terms; use the documented API-key or cloud-provider path when a stable public integration is required.
 
 OpenAI-compatible presets are also built in for `groq`, `together`, `deepseek`, `cerebras`, `xai`, `fireworks`, and `huggingface`. Each preset has a tested base URL, credential mapping, and compatibility profile. Override a preset in `providers` only when you intentionally need a different endpoint.
@@ -36,7 +50,7 @@ The Vercel preset filters its live `/models` result to language models, so image
 
 ## Model selection
 
-After authentication, the provider's live model catalog is refreshed and cached. When discovery succeeds, `/model` and `Ctrl+L` show only IDs returned by that provider; configured and maintained fallback IDs cannot leak into the verified list. If discovery is unavailable, usable fallback rows are explicitly labeled `unverified`. A saved model that is no longer returned is omitted rather than silently presented as available.
+After authentication, the provider's live model catalog is refreshed and cached. `/model`, `Ctrl+L`, and the normal `--list-models` view show only IDs verified by a successful live discovery; configured, maintained, cached, and stale rows do not leak into that list. `rigyn --offline --list-models` can inspect configured or cached fallback metadata, but that output is not proof that a model is currently available. A saved model that is no longer returned is omitted rather than silently presented as available.
 
 References may be exact or fuzzy:
 
@@ -46,7 +60,7 @@ anthropic/MODEL_ID:high
 MODEL_ID
 ```
 
-The thinking suffix is validated against model metadata. `--list-models [TEXT]` prints the same connected catalog non-interactively. `/scoped-models` controls the smaller list used by model-cycling shortcuts.
+The thinking suffix is validated against model metadata. For a private deployment or provider without a listing endpoint, add an exact model entry in configuration, then type `/model PROVIDER/MODEL` or pass `--model PROVIDER/MODEL`; configured-only rows intentionally do not populate the live picker. `--list-models [TEXT]` prints the connected catalog non-interactively. `/scoped-models` controls the smaller list used by model-cycling shortcuts.
 
 ## Credential precedence and storage
 
@@ -58,7 +72,9 @@ For each credential ID, resolution order is:
 4. the provider's environment variable;
 5. an ambient cloud identity where supported.
 
-Stored credentials use the platform keychain when available. The fallback file store encrypts values with a local key, uses private file permissions, and never stores the credential kind or secret in plaintext. Secrets are registered with the output redactor before use.
+Self-contained installs use an installation-local encrypted credential store so update and uninstall own one complete state root. Its key is a private `credentials.key` file on Linux and macOS and a DPAPI-protected envelope on Windows. A source or portable run with no existing local key functionally probes the current user's macOS Keychain or Linux Secret Service; if that service cannot be used, interactive startup creates the private encrypted file store on the first write. Merely finding `secret-tool` is not treated as a working Secret Service.
+
+`RIGYN_CREDENTIAL_KEY` can supply exactly 32 bytes encoded as hexadecimal or unpadded base64url for a deliberately portable or headless source runtime. Keep it out of shell history, logs, project configuration, and support bundles. Stored files use private permissions and never contain the credential kind or secret in plaintext. Secrets are registered with the output redactor before use.
 
 Multiple profiles can coexist for the same provider. When profiles already exist, `/login` can select a saved profile, authenticate again into one named profile, or create another without destroying unrelated profiles. `/logout` removes only the active profile; a later `/login` can select any remaining profile.
 

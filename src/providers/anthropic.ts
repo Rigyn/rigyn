@@ -46,7 +46,7 @@ import {
 export interface AnthropicConfig {
   apiKey?: TokenSource;
   accessToken?: TokenSource;
-  oauth?: () => boolean | Promise<boolean>;
+  oauth?: (signal?: AbortSignal) => boolean | Promise<boolean>;
   beta?: string[];
   baseUrl?: string;
   version?: string;
@@ -189,7 +189,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const compatibility = this.#modelCompatibility(request.model);
       const interleavedBeta = shouldRequestInterleavedThinkingBeta(request, compatibility);
-      const auth = await this.#headers(interleavedBeta ? [INTERLEAVED_THINKING_BETA] : []);
+      const auth = await this.#headers(signal, interleavedBeta ? [INTERLEAVED_THINKING_BETA] : []);
       const headers = auth.headers;
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
@@ -438,7 +438,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
-    const { headers } = await this.#headers();
+    const { headers } = await this.#headers(signal);
     headers.set("accept", "application/json");
     const entries: unknown[] = [];
     const seen = new Set<string>();
@@ -509,12 +509,12 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
   }
 
-  async #headers(additionalBeta: readonly string[] = []): Promise<{ headers: Headers; oauth: boolean }> {
+  async #headers(signal: AbortSignal, additionalBeta: readonly string[] = []): Promise<{ headers: Headers; oauth: boolean }> {
     const headers = new Headers(this.#config.headers);
     headers.set("anthropic-version", this.#config.version);
-    const accessToken = await resolveToken(this.#config.accessToken);
+    const accessToken = await resolveToken(this.#config.accessToken, signal);
     if (accessToken !== undefined) {
-      const oauth = await this.#config.oauth?.() ?? false;
+      const oauth = await this.#config.oauth?.(signal) ?? false;
       const beta = new Set([
         ...(oauth ? ["claude-code-20250219", "oauth-2025-04-20"] : []),
         ...(this.#config.beta ?? []),
@@ -531,7 +531,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
     const beta = new Set([...(this.#config.beta ?? []), ...additionalBeta]);
     if (beta.size > 0) headers.set("anthropic-beta", [...beta].join(","));
-    const apiKey = await resolveToken(this.#config.apiKey);
+    const apiKey = await resolveToken(this.#config.apiKey, signal);
     if (apiKey !== undefined) headers.set("x-api-key", apiKey);
     return { headers, oauth: false };
   }

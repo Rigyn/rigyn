@@ -22,6 +22,7 @@ import { minimatch } from "minimatch";
 import { valid as validSemver } from "semver";
 
 import { trackActiveProcessGroup } from "../process/active-groups.js";
+import { normalizeCommandArgv } from "../process/command.js";
 import { sha256 } from "../tools/hash.js";
 import { parseThemeDefinition } from "../tui/theme.js";
 import { discoverExtensions } from "./loader.js";
@@ -77,6 +78,7 @@ export interface ExtensionPackageCommands {
 
 export interface ExtensionPackageTransactionOptions {
   allowScripts?: boolean;
+  signal?: AbortSignal;
 }
 
 interface ExtensionPackageProvenanceBase {
@@ -834,9 +836,18 @@ function stopProcess(child: ChildProcess, signal: NodeJS.Signals): void {
 async function runBoundedCommand(
   command: string,
   args: readonly string[],
-  options: { cwd: string; environment: NodeJS.ProcessEnv; timeoutMs: number; maxOutputBytes: number; label: string },
+  options: {
+    cwd: string;
+    environment: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    maxOutputBytes: number;
+    label: string;
+    signal?: AbortSignal;
+  },
 ): Promise<string> {
-  const child = spawn(command, [...args], {
+  options.signal?.throwIfAborted();
+  const [executable, ...normalizedArgs] = packageCommandArgv(command, args, process.platform, options.environment);
+  const child = spawn(executable, normalizedArgs, {
     cwd: options.cwd,
     env: options.environment,
     shell: false,
@@ -855,6 +866,7 @@ async function runBoundedCommand(
       settled = true;
       releaseProcessGroup();
       clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
       operation();
     };
     const stop = (error: Error): void => {
@@ -875,6 +887,9 @@ async function runBoundedCommand(
       }
       output.push(chunk);
     };
+    const abort = (): void => {
+      stop(options.signal?.reason instanceof Error ? options.signal.reason : new Error(`${options.label} cancelled`));
+    };
     const timeout = setTimeout(() => stop(new Error(`${options.label} timed out after ${options.timeoutMs}ms`)), options.timeoutMs);
     timeout.unref();
     child.stdout?.on("data", capture);
@@ -892,7 +907,18 @@ async function runBoundedCommand(
       }
       resolveResult(detail);
     }));
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted === true) abort();
   });
+}
+
+export function packageCommandArgv(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): [string, ...string[]] {
+  return normalizeCommandArgv([command, ...args], { platform, environment });
 }
 
 async function npmCommand(): Promise<{ command: string; prefix: string[] }> {
@@ -1130,7 +1156,9 @@ async function materializePackageSource(
   container: string,
   limits: PackageLimits,
   commands: ExtensionPackageCommands,
+  signal?: AbortSignal,
 ): Promise<SourceMaterial> {
+  signal?.throwIfAborted();
   if (parsed.kind === "local") {
     const sourcePath = await canonicalDirectory(parsed.sourcePath, "Package source");
     return { root: sourcePath, identity: { kind: "local", sourcePath } };
@@ -1168,6 +1196,7 @@ async function materializePackageSource(
         timeoutMs: limits.sourceTimeoutMs,
         maxOutputBytes: limits.maxCommandOutputBytes,
         label: "npm package fetch",
+        ...(signal === undefined ? {} : { signal }),
       });
       const candidates = (await readdir(tarballs)).filter((name) => name.toLowerCase().endsWith(".tgz"));
       if (candidates.length !== 1) throw new Error(`npm package fetch produced ${candidates.length} tarballs; expected exactly one`);
@@ -1230,6 +1259,7 @@ async function materializePackageSource(
     timeoutMs: limits.sourceTimeoutMs,
     maxOutputBytes: limits.maxCommandOutputBytes,
     label: "Git package clone",
+    ...(signal === undefined ? {} : { signal }),
   });
   if (exactRevision) {
     await runBoundedCommand(git.command, [
@@ -1249,6 +1279,7 @@ async function materializePackageSource(
       timeoutMs: limits.sourceTimeoutMs,
       maxOutputBytes: limits.maxCommandOutputBytes,
       label: "Git package pinned revision fetch",
+      ...(signal === undefined ? {} : { signal }),
     });
     await runBoundedCommand(git.command, [
       ...(git.prefix ?? []),
@@ -1265,6 +1296,7 @@ async function materializePackageSource(
       timeoutMs: limits.sourceTimeoutMs,
       maxOutputBytes: limits.maxCommandOutputBytes,
       label: "Git package pinned revision checkout",
+      ...(signal === undefined ? {} : { signal }),
     });
   }
   const revision = (await runBoundedCommand(git.command, [
@@ -1281,6 +1313,7 @@ async function materializePackageSource(
     timeoutMs: limits.sourceTimeoutMs,
     maxOutputBytes: limits.maxCommandOutputBytes,
     label: "Git package revision",
+    ...(signal === undefined ? {} : { signal }),
   })).trim();
   if (!GIT_REVISION.test(revision)) throw new Error("Git package revision was not a full commit ID");
   await rm(join(repository, ".git"), { recursive: true, force: true });
@@ -1426,7 +1459,9 @@ async function installProductionDependencies(
   commands: ExtensionPackageCommands,
   budget: CopyBudget,
   allowScripts: boolean,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   const dependencies = await productionDependencies(packageRoot, limits);
   if (dependencies === undefined) return;
   const destination = join(packageRoot, "node_modules");
@@ -1469,6 +1504,7 @@ async function installProductionDependencies(
       timeoutMs: limits.sourceTimeoutMs,
       maxOutputBytes: limits.maxCommandOutputBytes,
       label: "npm production dependency install",
+      ...(signal === undefined ? {} : { signal }),
     });
 
     const installedModules = join(workspace, "node_modules");
@@ -1591,8 +1627,21 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function wait(milliseconds: number): Promise<void> {
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, milliseconds));
+async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolveWait, reject) => {
+    let timer: NodeJS.Timeout;
+    const abort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("Package transaction cancelled"));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolveWait();
+    }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted === true) abort();
+  });
 }
 
 export function extensionPackageSources(roots: ExtensionPackageRoots, projectTrusted: boolean): ExtensionSource[] {
@@ -1636,13 +1685,15 @@ export class LocalExtensionPackageManager {
   ): Promise<InstalledExtensionPackage> {
     const allowScripts = packageTransactionAllowsScripts(options);
     return this.#serialized(async () => {
+      options.signal?.throwIfAborted();
       scope(selectedScope);
       const root = await this.#root(selectedScope, true);
       if (root === undefined) throw new Error(`No ${selectedScope} package root is configured`);
       return await this.#withPackageLock(root, async () => {
-        const staged = await this.#stage(sourcePath, selectedScope, undefined, allowScripts);
+        const staged = await this.#stage(sourcePath, selectedScope, undefined, allowScripts, options.signal);
         const target = join(root, staged.manifest.id);
         try {
+          options.signal?.throwIfAborted();
           const installed = await this.#inspect(staged.packageRoot, selectedScope);
           try {
             await lstat(target);
@@ -1655,7 +1706,7 @@ export class LocalExtensionPackageManager {
         } finally {
           await rm(staged.container, { recursive: true, force: true }).catch(() => undefined);
         }
-      });
+      }, options.signal);
     });
   }
 
@@ -1667,6 +1718,7 @@ export class LocalExtensionPackageManager {
   ): Promise<InstalledExtensionPackage> {
     const allowScripts = packageTransactionAllowsScripts(options);
     return this.#serialized(async () => {
+      options.signal?.throwIfAborted();
       id(packageId);
       scope(selectedScope);
       const root = await this.#root(selectedScope, false);
@@ -1679,6 +1731,7 @@ export class LocalExtensionPackageManager {
           selectedScope,
           current.provenance.installedAt,
           allowScripts,
+          options.signal,
         );
         if (staged.manifest.id !== packageId) {
           await rm(staged.container, { recursive: true, force: true });
@@ -1689,6 +1742,7 @@ export class LocalExtensionPackageManager {
         const backup = join(backupContainer, packageId);
         let preserveBackup = false;
         try {
+          options.signal?.throwIfAborted();
           await writeFile(join(backupContainer, PACKAGE_TRANSACTION), `${JSON.stringify({ schemaVersion: 1, id: packageId })}\n`, {
             flag: "wx",
             mode: 0o600,
@@ -1713,7 +1767,7 @@ export class LocalExtensionPackageManager {
           await rm(staged.container, { recursive: true, force: true }).catch(() => undefined);
           if (!preserveBackup) await rm(backupContainer, { recursive: true, force: true }).catch(() => undefined);
         }
-      });
+      }, options.signal);
     });
   }
 
@@ -1798,12 +1852,21 @@ export class LocalExtensionPackageManager {
     selectedScope: ExtensionPackageScope,
     installedAt?: string,
     allowScripts = false,
+    signal?: AbortSignal,
   ): Promise<StagedPackage> {
+    signal?.throwIfAborted();
     const root = await this.#root(selectedScope, true);
     if (root === undefined) throw new Error(`No ${selectedScope} package root is configured`);
     const container = await mkdtemp(join(root, PACKAGE_STAGE_PREFIX));
     try {
-      const material = await materializePackageSource(parseExtensionPackageSource(sourcePath), container, this.#limits, this.#commands);
+      const material = await materializePackageSource(
+        parseExtensionPackageSource(sourcePath),
+        container,
+        this.#limits,
+        this.#commands,
+        signal,
+      );
+      signal?.throwIfAborted();
       const declaredManifestBytes = await optionalRegularFile(join(material.root, MANIFEST_NAME), MANIFEST_MAX_BYTES, "Package manifest");
       const generatedManifest = declaredManifestBytes === undefined ? await generateConventionManifest(material.root) : undefined;
       const sourceManifestBytes = declaredManifestBytes ?? generatedManifest!.bytes;
@@ -1814,8 +1877,10 @@ export class LocalExtensionPackageManager {
       await mkdir(workingRoot, { recursive: true, mode: 0o700 });
       const workingBudget: CopyBudget = { entries: 0, bytes: 0 };
       await copyDirectorySafely(material.root, material.root, workingRoot, this.#limits, workingBudget, 0);
+      signal?.throwIfAborted();
       if (generatedManifest !== undefined) await writeFile(join(workingRoot, MANIFEST_NAME), sourceManifestBytes, { mode: 0o600, flag: "wx" });
-      await installProductionDependencies(workingRoot, container, this.#limits, this.#commands, workingBudget, allowScripts);
+      await installProductionDependencies(workingRoot, container, this.#limits, this.#commands, workingBudget, allowScripts, signal);
+      signal?.throwIfAborted();
       if (material.cleanup !== undefined) await rm(material.cleanup, { recursive: true, force: true });
       const workingManifestBytes = await readRegularFile(join(workingRoot, MANIFEST_NAME), MANIFEST_MAX_BYTES, "Working package manifest");
       if (!workingManifestBytes.equals(sourceManifestBytes)) throw new Error("Package manifest changed while dependencies were installed");
@@ -1862,6 +1927,7 @@ export class LocalExtensionPackageManager {
         const diagnostic = catalog.doctor().diagnostics.find((entry) => entry.severity === "error");
         throw new Error(diagnostic?.message ?? `Package ${manifest.id} did not pass extension validation`);
       }
+      signal?.throwIfAborted();
       return { container, packageRoot, manifest };
     } catch (error) {
       await rm(container, { recursive: true, force: true });
@@ -1960,7 +2026,7 @@ export class LocalExtensionPackageManager {
     }
   }
 
-  async #withPackageLock<T>(root: string, operation: () => Promise<T>): Promise<T> {
+  async #withPackageLock<T>(root: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const lockPath = join(root, EXTENSION_PACKAGE_LOCK);
     const owner: PackageLockOwner = {
       pid: process.pid,
@@ -1969,6 +2035,7 @@ export class LocalExtensionPackageManager {
     };
     const deadline = Date.now() + Math.max(30_000, this.#limits.sourceTimeoutMs + 10_000);
     while (true) {
+      signal?.throwIfAborted();
       try {
         const handle = await open(lockPath, "wx", 0o600);
         try {
@@ -2008,7 +2075,7 @@ export class LocalExtensionPackageManager {
           }
         }
         if (Date.now() >= deadline) throw new Error(`Timed out waiting for package lock: ${lockPath}`);
-        await wait(50);
+        await wait(50, signal);
       }
     }
     try {

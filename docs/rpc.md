@@ -15,11 +15,10 @@
 Node.js consumers can use the packaged client from `rigyn/interfaces`:
 
 ```ts
-import { spawnRpcClient } from "rigyn/interfaces";
+import { spawnRigynRpcClient } from "rigyn/interfaces";
 
-const { client } = spawnRpcClient({
-  command: "rigyn",
-  args: ["rpc", "--workspace", process.cwd()],
+const { client } = spawnRigynRpcClient({
+  args: ["--workspace", process.cwd()],
 });
 
 const initialized = await client.request("initialize");
@@ -28,7 +27,8 @@ const off = client.onNotification("run.event", (event) => {
 });
 
 const started = await client.request("run.start", {
-  model: "openai/gpt-5.6-sol",
+  provider: "YOUR_PROVIDER",
+  model: "YOUR_MODEL",
   prompt: "Inspect package.json",
 });
 const completed = await client.request("run.wait", { threadId: started.threadId });
@@ -37,6 +37,8 @@ off();
 await client.request("shutdown");
 await client.close();
 ```
+
+`spawnRigynRpcClient()` resolves the CLI shipped in the same package and launches it through the current Node.js executable. It does not depend on `PATH`, a shell, or the platform-specific `rigyn`/`rigyn.cmd` command shim. Its `args` are appended after the `rpc` subcommand, so the example above should pass only RPC flags: `args: ["--workspace", process.cwd()]`. Use the lower-level `spawnRpcClient()` only for an explicit executable-plus-argument transport that you own.
 
 `RpcClient.request()` is typed by `RpcMethodMap`; `onNotification()` is typed by `RpcNotificationMap`. Aborting a request signal stops only the local wait because JSON-RPC has no generic cancellation method. Use `run.cancel` or `extension.command.cancel` to cancel corresponding server work. Closing an owned spawned client terminates its child process and rejects every pending request.
 

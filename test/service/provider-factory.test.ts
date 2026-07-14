@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CredentialBroker, ExplicitCredentialSource } from "../../src/auth/index.js";
+import {
+  CredentialBroker,
+  ExplicitCredentialSource,
+  type CredentialSource,
+} from "../../src/auth/index.js";
 import {
   GeminiAdapter,
   GeminiInteractionsAdapter,
@@ -8,6 +12,7 @@ import {
   MistralConversationsAdapter,
 } from "../../src/providers/index.js";
 import { createProviderAdapter } from "../../src/service/provider-factory.js";
+import { collect, request } from "../providers/helpers.js";
 
 function broker(entries: Array<[string, "api_key" | "bearer", string]> = []): CredentialBroker {
   return new CredentialBroker([
@@ -18,6 +23,25 @@ function broker(entries: Array<[string, "api_key" | "bearer", string]> = []): Cr
         : { kind, provider, accessToken: secret },
     ]))),
   ]);
+}
+
+function blockingBroker(): { broker: CredentialBroker; started: Promise<void> } {
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const source: CredentialSource = {
+    name: "blocking",
+    async resolve({ signal }) {
+      markStarted?.();
+      signal?.throwIfAborted();
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return undefined;
+    },
+  };
+  return { broker: new CredentialBroker([source]), started };
 }
 
 test("Gemini uses stable Interactions by default with an explicit GenerateContent escape hatch", () => {
@@ -61,4 +85,42 @@ test("provider factories route discovery through an injected network transport",
 
   assert.deepEqual((await adapter.listModels(new AbortController().signal)).map((model) => model.id), ["model-v1"]);
   assert.equal(url, "https://models.example.test/v1/models");
+});
+
+test("provider factory credential resolution stops with stream and model-list cancellation", { timeout: 2_000 }, async () => {
+  {
+    const blocked = blockingBroker();
+    const adapter = createProviderAdapter({
+      kind: "openai-compatible",
+      id: "proxy-fixture",
+      baseUrl: "https://models.example.test/v1",
+    }, blocked.broker);
+    const controller = new AbortController();
+    const events = collect(adapter.stream(request("proxy-fixture"), controller.signal));
+    await blocked.started;
+    controller.abort();
+    assert.deepEqual(await events, [{
+      type: "error",
+      error: {
+        category: "cancelled",
+        message: "Request cancelled",
+        retryable: false,
+        partial: false,
+      },
+    }]);
+  }
+
+  {
+    const blocked = blockingBroker();
+    const adapter = createProviderAdapter({
+      kind: "openai-compatible",
+      id: "proxy-fixture",
+      baseUrl: "https://models.example.test/v1",
+    }, blocked.broker);
+    const controller = new AbortController();
+    const models = adapter.listModels(controller.signal);
+    await blocked.started;
+    controller.abort();
+    await assert.rejects(models, { name: "AbortError" });
+  }
 });

@@ -254,6 +254,35 @@ test("built interfaces subpath runs the correlated RPC client", async () => {
   await client.close();
 });
 
+test("built interfaces subpath launches its own RPC CLI without a command shim", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-dist-rpc-"));
+  const environment = {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    XDG_CONFIG_HOME: join(root, "config"),
+    XDG_STATE_HOME: join(root, "state"),
+  };
+  delete environment.RIGYN_RECURSION_DEPTH;
+  const spawned = interfaces.spawnRigynRpcClient({
+    args: ["--workspace", root],
+    env: environment,
+    stderr: "pipe",
+    killTimeoutMs: 2_000,
+  });
+  t.after(async () => {
+    await spawned.client.close("test cleanup");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const entry = fileURLToPath(new URL("../dist/bin/rigyn.js", import.meta.url));
+  assert.equal(spawned.child.spawnfile, process.execPath);
+  assert.deepEqual(spawned.child.spawnargs.slice(1), [entry, "rpc", "--workspace", root]);
+  assert.equal((await spawned.client.request("health")).status, "ok");
+  await spawned.client.request("shutdown");
+  await spawned.client.close("test complete");
+});
+
 test("packaged embedding example is a runnable public-runtime entry point", async () => {
   const example = fileURLToPath(new URL("../examples/embedding-runtime.mjs", import.meta.url));
   const result = await execute(process.execPath, [example, "--help"]);

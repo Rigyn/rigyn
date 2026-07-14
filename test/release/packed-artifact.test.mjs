@@ -27,6 +27,7 @@ const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const SENSITIVE_ENVIRONMENT_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const ALLOWED_DOCUMENTS = new Set([
   "docs/ARCHITECTURE.md",
+  "docs/README.md",
   "docs/compaction.md",
   "docs/configuration.md",
   "docs/cookbook.md",
@@ -38,6 +39,7 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/extension-capabilities.md",
   "docs/extension-events.md",
   "docs/extensions.md",
+  "docs/getting-started.md",
   "docs/install.md",
   "docs/live-provider-testing.md",
   "docs/packages.md",
@@ -335,8 +337,10 @@ function assertSafePackageFiles(files) {
     "LICENSE",
     "README.md",
     "SECURITY.md",
+    "docs/getting-started.md",
     "docs/install.md",
     "docs/public-api.md",
+    "docs/README.md",
     "docs/releasing.md",
     "dist/bin/rigyn.js",
     "dist/bin/tool-backend-worker.js",

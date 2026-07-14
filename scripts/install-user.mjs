@@ -30,6 +30,7 @@ import {
   posixLauncher,
   readInstallationMarker,
   recoverInterruptedUninstall,
+  resolveNpmInvocation,
   runLifecycleChild,
   sha256,
   windowsLauncher,
@@ -58,31 +59,8 @@ function childEnvironment() {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !sensitiveEnvironmentName.test(name)));
 }
 
-async function npmCommand(args) {
-  if (process.platform !== "win32") {
-    return process.env.npm_execpath
-      ? { command: process.execPath, args: [process.env.npm_execpath, ...args] }
-      : { command: "npm", args };
-  }
-  const candidates = [
-    process.env.npm_execpath,
-    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
-    resolve(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-  ].filter((value) => value !== undefined && value !== "").map((value) => resolve(value));
-  for (const candidate of candidates) {
-    try {
-      if ((await lstat(candidate)).isFile()) {
-        return { command: process.execPath, args: [candidate, ...args] };
-      }
-    } catch (error) {
-      if (errno(error) !== "ENOENT") throw error;
-    }
-  }
-  throw new Error("npm requires npm-cli.js to be installed beside Node.js on Windows");
-}
-
 async function runNpm(args, cwd) {
-  const invocation = await npmCommand(args);
+  const invocation = await resolveNpmInvocation(args);
   await runLifecycleChild(invocation.command, invocation.args, {
     cwd,
     env: {

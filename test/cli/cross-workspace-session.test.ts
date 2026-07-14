@@ -151,6 +151,73 @@ test("an empty central index backfills every durable workspace in the shared ses
   index.close();
 });
 
+test("an invalid derived index is rebuilt without losing source session history", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-session-index-rebuild-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const workspaceA = join(root, "workspace-a");
+  const workspaceB = join(root, "workspace-b");
+  const config = join(root, "config");
+  const state = join(root, "state");
+  const stateDirectory = join(state, "rigyn");
+  await Promise.all([
+    mkdir(workspaceA),
+    mkdir(workspaceB),
+    mkdir(join(config, "rigyn"), { recursive: true, mode: 0o700 }),
+    mkdir(stateDirectory, { recursive: true, mode: 0o700 }),
+  ]);
+  const databasePath = join(stateDirectory, "sessions.sqlite");
+  const sessions = new SessionStore(databasePath);
+  sessions.createThread({ threadId: "saved-a", workspaceRoot: workspaceA });
+  sessions.appendEvent({
+    threadId: "saved-a",
+    event: { type: "warning", code: "fixture", message: "saved source history" },
+  });
+  sessions.close();
+
+  const indexPath = join(stateDirectory, "session-index.sqlite");
+  const invalid = new DatabaseSync(indexPath);
+  invalid.exec(`
+    PRAGMA application_id = ${0x43485349};
+    PRAGMA user_version = 1;
+    CREATE TABLE workspaces(foo TEXT) STRICT;
+    CREATE TABLE sessions(foo TEXT) STRICT;
+  `);
+  invalid.close();
+
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    XDG_CONFIG_HOME: config,
+    XDG_STATE_HOME: state,
+    NO_COLOR: "1",
+  };
+  for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]) {
+    delete environment[name];
+  }
+  const result = await runCli([
+    "run",
+    "create another durable event",
+    "--workspace", workspaceB,
+    "--extension", resolve("examples/custom-provider/runtime/index.mjs"),
+    "--no-extensions",
+    "--provider", "gallery-offline",
+    "--model", "gallery-offline-v1",
+    "--print",
+  ], environment);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Rebuilt the derived cross-workspace session index/u);
+
+  const rebuilt = new DatabaseSync(indexPath, { readOnly: true });
+  assert.deepEqual(
+    (rebuilt.prepare("SELECT workspace_root FROM workspaces ORDER BY workspace_root").all() as Array<{ workspace_root: string }>)
+      .map((row) => row.workspace_root),
+    [workspaceA, workspaceB],
+  );
+  rebuilt.close();
+  const source = new SessionStore(databasePath);
+  assert.ok(source.getThread("saved-a"));
+  source.close();
+});
+
 test("a partial central index backfills durable workspaces that were never indexed", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harness-session-index-partial-backfill-"));
   t.after(async () => await rm(root, { recursive: true, force: true }));

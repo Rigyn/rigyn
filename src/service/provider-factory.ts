@@ -72,8 +72,9 @@ export type RuntimeProviderConfig =
 async function credential(
   broker: CredentialBroker,
   provider: string,
+  signal?: AbortSignal,
 ): Promise<Exclude<AuthCredential, AmbientCredentialDescriptor>> {
-  const resolved = await broker.resolve({ provider });
+  const resolved = await broker.resolve({ provider, ...(signal === undefined ? {} : { signal }) });
   if (resolved === undefined) throw new Error(`No credential is configured for ${provider}`);
   if (resolved.credential.kind === "ambient") {
     throw new Error(`Ambient ${resolved.credential.provider} identity requires a configured token/credential resolver`);
@@ -84,29 +85,30 @@ async function credential(
 async function optionalCredential(
   broker: CredentialBroker,
   provider: string,
+  signal?: AbortSignal,
 ): Promise<Exclude<AuthCredential, AmbientCredentialDescriptor> | undefined> {
-  const resolved = await broker.resolve({ provider });
+  const resolved = await broker.resolve({ provider, ...(signal === undefined ? {} : { signal }) });
   if (resolved === undefined || resolved.credential.kind === "ambient") return undefined;
   return resolved.credential;
 }
 
-function apiKeyIfPresent(broker: CredentialBroker, provider: string): () => Promise<string | undefined> {
-  return async () => {
-    const found = await credential(broker, provider);
+function apiKeyIfPresent(broker: CredentialBroker, provider: string): (signal?: AbortSignal) => Promise<string | undefined> {
+  return async (signal) => {
+    const found = await credential(broker, provider, signal);
     return found.kind === "api_key" ? found.apiKey : undefined;
   };
 }
 
-function accessTokenIfPresent(broker: CredentialBroker, provider: string): () => Promise<string | undefined> {
-  return async () => {
-    const found = await credential(broker, provider);
+function accessTokenIfPresent(broker: CredentialBroker, provider: string): (signal?: AbortSignal) => Promise<string | undefined> {
+  return async (signal) => {
+    const found = await credential(broker, provider, signal);
     return found.kind === "api_key" ? undefined : found.accessToken;
   };
 }
 
-function optionalApiKeySource(broker: CredentialBroker, provider: string): () => Promise<string | undefined> {
-  return async () => {
-    const found = await optionalCredential(broker, provider);
+function optionalApiKeySource(broker: CredentialBroker, provider: string): (signal?: AbortSignal) => Promise<string | undefined> {
+  return async (signal) => {
+    const found = await optionalCredential(broker, provider, signal);
     return found?.kind === "api_key" ? found.apiKey : undefined;
   };
 }
@@ -116,25 +118,25 @@ function googleTokenSources(
   provider: string,
   configuredUserProject?: string,
   fetchImplementation?: FetchLike,
-): { accessToken: () => Promise<string | undefined>; userProject: () => Promise<string | undefined> } {
+): {
+  accessToken: (signal?: AbortSignal) => Promise<string | undefined>;
+  userProject: (signal?: AbortSignal) => Promise<string | undefined>;
+} {
   let cached: NonNullable<Awaited<ReturnType<typeof resolveGoogleApplicationDefaultCredentials>>> | undefined;
-  let pending: Promise<Awaited<ReturnType<typeof resolveGoogleApplicationDefaultCredentials>>> | undefined;
   let activeUserProject: string | undefined;
-  const ambient = async () => {
+  const ambient = async (signal?: AbortSignal) => {
     if (cached !== undefined && cached.expiresAt > Date.now() + 60_000) return cached;
-    pending ??= resolveGoogleApplicationDefaultCredentials(
-      fetchImplementation === undefined ? {} : { fetch: fetchImplementation },
-    ).finally(() => {
-      pending = undefined;
+    const resolved = await resolveGoogleApplicationDefaultCredentials({
+      ...(fetchImplementation === undefined ? {} : { fetch: fetchImplementation }),
+      ...(signal === undefined ? {} : { signal }),
     });
-    const resolved = await pending;
     if (resolved === undefined) throw new Error("Google application default credentials are unavailable");
     cached = resolved;
     return cached;
   };
   return {
-    accessToken: async () => {
-      const explicit = await optionalCredential(broker, provider);
+    accessToken: async (signal) => {
+      const explicit = await optionalCredential(broker, provider, signal);
       if (explicit?.kind === "api_key") {
         activeUserProject = undefined;
         return undefined;
@@ -144,7 +146,7 @@ function googleTokenSources(
         activeUserProject = configuredUserProject;
         return explicit.accessToken;
       }
-      const token = await ambient();
+      const token = await ambient(signal);
       activeUserProject = configuredUserProject ?? token.quotaProjectId;
       return token.accessToken;
     },
@@ -152,56 +154,53 @@ function googleTokenSources(
   };
 }
 
-function azureTokenSource(broker: CredentialBroker, fetchImplementation?: FetchLike): () => Promise<string | undefined> {
+function azureTokenSource(
+  broker: CredentialBroker,
+  fetchImplementation?: FetchLike,
+): (signal?: AbortSignal) => Promise<string | undefined> {
   let cached: NonNullable<Awaited<ReturnType<typeof resolveAzureDefaultCredential>>> | undefined;
-  let pending: Promise<Awaited<ReturnType<typeof resolveAzureDefaultCredential>>> | undefined;
-  return async () => {
-    const explicit = await optionalCredential(broker, "azure-openai");
+  return async (signal) => {
+    const explicit = await optionalCredential(broker, "azure-openai", signal);
     if (explicit?.kind === "api_key") return undefined;
     if (explicit !== undefined) {
       if (explicit.expiresAt !== undefined && explicit.expiresAt <= Date.now()) throw new Error("azure-openai bearer credential is expired");
       return explicit.accessToken;
     }
     if (cached !== undefined && cached.expiresAt > Date.now() + 60_000) return cached.accessToken;
-    pending ??= resolveAzureDefaultCredential(
-      fetchImplementation === undefined ? {} : { fetch: fetchImplementation },
-    ).finally(() => {
-      pending = undefined;
+    const resolved = await resolveAzureDefaultCredential({
+      ...(fetchImplementation === undefined ? {} : { fetch: fetchImplementation }),
+      ...(signal === undefined ? {} : { signal }),
     });
-    const resolved = await pending;
     if (resolved === undefined) throw new Error("Azure default credentials are unavailable");
     cached = resolved;
     return cached.accessToken;
   };
 }
 
-function awsCredentialSource(fetchImplementation?: FetchLike): () => Promise<AwsCredentials> {
+function awsCredentialSource(fetchImplementation?: FetchLike): (signal?: AbortSignal) => Promise<AwsCredentials> {
   let cached: NonNullable<Awaited<ReturnType<typeof resolveAwsDefaultCredentials>>> | undefined;
-  let pending: Promise<Awaited<ReturnType<typeof resolveAwsDefaultCredentials>>> | undefined;
-  return async () => {
+  return async (signal) => {
     if (cached !== undefined && (cached.expiresAt === undefined || cached.expiresAt > Date.now() + 60_000)) return cached;
-    pending ??= resolveAwsDefaultCredentials(
-      fetchImplementation === undefined ? {} : { fetch: fetchImplementation },
-    ).finally(() => {
-      pending = undefined;
+    const resolved = await resolveAwsDefaultCredentials({
+      ...(fetchImplementation === undefined ? {} : { fetch: fetchImplementation }),
+      ...(signal === undefined ? {} : { signal }),
     });
-    const resolved = await pending;
     if (resolved === undefined) throw new Error("AWS default credentials are unavailable");
     cached = resolved;
     return cached;
   };
 }
 
-function bearerSource(broker: CredentialBroker, provider: string): () => Promise<string> {
-  return async () => {
-    const found = await credential(broker, provider);
+function bearerSource(broker: CredentialBroker, provider: string): (signal?: AbortSignal) => Promise<string> {
+  return async (signal) => {
+    const found = await credential(broker, provider, signal);
     return found.kind === "api_key" ? found.apiKey : found.accessToken;
   };
 }
 
-function optionalBearerSource(broker: CredentialBroker, provider: string): () => Promise<string | undefined> {
-  return async () => {
-    const resolved = await broker.resolve({ provider });
+function optionalBearerSource(broker: CredentialBroker, provider: string): (signal?: AbortSignal) => Promise<string | undefined> {
+  return async (signal) => {
+    const resolved = await broker.resolve({ provider, ...(signal === undefined ? {} : { signal }) });
     if (resolved === undefined) return undefined;
     const found = resolved.credential;
     if (found.kind === "ambient") throw new Error(`Ambient ${found.provider} identity requires a configured token resolver`);
@@ -213,10 +212,10 @@ function githubCopilotCredentialSource(
   broker: CredentialBroker,
   fetchImplementation?: FetchLike,
   configuredHost?: string,
-): () => Promise<{ accessToken: string; enterpriseHost?: string }> {
+): (signal?: AbortSignal) => Promise<{ accessToken: string; enterpriseHost?: string }> {
   let cached: { sourceToken: string; accessToken: string; expiresAt: number; enterpriseHost?: string } | undefined;
-  return async () => {
-    const found = await credential(broker, "github-copilot");
+  return async (signal) => {
+    const found = await credential(broker, "github-copilot", signal);
     if (found.kind === "oauth") {
       return {
         accessToken: found.accessToken,
@@ -232,6 +231,7 @@ function githubCopilotCredentialSource(
     ) return { accessToken: cached.accessToken, ...(cached.enterpriseHost === undefined ? {} : { enterpriseHost: cached.enterpriseHost }) };
     const token = await exchangeGitHubCopilotToken(sourceToken, enterpriseHost, {
       ...(fetchImplementation === undefined ? {} : { fetch: fetchImplementation }),
+      ...(signal === undefined ? {} : { signal }),
     });
     cached = {
       sourceToken,
@@ -252,8 +252,8 @@ export function createProviderAdapter(
   switch (config.kind) {
     case "openai-codex":
       return new OpenAICodexResponsesAdapter({
-        credential: async () => {
-          const found = await credential(broker, "openai-codex");
+        credential: async (signal) => {
+          const found = await credential(broker, "openai-codex", signal);
           if (found.kind !== "oauth") throw new Error("OpenAI Codex requires ChatGPT subscription OAuth");
           if (found.accountId === undefined) throw new Error("OpenAI Codex credential has no ChatGPT account ID; run /login openai-codex again");
           return { accessToken: found.accessToken, accountId: found.accountId };
@@ -290,7 +290,7 @@ export function createProviderAdapter(
       return new AnthropicAdapter({
         apiKey: apiKeyIfPresent(broker, "anthropic"),
         accessToken: accessTokenIfPresent(broker, "anthropic"),
-        oauth: async () => (await credential(broker, "anthropic")).kind === "oauth",
+        oauth: async (signal) => (await credential(broker, "anthropic", signal)).kind === "oauth",
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         ...(config.beta === undefined ? {} : { beta: config.beta }),
         ...(config.promptCache === undefined ? {} : { promptCache: config.promptCache }),
@@ -328,9 +328,7 @@ export function createProviderAdapter(
       });
     }
     case "bedrock": {
-      const bearerToken = async (): Promise<string | undefined> => {
-        return optionalBearerSource(broker, "bedrock")();
-      };
+      const bearerToken = optionalBearerSource(broker, "bedrock");
       return new BedrockAdapter({
         region: config.region,
         bearerToken,

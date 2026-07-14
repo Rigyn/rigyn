@@ -550,6 +550,7 @@ export class ProjectPackageManager {
         return { status: "ready", changed: false, packages: current, catalog: catalogEntries(lock) };
       }
       await this.#stageLock(lock, signal);
+      signal?.throwIfAborted();
       await this.#commitStaged(lock);
       const packages = await this.#installed(lock);
       return { status: "ready", changed: true, packages, catalog: catalogEntries(lock) };
@@ -594,6 +595,7 @@ export class ProjectPackageManager {
         packages,
       });
       await this.#stageLock(lock, options.signal);
+      options.signal?.throwIfAborted();
       await this.#commitStaged(lock, true);
       return {
         status: "ready",
@@ -670,7 +672,11 @@ export class ProjectPackageManager {
     await mkdir(resolutionRoot, { recursive: true, mode: 0o700 });
     const manager = new LocalExtensionPackageManager({ user: join(resolutionRoot, "user"), project: installedRoot }, {}, this.#commands);
     const localPath = declaration.source.kind === "local" ? await this.#localSource(declaration.source.path) : undefined;
-    const installed = await manager.install(sourceSpecifier(declaration, localPath), "project");
+    const installed = await manager.install(
+      sourceSpecifier(declaration, localPath),
+      "project",
+      signal === undefined ? {} : { signal },
+    );
     if (installed.id !== declaration.id) throw new Error(`Project package source contains ${installed.id}, expected ${declaration.id}`);
     const contentSha256 = await packageContentSha256(installed.packageRoot);
     const resolved = this.#resolvedFromProvenance(declaration, installed.provenance, contentSha256);
@@ -711,10 +717,15 @@ export class ProjectPackageManager {
       for (const entry of lock.packages) {
         signal?.throwIfAborted();
         const localPath = entry.resolved.kind === "local" ? await this.#localSource(entry.resolved.path) : undefined;
-        const installed = await manager.install(exactSourceSpecifier(entry, localPath), "project");
+        const installed = await manager.install(
+          exactSourceSpecifier(entry, localPath),
+          "project",
+          signal === undefined ? {} : { signal },
+        );
         if (installed.id !== entry.id) throw new Error(`Locked source contains ${installed.id}, expected ${entry.id}`);
         await this.#assertInstalledEntry(installed, entry);
       }
+      signal?.throwIfAborted();
     } catch (error) {
       await rm(stageRoot, { recursive: true, force: true });
       throw error;

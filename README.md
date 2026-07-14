@@ -1,10 +1,16 @@
 # Rigyn
 
-Rigyn is a local-first terminal coding agent. It combines a fast inline TUI, direct model-provider protocol adapters, durable branching sessions, automatic context compaction, and a packageable extension system.
+Rigyn is a local-first coding agent that runs in your terminal. Start it inside a project, describe an outcome, and the selected model can inspect files, run commands, and apply edits through Rigyn's bounded tools. The conversation, tool history, branches, model choice, and extension state are saved locally so work can continue in a later terminal.
+
+Rigyn is both an interactive application and an extensible runtime. The same installation supports an interactive terminal workflow, one-shot commands, JSON events, JSON-RPC, and an in-process Node.js API. Skills add on-demand instructions; prompt templates add reusable tasks; themes change presentation; and trusted extension packages can add tools, commands, providers, authentication methods, durable state, and structural UI directly to the active harness.
+
+"Local-first" describes where the runtime, tools, configuration, credentials, and session database live. Requests still go to the model provider you select unless you use a local provider. `bash` and runtime extensions execute with your operating-system user privileges, so Rigyn is not an isolation boundary and installed code should be reviewed.
 
 The agent loop and provider wire clients are implemented in this repository without provider SDKs. Small third-party dependencies are used for HTTP transport, image conversion, JSONC/YAML parsing, ignore matching, and the bundled ripgrep executable.
 
 The project is pre-release. Node.js 24.15 or a current Node.js 26-or-newer release is required.
+
+New here? Follow the [five-minute getting-started guide](docs/getting-started.md), or use the [documentation map](docs/README.md) to find a specific topic.
 
 ## Install
 
@@ -28,12 +34,14 @@ The installer creates a self-contained installation under `$HOME/.rigyn`. It cop
 
 Installing does not require `npm install` in the master checkout. For development only, run `npm install`, `npm run check`, and `npm run dev --` from the checkout.
 
-Update or remove the self-contained installation from any directory:
+Update Rigyn after it is published to npm, or remove any self-contained installation, from any directory:
 
 ```sh
 rigyn self-update
 rigyn uninstall --yes
 ```
+
+`self-update` installs `rigyn@latest` from npm. Until that package exists, update the source checkout and rerun `node scripts/install-user.mjs`; the installer replaces only its marker-owned application files.
 
 Uninstall is marker-verified and removes the installed application, configuration, OAuth/API-key profiles, sessions, cache, and its managed command. It never deletes the source checkout or unrelated files.
 
@@ -41,24 +49,30 @@ See [installation and platform troubleshooting](docs/install.md) for Linux, macO
 
 ## First run
 
-Start the interface, connect a provider, and select one of that provider's currently available models:
+Change to the project you want Rigyn to work on, start the interface, connect a provider, and select one of that provider's currently available models:
+
+```sh
+cd /path/to/your/project
+rigyn
+```
 
 ```text
-rigyn
 /login
 /model
 ```
 
-`/login` offers only the authentication methods supported by the selected provider: subscription OAuth, browser or device OAuth, an environment credential, an API key, a cloud identity, or a local connection. Stored secrets use the operating-system keychain when it is available and an encrypted local store otherwise.
+The directory where you launch Rigyn is the workspace unless you pass `--workspace DIR`. The self-contained command works from any directory and does not redirect execution to the Rigyn source checkout. Workspace scope controls project instructions, trusted project resources, tool working directories, and the default session list; it is not a filesystem sandbox.
 
-The model picker refreshes connected provider catalogs and does not fill the screen with a static universal model list. Disconnected cached choices are hidden, while available models support fuzzy search, context-window metadata, and exact deployment IDs for providers without a listing endpoint.
+`/login` offers only the authentication methods supported by the selected provider: subscription OAuth, browser or device OAuth, an environment credential, an API key, a cloud identity, or a local connection. Self-contained installs keep stored secrets in the installation's encrypted local credential store; on Windows its key is protected with DPAPI. Source and portable runs without an existing local key probe the current user's macOS Keychain or Linux Secret Service and create a private encrypted fallback when the desktop service is unavailable.
+
+The model picker refreshes connected provider catalogs and does not fill the screen with a static universal model list. Disconnected, cached, and configured-only choices are hidden. Providers without a listing endpoint can use an exact configured deployment selected by typing `/model PROVIDER/MODEL` or passing `--model PROVIDER/MODEL`.
 
 You can also run a single prompt and exit:
 
 ```sh
 rigyn -p "Read this repository and explain its architecture"
 rigyn --model PROVIDER/MODEL:high -p "Fix the failing tests"
-rigyn @issue.md "Implement this issue"
+rigyn -p @issue.md "Implement this issue"
 ```
 
 Files beginning with `@` are included as prompt references. In the TUI, typing `@` opens workspace file completion. Supported images can be pasted or attached and are resized and normalized before provider submission.
@@ -135,6 +149,8 @@ Caching reduces repeated-input billing and latency; compaction reduces the amoun
 
 Built-in adapters cover OpenAI Responses, ChatGPT subscription OAuth, Anthropic Messages, GitHub Copilot, Gemini Interactions and Generate Content, Vertex AI, Azure OpenAI, Amazon Bedrock, OpenRouter, Mistral chat and conversations, Ollama, and OpenAI-compatible endpoints. Presets are included for Groq, Together, DeepSeek, Cerebras, xAI, Fireworks, Hugging Face, Vercel AI Gateway, Z.AI Coding Plan, Kimi For Coding, and MiniMax.
 
+Vertex and Azure OpenAI require a provider entry with their project or endpoint. Bedrock requires a configured region, or it is added automatically when `AWS_REGION` or `AWS_DEFAULT_REGION` is set. The other named adapters and presets are preconfigured; credentials still determine whether they are connected.
+
 Common environment variables are recognized automatically:
 
 ```text
@@ -178,6 +194,8 @@ An extension package can contribute:
 - terminal themes.
 
 Runtime extensions are trusted local code and can use the same Node.js and operating-system access as the harness. Project-local executable resources are ignored until the workspace is trusted; declarative user resources do not trigger repeated prompts.
+
+MCP servers are integrated by a trusted runtime package rather than a core MCP configuration file. The [fixed stdio MCP example](examples/mcp-stdio/README.md) shows the handshake, bounds, cancellation, tool registration, and process cleanup expected from such a package.
 
 Managed packages support production dependencies with lifecycle scripts disabled by default. A reviewed install, update, or invocation-only package may opt in for that transaction with `--allow-scripts`; source-package prepare/pack scripts remain disabled. Host compatibility ranges, immutable npm/Git pins, source provenance, SSH-agent authentication, and private per-package module trees are enforced by the package manager. See the package guide for the `rigyn` package.json convention and configurable npm/Git wrapper argv.
 
@@ -301,13 +319,13 @@ npm run check
 
 `npm run check` type-checks source and tests, executes the full unit and PTY suite, builds distributable JavaScript and declarations, compiles an external consumer, tests the built package, and installs a packed artifact into an isolated home for an offline end-to-end run.
 
-`npm run benchmark:offline` runs a credential-free, deterministic harness-plumbing corpus through the real service and tools. Its versioned JSON report tracks completion, pass@1, multi-file and continuation scenarios, provider/tool recovery, parallel tool batches, mutation preservation, verification, usage/cost, compaction, and crash recovery. It does not measure model intelligence. See [Outcome benchmarks](benchmarks/README.md) for metric definitions and limitations.
+`npm run benchmark:offline` runs a credential-free, deterministic harness-plumbing corpus through the real service and tools. Its versioned JSON report tracks completion, pass@1, multi-file and continuation scenarios, provider/tool recovery, parallel tool batches, mutation preservation, verification, usage/cost, compaction, and crash recovery. It does not measure model intelligence. See [Outcome benchmarks](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md) for metric definitions and limitations.
 
 `npm run benchmark:extensions` is a second credential-free verifier. It runs extension candidates through managed install, public discovery, activation, reload, and removal and reports pass@1/pass@3 with zero model calls.
 
 The high-level component map is in [Architecture](docs/ARCHITECTURE.md). Practical operations are covered by the [cookbook](docs/cookbook.md), [local diagnostics](docs/diagnostics.md), [troubleshooting guide](docs/troubleshooting.md), and [platform notes](docs/platforms.md).
 
-Contribution expectations, security reporting, release-visible changes, and the deterministic release procedure are in [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [docs/releasing.md](docs/releasing.md).
+Contribution expectations, security reporting, release-visible changes, and the deterministic release procedure are in [CONTRIBUTING.md](https://github.com/Rigyn/rigyn/blob/main/CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [docs/releasing.md](docs/releasing.md).
 
 ## License
 

@@ -8,6 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { checkReleaseMetadata } from "./check-release-metadata.mjs";
+import { resolveNpmInvocation } from "./lifecycle-common.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -34,14 +35,6 @@ function parseArguments(argv) {
     expectedPlatform: values.get("--expected-platform"),
     expectedArch: values.get("--expected-arch"),
   };
-}
-
-function npmInvocation(args) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath !== undefined && npmExecPath !== "") {
-    return { command: process.execPath, args: [npmExecPath, ...args] };
-  }
-  return { command: process.platform === "win32" ? "npm.cmd" : "npm", args };
 }
 
 async function run(command, args, options) {
@@ -234,7 +227,7 @@ async function main() {
       writeFile(paths.npmGlobalConfig, "", { mode: 0o600 }),
     ]);
     const environment = isolatedEnvironment(paths);
-    const invocation = npmInvocation([
+    const invocation = await resolveNpmInvocation([
       "install",
       "--global=false",
       "--omit=dev",

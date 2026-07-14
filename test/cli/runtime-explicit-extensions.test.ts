@@ -667,6 +667,32 @@ test("run loads an explicit relative extension with automatic discovery disabled
     assert.equal(models.code, 0, models.stderr);
     assert.match(models.stdout, /^explicit-offline\/explicit-model/mu);
 
+    await writeFile(join(workspace, "offline.mjs"), `export default function activate(api) {
+      api.registerProvider({
+        id: "explicit-offline",
+        async *stream() { throw new Error("unused"); },
+        async listModels() { throw new Error("live catalog unavailable"); },
+      });
+    }\n`);
+    const unavailable = await runCli([
+      "--extension", "offline.mjs",
+      "--no-extensions",
+      "--workspace", workspace,
+      "--list-models", "explicit-model",
+    ], environment);
+    assert.equal(unavailable.code, 0, unavailable.stderr);
+    assert.match(unavailable.stdout, /^No matching models from available providers\./mu);
+
+    const cached = await runCli([
+      "--extension", "offline.mjs",
+      "--no-extensions",
+      "--workspace", workspace,
+      "--list-models", "explicit-model",
+      "--offline",
+    ], environment);
+    assert.equal(cached.code, 0, cached.stderr);
+    assert.match(cached.stdout, /^explicit-offline\/explicit-model/mu);
+
     const second = await runCli([
       "test no persistence",
       "--provider", "explicit-offline",

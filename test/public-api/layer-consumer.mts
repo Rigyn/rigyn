@@ -29,10 +29,12 @@ import {
   renderRpcErrorReference,
   renderRpcMethodReference,
   renderRpcNotificationReference,
+  spawnRigynRpcClient,
   spawnRpcClient,
   type RpcMethodMap,
   type RpcNotificationMap,
   type RpcRequest,
+  type SpawnRigynRpcClientOptions,
 } from "rigyn/interfaces";
 import {
   createNetworkTransport,
@@ -79,6 +81,8 @@ const textOptions = { role: "success", maxLines: 2 } satisfies RuntimeUiTextOpti
 const markdownOptions = { role: "muted", maxLines: 2 } satisfies RuntimeUiMarkdownOptions;
 const stackOptions = { gap: 1, maxLines: 5 } satisfies RuntimeUiStackOptions;
 const panelOptions = { title: "Consumer", padding: 1 } satisfies RuntimeUiPanelOptions;
+const rigynRpcOptions = { args: ["--workspace", process.cwd()] } satisfies SpawnRigynRpcClientOptions;
+void rigynRpcOptions;
 const componentKitView: RuntimeUiView = uiPanel(uiStack([
   uiText("ready", textOptions),
   uiMarkdown("**public** view", markdownOptions),
@@ -105,6 +109,7 @@ export const layerValues = [
   renderRpcErrorReference,
   renderRpcMethodReference,
   renderRpcNotificationReference,
+  spawnRigynRpcClient,
   spawnRpcClient,
   createNetworkTransport,
   DirectProcessRunner,

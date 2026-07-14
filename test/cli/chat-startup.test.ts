@@ -1580,6 +1580,69 @@ test("Escape cancels awaited runtime event observers for agent runs and user she
   assert.equal(await finishChat(session), 0, session.read());
 });
 
+test("an extension-requested shutdown cancels an awaited run observer and exits", {
+  skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
+}, async (t) => {
+  let shutdownLog = "";
+  const session = await startChat([
+    "--provider", "shutdown-provider", "--model", "shutdown-model", "--no-session",
+  ], async ({ root, config }) => {
+    shutdownLog = join(root, "extension-shutdown.log");
+    const extension = join(config, "rigyn", "extensions", "extension-shutdown");
+    await mkdir(join(extension, "runtime"), { recursive: true });
+    await writeFile(join(extension, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "extension-shutdown",
+      name: "Extension shutdown",
+      version: "1.0.0",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(join(extension, "runtime", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      const log = ${JSON.stringify(shutdownLog)};
+      export default function activate(api) {
+        let requested = false;
+        api.on("event", async (value, context) => {
+          const type = value.event?.type || value.type;
+          if (type !== "run_started" || requested) return;
+          requested = true;
+          await appendFile(log, "observer waiting\\n");
+          context.ui.notify("shutdown observer waiting");
+          const result = await api.requestShutdown({ reason: "extension shutdown regression" });
+          if (!result.accepted) throw new Error("shutdown request was rejected");
+          await new Promise((_, reject) => {
+            const cancel = () => {
+              appendFile(log, "observer aborted\\n").then(
+                () => reject(context.signal.reason || new Error("observer aborted")),
+                reject,
+              );
+            };
+            if (context.signal.aborted) cancel();
+            else context.signal.addEventListener("abort", cancel, { once: true });
+          });
+        });
+        api.registerProvider({
+          id: "shutdown-provider",
+          async *stream(request) {
+            yield { type: "response_start", model: request.model };
+            yield { type: "text_delta", part: 0, text: "unexpected response" };
+            yield { type: "response_end", reason: "stop", state: { kind: "chat_completions", assistantMessage: { role: "assistant" } } };
+          },
+          async listModels() { return [{ id: "shutdown-model" }]; },
+        });
+      }
+    `);
+  }, "full");
+  t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
+
+  await waitForOutput(session.read, "Rigyn v0.1.0 · Ready");
+  session.child.stdin.write("request shutdown\r");
+  await waitForOutput(session.read, "shutdown observer waiting");
+  await waitForFileOutput(shutdownLog, "observer waiting");
+  assert.equal(await finishChat(session), 0, session.read());
+  await waitForFileOutput(shutdownLog, "observer aborted");
+});
+
 test("Alt+Up restores a recovered image queue item for editing and sends every exact image once", {
   skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
 }, async (t) => {

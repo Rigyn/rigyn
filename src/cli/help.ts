@@ -206,8 +206,8 @@ Usage:
 Doctor performs SQLite's full integrity check and foreign-key check without
 changing the database. Repair is limited to rebuilding indexes: it requires
 explicit confirmation, creates an owner-only unique backup beside the database,
-and commits only when the complete post-repair checks pass. Close every Code
-Harness process before repair. Other corruption must be restored from backup.
+and commits only when the complete post-repair checks pass. Close every Rigyn
+process before repair. Other corruption must be restored from backup.
 `,
   rpc: `${header}
 

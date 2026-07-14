@@ -12,7 +12,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, parse, relative, resolve, sep, win32 } from "node:path";
 
 export const INSTALLATION_MARKER = ".installation.json";
 export const INSTALL_TRANSACTION = ".install-transaction.json";
@@ -41,6 +41,32 @@ export async function exists(path) {
     if (errno(error) === "ENOENT") return false;
     throw error;
   }
+}
+
+export async function resolveNpmInvocation(args, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const execPath = options.execPath ?? process.execPath;
+  const environment = options.environment ?? process.env;
+  if (platform !== "win32") {
+    return environment.npm_execpath
+      ? { command: execPath, args: [environment.npm_execpath, ...args] }
+      : { command: "npm", args };
+  }
+  const candidates = [
+    environment.npm_execpath,
+    join(dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    resolve(dirname(execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ].filter((value) => value !== undefined && value !== "").map((value) => resolve(value));
+  for (const candidate of candidates) {
+    try {
+      if ((await lstat(candidate)).isFile()) {
+        return { command: execPath, args: [candidate, ...args] };
+      }
+    } catch (error) {
+      if (errno(error) !== "ENOENT") throw error;
+    }
+  }
+  throw new Error("npm requires npm-cli.js to be installed beside Node.js on Windows");
 }
 
 export function inside(parent, candidate) {
@@ -599,6 +625,54 @@ export async function writeFileAtomically(path, contents, mode) {
   }
 }
 
+export function lifecycleProcessTreeTerminationPlan(pid, signal, options = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new RangeError("Lifecycle process-tree PID must be a positive safe integer");
+  }
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return { kind: "group", pid: -pid, signal };
+  const environment = options.environment ?? process.env;
+  const root = environment.SystemRoot ?? environment.WINDIR;
+  if (root !== undefined && !root.includes("\0") && /^[A-Za-z]:[\\/]/u.test(root)) {
+    return {
+      kind: "taskkill",
+      command: win32.join(win32.resolve(root), "System32", "taskkill.exe"),
+      args: ["/PID", String(pid), "/T", "/F"],
+      fallbackPid: pid,
+      fallbackSignal: signal,
+    };
+  }
+  return { kind: "direct", pid, signal };
+}
+
+export function terminateLifecycleProcessTree(pid, signal, options = {}) {
+  const plan = lifecycleProcessTreeTerminationPlan(pid, signal, options);
+  const kill = options.kill ?? ((target, selectedSignal) => process.kill(target, selectedSignal));
+  if (plan.kind === "taskkill") {
+    try {
+      const result = (options.spawnSync ?? spawnSync)(plan.command, plan.args, {
+        shell: false,
+        stdio: "ignore",
+        timeout: 2_000,
+        windowsHide: true,
+      });
+      if (result.error === undefined && result.status === 0) return true;
+    } catch {}
+    try {
+      kill(plan.fallbackPid, plan.fallbackSignal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    kill(plan.pid, plan.signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runLifecycleChild(command, args, options) {
   const child = spawn(command, args, {
     cwd: options.cwd,
@@ -613,22 +687,20 @@ export async function runLifecycleChild(command, args, options) {
   const stop = (signal = "SIGTERM") => {
     if (child.pid === undefined) return;
     receivedSignal ??= signal;
+    if (process.platform === "win32") {
+      terminateLifecycleProcessTree(child.pid, signal, {
+        kill: (_target, selectedSignal) => child.kill(selectedSignal),
+      });
+      return;
+    }
     try {
-      if (process.platform === "win32") child.kill(signal);
-      else process.kill(-child.pid, signal);
+      process.kill(-child.pid, signal);
     } catch (error) {
       if (errno(error) !== "ESRCH") throw error;
     }
     if (escalation === undefined) {
       escalation = setTimeout(() => {
         if (child.pid === undefined) return;
-        if (process.platform === "win32") {
-          spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-          return;
-        }
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch (error) {

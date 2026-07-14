@@ -55,7 +55,7 @@ export interface BedrockSignerContext extends AwsSignerContext {
 }
 
 export type BedrockSigner = (request: Request, context: BedrockSignerContext) => Request | Promise<Request>;
-export type AwsCredentialSource = AwsCredentials | (() => AwsCredentials | Promise<AwsCredentials>);
+export type AwsCredentialSource = AwsCredentials | ((signal?: AbortSignal) => AwsCredentials | Promise<AwsCredentials>);
 
 export interface BedrockConfig {
   region: string;
@@ -123,7 +123,7 @@ export class BedrockAdapter implements ProviderAdapter {
         signal,
         redirect: "error",
       });
-      const response = await this.#signedFetch(unsigned, "runtime");
+      const response = await this.#signedFetch(unsigned, "runtime", signal);
       requestId = requestIdFromHeaders(response.headers);
       await assertResponseOk(response);
 
@@ -310,7 +310,7 @@ export class BedrockAdapter implements ProviderAdapter {
       signal,
       redirect: "error",
     });
-    const response = await this.#signedFetch(request, "control");
+    const response = await this.#signedFetch(request, "control", signal);
     await assertResponseOk(response);
     const body = await readJsonResponse(response);
     const observedAt = new Date().toISOString();
@@ -350,19 +350,19 @@ export class BedrockAdapter implements ProviderAdapter {
     });
   }
 
-  async #signedFetch(request: Request, target: BedrockSignerContext["target"]): Promise<Response> {
+  async #signedFetch(request: Request, target: BedrockSignerContext["target"], signal: AbortSignal): Promise<Response> {
     const context: BedrockSignerContext = { region: this.#config.region, service: "bedrock", target };
     let signed: Request;
     if (this.#config.signer !== undefined) {
       signed = await this.#config.signer(request, context);
     } else {
-      const bearerToken = await resolveToken(this.#config.bearerToken);
+      const bearerToken = await resolveToken(this.#config.bearerToken, signal);
       if (bearerToken !== undefined) {
         const headers = new Headers(request.headers);
         headers.set("authorization", `Bearer ${bearerToken}`);
         signed = new Request(request, { headers });
       } else {
-        const credentials = await resolveCredentials(this.#config.credentials);
+        const credentials = await resolveCredentials(this.#config.credentials, signal);
         if (credentials === undefined) {
           throw new ProviderStreamError(
             "AWS credentials are unavailable; configure a Bedrock API key, credentials, or a signer",
@@ -641,8 +641,8 @@ function requestHeaders(initial: HeadersInit | undefined, accept: string): Heade
   return headers;
 }
 
-async function resolveCredentials(source: AwsCredentialSource | undefined): Promise<AwsCredentials | undefined> {
-  if (source !== undefined) return typeof source === "function" ? await source() : source;
+async function resolveCredentials(source: AwsCredentialSource | undefined, signal: AbortSignal): Promise<AwsCredentials | undefined> {
+  if (source !== undefined) return typeof source === "function" ? await source(signal) : source;
   const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
   const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
   if (accessKeyId === undefined || secretAccessKey === undefined) return undefined;

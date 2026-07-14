@@ -91,7 +91,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
       const headers = new Headers(this.#config.headers);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      await this.#authorize(headers);
+      await this.#authorize(headers, signal);
 
       const response = await this.#fetch(`${this.#baseUrl}/interactions`, {
         method: "POST",
@@ -334,7 +334,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
   async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
     const headers = new Headers(this.#config.headers);
     headers.set("accept", "application/json");
-    await this.#authorize(headers);
+    await this.#authorize(headers, signal);
     const entries: unknown[] = [];
     const seen = new Set<string>();
     let pageToken: string | undefined;
@@ -392,15 +392,15 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
     });
   }
 
-  async #authorize(headers: Headers): Promise<void> {
-    const accessToken = await resolveToken(this.#config.accessToken);
+  async #authorize(headers: Headers, signal: AbortSignal): Promise<void> {
+    const accessToken = await resolveToken(this.#config.accessToken, signal);
     if (accessToken !== undefined) {
       headers.set("authorization", `Bearer ${accessToken}`);
-      const userProject = await resolveToken(this.#config.userProject);
+      const userProject = await resolveToken(this.#config.userProject, signal);
       if (userProject !== undefined) headers.set("x-goog-user-project", userProject);
       return;
     }
-    const apiKey = await resolveToken(this.#config.apiKey);
+    const apiKey = await resolveToken(this.#config.apiKey, signal);
     if (apiKey !== undefined) headers.set("x-goog-api-key", apiKey);
   }
 }

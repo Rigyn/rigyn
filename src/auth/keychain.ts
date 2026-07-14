@@ -5,7 +5,12 @@ import { join } from "node:path";
 
 import { CrossProcessFileLock, type FileLockOptions } from "./file-store.js";
 import { defaultSecretRedactor, type SecretRedactor } from "./redaction.js";
-import { runSafeProcess, type SafeProcessOptions, type SafeProcessResult } from "./process.js";
+import {
+  minimalProcessEnvironment,
+  runSafeProcess,
+  type SafeProcessOptions,
+  type SafeProcessResult,
+} from "./process.js";
 import {
   assertCredentialId,
   assertAuthCredential,
@@ -31,15 +36,18 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
   readonly #platform: NodeJS.Platform;
   readonly #run: KeychainCommandRunner;
   readonly #redactor: SecretRedactor;
+  readonly #environment: NodeJS.ProcessEnv;
 
   constructor(options?: {
     platform?: NodeJS.Platform;
     runner?: KeychainCommandRunner;
     redactor?: SecretRedactor;
+    environment?: NodeJS.ProcessEnv;
   }) {
     this.#platform = options?.platform ?? process.platform;
     this.#run = options?.runner ?? runSafeProcess;
     this.#redactor = options?.redactor ?? defaultSecretRedactor;
+    this.#environment = platformKeychainEnvironment(options?.environment ?? process.env);
     if (this.#platform !== "darwin" && this.#platform !== "linux") {
       throw new Error(`No command-backed keychain adapter is available on ${this.#platform}`);
     }
@@ -52,17 +60,27 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
         ? await this.#run({
             command: "/usr/bin/security",
             args: ["find-generic-password", "-s", service, "-a", account, "-w"],
+            environment: this.#environment,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
           })
         : await this.#run({
             command: "/usr/bin/secret-tool",
             args: ["lookup", "service", service, "account", account],
+            environment: this.#environment,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
           });
     if (result.exitCode !== 0) {
-      if (this.#platform === "darwin" && result.exitCode === 44) return undefined;
+      if (
+        (this.#platform === "darwin" && result.exitCode === 44)
+        || (
+          this.#platform === "linux"
+          && result.exitCode === 1
+          && result.stdout === ""
+          && result.stderr.trim() === ""
+        )
+      ) return undefined;
       this.#requireSuccess(result, "read keychain credential");
     }
     const secret = result.stdout.replace(/\r?\n$/, "");
@@ -86,6 +104,7 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
         ? await this.#run({
             command: "/usr/bin/security",
             args: ["add-generic-password", "-U", "-s", service, "-a", account, "-w"],
+            environment: this.#environment,
             input: `${secret}\n`,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
@@ -93,6 +112,7 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
         : await this.#run({
             command: "/usr/bin/secret-tool",
             args: ["store", `--label=Rigyn: ${service}`, "service", service, "account", account],
+            environment: this.#environment,
             input: secret,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
@@ -107,16 +127,22 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
         ? await this.#run({
             command: "/usr/bin/security",
             args: ["delete-generic-password", "-s", service, "-a", account],
+            environment: this.#environment,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
           })
         : await this.#run({
             command: "/usr/bin/secret-tool",
             args: ["clear", "service", service, "account", account],
+            environment: this.#environment,
             ...(signal === undefined ? {} : { signal }),
             redactor: this.#redactor,
           });
-    if (result.exitCode !== 0 && !(this.#platform === "darwin" && result.exitCode === 44)) {
+    if (
+      result.exitCode !== 0
+      && !(this.#platform === "darwin" && result.exitCode === 44)
+      && !(this.#platform === "linux" && result.exitCode === 1 && result.stderr.trim() === "")
+    ) {
       this.#requireSuccess(result, "delete keychain credential");
     }
   }
@@ -130,6 +156,27 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
     if (result.exitCode === 0) return;
     const detail = result.stderr.trim();
     throw new Error(detail.length === 0 ? `Unable to ${action}` : `Unable to ${action}: ${detail}`);
+  }
+}
+
+function platformKeychainEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment = minimalProcessEnvironment({}, source);
+  for (const name of ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"]) {
+    const value = source[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+
+export async function probePlatformKeychain(
+  adapter: KeychainAdapter,
+  signal: AbortSignal = AbortSignal.timeout(3_000),
+): Promise<boolean> {
+  try {
+    await adapter.get("rigyn-keychain-probe-v1", "availability", signal, false);
+    return true;
+  } catch {
+    return false;
   }
 }
 

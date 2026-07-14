@@ -4,7 +4,7 @@ Start with `rigyn diagnostics ./support.json` and `rigyn extensions doctor`. The
 
 ## No model appears in the picker
 
-Run `/login`, choose the intended provider, and then reopen `/model`. The picker lists models currently available from connected provider catalogs; it does not show a universal static catalog. Use `rigyn --list-models` for a noninteractive view. If a provider cannot list deployments, add an exact model entry in configuration.
+Run `/login`, choose the intended provider, and then reopen `/model`. The picker lists models currently available from connected provider catalogs; it does not show a universal static catalog. Use `rigyn --list-models` for the same verified view. `rigyn --offline --list-models` can inspect fallback metadata, but does not prove availability. If a provider cannot list deployments, add an exact model entry in configuration and select it explicitly with `/model PROVIDER/MODEL` or `--model PROVIDER/MODEL`.
 
 ## OAuth login completes but the harness stays disconnected
 

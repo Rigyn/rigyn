@@ -23,7 +23,7 @@ export interface OpenAICodexTransportCredential {
 }
 
 export interface OpenAICodexResponsesConfig {
-  credential: () => Promise<OpenAICodexTransportCredential>;
+  credential: (signal?: AbortSignal) => Promise<OpenAICodexTransportCredential>;
   baseUrl?: string;
   headers?: HeadersInit;
   fetch?: FetchLike;
@@ -588,8 +588,8 @@ export class OpenAICodexResponsesAdapter extends ResponsesAdapter {
       baseUrl,
       headers: config.headers,
       fetch: config.fetch ?? globalThis.fetch,
-      authorize: async (headers) => {
-        const resolved = await config.credential();
+      authorize: async (headers, signal) => {
+        const resolved = await config.credential(signal);
         headers.set("authorization", `Bearer ${credentialValue(resolved.accessToken, "access token")}`);
         headers.set("chatgpt-account-id", credentialValue(resolved.accountId, "account ID"));
         headers.set("originator", "rigyn");
