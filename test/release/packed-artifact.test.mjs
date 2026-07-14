@@ -89,6 +89,40 @@ function errno(error) {
   return error instanceof Error && "code" in error ? error.code : undefined;
 }
 
+function commandInvocation(command, args, options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32" || !command.toLowerCase().endsWith(".cmd")) {
+    return { command, args };
+  }
+  const comspec = Object.entries(options.environment ?? {}).find(([name, value]) =>
+    name.toLowerCase() === "comspec" && value !== undefined && value !== "")?.[1] ?? "cmd.exe";
+  return {
+    command: comspec,
+    args: ["/d", "/s", "/v:off", "/c", command, ...args],
+  };
+}
+
+function stopProcessTree(child) {
+  if (child.pid === undefined) return;
+  if (process.platform === "win32") {
+    const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      stdio: "ignore",
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    if (killed.status === 0) return;
+  }
+  try {
+    if (process.platform === "win32") child.kill("SIGKILL");
+    else process.kill(-child.pid, "SIGKILL");
+  } catch (error) {
+    if (errno(error) === "ESRCH") return;
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+  }
+}
+
 function npmInvocation(args) {
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath !== undefined && npmExecPath !== "") {
@@ -98,7 +132,8 @@ function npmInvocation(args) {
 }
 
 async function runCommand(command, args, options) {
-  const child = spawn(command, args, {
+  const invocation = commandInvocation(command, args, { environment: options.env });
+  const child = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,
     env: options.env,
     detached: process.platform !== "win32",
@@ -112,23 +147,7 @@ async function runCommand(command, args, options) {
   let stderrBytes = 0;
   let outputFailure;
   const stop = () => {
-    if (child.pid === undefined) return;
-    if (process.platform === "win32") {
-      const killed = spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      if (killed.status === 0) return;
-    }
-    try {
-      if (process.platform === "win32") child.kill("SIGKILL");
-      else process.kill(-child.pid, "SIGKILL");
-    } catch (error) {
-      if (errno(error) === "ESRCH") return;
-      try {
-        child.kill("SIGKILL");
-      } catch {}
-    }
+    stopProcessTree(child);
   };
   const capture = (target, chunk, stream) => {
     if (outputFailure !== undefined) return;
@@ -336,6 +355,18 @@ function assertSafePackageFiles(files) {
     ]),
   ]) assert.ok(paths.includes(required), `packed artifact is missing ${required}`);
 }
+
+test("Windows command shims use the isolated command processor without a shell", () => {
+  const command = String.raw`C:\Rigyn Home\bin\rigyn.cmd`;
+  const comspec = String.raw`C:\Windows\System32\cmd.exe`;
+  assert.deepEqual(
+    commandInvocation(command, ["--version"], { platform: "win32", environment: { COMSPEC: comspec } }),
+    {
+      command: comspec,
+      args: ["/d", "/s", "/v:off", "/c", command, "--version"],
+    },
+  );
+});
 
 test("packed artifact installs into a blank home and completes an offline extension run", {
   timeout: 240_000,
@@ -814,7 +845,7 @@ class BlockingProvider {
 }
 export default function activate(api) { api.registerProvider(new BlockingProvider()); }
 `);
-  const activeRuntime = spawn(commandShim, [
+  const activeRuntimeInvocation = commandInvocation(commandShim, [
     "keep the runtime active",
     "--extension",
     blockingExtension,
@@ -826,7 +857,8 @@ export default function activate(api) { api.registerProvider(new BlockingProvide
     "--print",
     "--workspace",
     paths.workspace,
-  ], {
+  ], { environment: paths.environment });
+  const activeRuntime = spawn(activeRuntimeInvocation.command, activeRuntimeInvocation.args, {
     cwd: paths.workspace,
     env: paths.environment,
     detached: process.platform !== "win32",
@@ -842,13 +874,8 @@ export default function activate(api) { api.registerProvider(new BlockingProvide
     resolveClose(code);
   }));
   const stopActiveRuntime = () => {
-    if (activeRuntimeDone || activeRuntime.pid === undefined) return;
-    try {
-      if (process.platform === "win32") activeRuntime.kill("SIGKILL");
-      else process.kill(-activeRuntime.pid, "SIGKILL");
-    } catch (error) {
-      if (errno(error) !== "ESRCH") throw error;
-    }
+    if (activeRuntimeDone) return;
+    stopProcessTree(activeRuntime);
   };
   context.after(stopActiveRuntime);
   await waitForCondition(async () => {

@@ -1768,6 +1768,7 @@ test("full reload replaces extension commands and providers without replacing th
   await writeFile(runtimePath, `
     import { appendFile } from "node:fs/promises";
     export default async function activate(api) {
+      await appendFile(${JSON.stringify(reloadCancellationLog)}, "started\\n");
       await new Promise((_, reject) => {
         const cancel = () => appendFile(${JSON.stringify(reloadCancellationLog)}, "cancelled\\n").then(
           () => reject(api.signal.reason || new Error("reload cancelled")),
@@ -1780,7 +1781,8 @@ test("full reload replaces extension commands and providers without replacing th
   `);
   session.child.stdin.write("\u001b[200~/reload\u001b[201~\r");
   await waitForOutput(session.read, "Reloading keybindings, extensions, skills, prompts, themes");
-  session.child.stdin.write("\u001b");
+  await waitForFileOutput(reloadCancellationLog, "started");
+  session.child.stdin.write("\u001b[27u");
   await waitForFileOutput(reloadCancellationLog, "cancelled");
   const rollbackOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/reload-demo retained\u001b[201~\r");
@@ -1789,6 +1791,7 @@ test("full reload replaces extension commands and providers without replacing th
   await writeFile(runtimePath, `
     import { appendFile } from "node:fs/promises";
     export default async function activate(api) {
+      await appendFile(${JSON.stringify(reloadCancellationLog)}, "self-started\\n");
       await new Promise((_, reject) => {
         const cancel = () => appendFile(${JSON.stringify(reloadCancellationLog)}, "self-cancelled\\n").then(
           () => reject(api.signal.reason || new Error("self reload cancelled")),
@@ -1802,7 +1805,8 @@ test("full reload replaces extension commands and providers without replacing th
   const selfReloadOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/self-reload\u001b[201~\r");
   await waitForOutputAfter(session.read, selfReloadOffset, "Reloading keybindings, extensions, skills, prompts, themes");
-  session.child.stdin.write("\u001b");
+  await waitForFileOutput(reloadCancellationLog, "self-started");
+  session.child.stdin.write("\u001b[27u");
   await waitForFileOutput(reloadCancellationLog, "self-cancelled");
   const selfRollbackOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/reload-demo still-retained\u001b[201~\r");
@@ -1817,8 +1821,7 @@ test("full reload replaces extension commands and providers without replacing th
   await waitForOutput(session.read, "Sessions/transcript: Alt+X session picker");
   session.child.stdin.write("\u001bx");
   await waitForOutput(session.read, "Resume Session");
-  session.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 50));
+  session.child.stdin.write("\u001b[27u");
   session.child.stdin.write("\u001b[200~/reload-demo second\u001b[201~\r");
   await waitForOutput(session.read, "v2 response v2:second");
   session.child.stdin.write("render-tool second\r");
