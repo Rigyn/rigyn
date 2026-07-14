@@ -65,6 +65,10 @@ test("release note extraction rejects an undated or empty release", () => {
     () => extractReleaseNotes("## [0.1.0] - 2026-07-12\n", "0.1.0"),
     /must not be empty/u,
   );
+  assert.deepEqual(
+    extractReleaseNotes("## [0.1.0] - 2026-07-12\r\n\r\n### Fixed\r\n\r\n- Change\r\n", "0.1.0"),
+    { date: "2026-07-12", body: "### Fixed\n\n- Change" },
+  );
 });
 
 test("Windows npm invocation resolves npm-cli beside Node without a command shell", async (context) => {

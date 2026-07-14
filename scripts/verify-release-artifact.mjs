@@ -14,6 +14,13 @@ const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const SENSITIVE_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const OUTPUT_MARKER = ".rigyn-release-output.json";
+const SHARP_SMOKE_PROGRAM = [
+  'import assert from "node:assert/strict";',
+  'import { pathToFileURL } from "node:url";',
+  'const sharp = (await import(pathToFileURL(process.argv[1]).href)).default;',
+  "const png = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();",
+  'assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], "sharp did not produce a PNG");',
+].join("\n");
 
 function parseArguments(argv) {
   const values = new Map();
@@ -273,16 +280,19 @@ async function main() {
 
     const requireFromPackage = createRequire(resolve(packageRoot, "package.json"));
     const sharpEntry = requireFromPackage.resolve("sharp");
-    const sharp = (await import(pathToFileURL(sharpEntry).href)).default;
-    const png = await sharp({
-      create: {
-        width: 1,
-        height: 1,
-        channels: 4,
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      },
-    }).png().toBuffer();
-    assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], "sharp did not produce a PNG");
+    const sharpSmoke = await run(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      SHARP_SMOKE_PROGRAM,
+      sharpEntry,
+    ], {
+      cwd: packageRoot,
+      env: environment,
+      timeoutMs: 30_000,
+      label: "sharp dependency smoke",
+    });
+    assert.equal(sharpSmoke.stdout, "");
+    assert.equal(sharpSmoke.stderr, "");
 
     const ripgrepModule = await import(pathToFileURL(resolve(packageRoot, "dist/tools/ripgrep.js")).href);
     const ripgrep = await ripgrepModule.resolveRipgrep({ environment: { PATH: "" } });

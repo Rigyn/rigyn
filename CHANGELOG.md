@@ -37,6 +37,8 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Native image processing now loads only inside its worker, preventing Windows self-update and uninstall from locking the previous application's Sharp DLLs.
 - Versioned GitHub archives can be installed directly with `npm exec`; npm publication is an explicit independently authorized release step.
 - Release artifact transfer now preserves the hidden ownership marker required by every platform-verification job.
+- Release metadata parsing now canonicalizes checkout line endings before cross-platform artifact verification.
+- Native dependency release smoke tests now exit before temporary installations are removed, avoiding mapped-DLL cleanup failures on Windows.
 
 ### Security
 

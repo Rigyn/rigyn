@@ -53,12 +53,13 @@ async function readJson(root, path) {
 
 export function extractReleaseNotes(changelog, version) {
   assert.match(version, VERSION_PATTERN, `Invalid release version: ${version}`);
+  const normalizedChangelog = changelog.replace(/\r\n?/gu, "\n");
   const heading = new RegExp(`^## \\[${escapeRegex(version)}\\] - (\\d{4}-\\d{2}-\\d{2})$`, "mu");
-  const match = heading.exec(changelog);
+  const match = heading.exec(normalizedChangelog);
   assert.ok(match, `CHANGELOG.md must contain a dated [${version}] release heading`);
   const bodyStart = match.index + match[0].length;
-  const nextHeading = changelog.slice(bodyStart).search(/^## /mu);
-  const body = changelog.slice(bodyStart, nextHeading === -1 ? undefined : bodyStart + nextHeading).trim();
+  const nextHeading = normalizedChangelog.slice(bodyStart).search(/^## /mu);
+  const body = normalizedChangelog.slice(bodyStart, nextHeading === -1 ? undefined : bodyStart + nextHeading).trim();
   assert.notEqual(body, "", `CHANGELOG.md release ${version} must not be empty`);
   const categories = [...body.matchAll(/^### (.+)$/gmu)].map((entry) => entry[1]);
   assert.ok(categories.length > 0, `CHANGELOG.md release ${version} needs a change category`);
