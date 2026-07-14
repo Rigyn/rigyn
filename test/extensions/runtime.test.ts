@@ -433,6 +433,7 @@ test("runtime hash mismatch and partial activation failure stay inert and diagno
 });
 
 test("runtime activation is time-bounded, aborts its generation, and rolls back staged work", async (context) => {
+  const activationTimeoutMs = 500;
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-timeout-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
   const path = join(root, "hanging.mjs");
@@ -449,12 +450,14 @@ test("runtime activation is time-bounded, aborts its generation, and rolls back 
     extensionId: "hanging",
     sourcePath: path,
     sha256: sha256(source),
-  }], { workspace: root, activationTimeoutMs: 25 });
+  }], { workspace: root, activationTimeoutMs });
 
-  assert.ok(Date.now() - startedAt < 1_000);
+  assert.ok(Date.now() - startedAt < 2_000);
   assert.equal(host.hasCommand("must-not-commit-timeout"), false);
-  assert.match(host.diagnostics()[0]?.message ?? "", /activation timed out after 25ms/u);
-  assert.equal(((globalThis as Record<string, unknown>).__runtimeTimeoutSignal as AbortSignal).aborted, true);
+  assert.match(host.diagnostics()[0]?.message ?? "", new RegExp(`activation timed out after ${activationTimeoutMs}ms`, "u"));
+  const timeoutSignal = (globalThis as Record<string, unknown>).__runtimeTimeoutSignal;
+  assert.ok(timeoutSignal instanceof AbortSignal);
+  assert.equal(timeoutSignal.aborted, true);
   assert.equal((globalThis as Record<string, unknown>).__runtimeTimeoutDisposed, true);
   await host.close();
   delete (globalThis as Record<string, unknown>).__runtimeTimeoutSignal;

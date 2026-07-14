@@ -181,7 +181,8 @@ export async function runProcess(spec: CommandSpec, signal: AbortSignal): Promis
       finish(parentOutcome ?? { exitCode, signal: exitSignal });
     });
     child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-      if (error.code !== "EPIPE") fail(error);
+      // libuv reports a child closing stdin as EPIPE on POSIX and EOF on Windows.
+      if (error.code !== "EPIPE" && error.code !== "EOF") fail(error);
     });
 
     if (spec.stdin === undefined) child.stdin.end();

@@ -33,11 +33,15 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   assert.equal(calls[0]?.input, undefined);
   assert.doesNotMatch(JSON.stringify(calls[0]?.args), new RegExp(key.toString("base64"), "u"));
   assert.equal(calls[0]?.environment?.RIGYN_DPAPI_INPUT, key.toString("base64"));
-  assert.match(calls[0]?.args?.at(-1) ?? "", /Remove-Item Env:RIGYN_DPAPI_INPUT/u);
+  assert.match(
+    calls[0]?.args?.at(-1) ?? "",
+    /^\$source=\$env:RIGYN_DPAPI_INPUT;Remove-Item Env:RIGYN_DPAPI_INPUT;Add-Type/u,
+  );
   assert.match(calls[0]?.args?.at(-1) ?? "", /CurrentUser/u);
   assert.equal(calls[0]?.environment?.SystemRoot, environment.SystemRoot);
   assert.equal(calls[0]?.environment?.TEMP, environment.TEMP);
   assert.equal(calls[0]?.environment?.OPENAI_API_KEY, undefined);
+  assert.equal(calls[0]?.timeoutMs, 30_000);
 
   const restored = await unprotectWindowsCredentialKey(envelope, { runner, command: "powershell.exe", environment });
   assert.deepEqual(restored, key);

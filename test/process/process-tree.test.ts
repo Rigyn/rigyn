@@ -43,7 +43,7 @@ test("POSIX process-tree termination targets the detached process group with the
   assert.deepEqual(killed, [[-2468, "SIGTERM"]]);
 });
 
-test("bounded process execution tolerates a child closing stdin before a pending write drains", async () => {
+test("bounded process execution tolerates a child closing stdin before a pending write drains across platforms", async () => {
   const result = await runProcess({
     argv: [process.execPath, "--eval", "process.exit(0)"],
     cwd: process.cwd(),
@@ -52,4 +52,6 @@ test("bounded process execution tolerates a child closing stdin before a pending
     outputLimitBytes: 1024,
   }, new AbortController().signal);
   assert.equal(result.exitCode, 0);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.cancelled, false);
 });

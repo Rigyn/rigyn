@@ -783,11 +783,14 @@ export default function activate(api: any) {
   assert.equal(retainedVersion.stderr, "");
 
   const blockingExtension = join(paths.workspace, "blocking-provider.mjs");
+  const blockingReady = join(paths.workspace, "blocking-provider-ready");
   await writeFile(blockingExtension, `
+import { writeFile } from "node:fs/promises";
 class BlockingProvider {
   id = "blocking-provider";
   async *stream(request, signal) {
     yield { type: "response_start", model: request.model };
+    await writeFile(${JSON.stringify(blockingReady)}, "ready");
     await new Promise((resolve, reject) => {
       const timer = setTimeout(resolve, 60_000);
       signal.addEventListener("abort", () => {
@@ -845,15 +848,20 @@ export default function activate(api) { api.registerProvider(new BlockingProvide
   context.after(stopActiveRuntime);
   await waitForCondition(async () => {
     if (activeRuntimeDone) {
-      throw new Error(`installed blocking runtime exited before leasing:\n${Buffer.concat(activeRuntimeError).toString("utf8")}`);
+      throw new Error(`installed blocking runtime exited before provider readiness:\n${Buffer.concat(activeRuntimeError).toString("utf8")}`);
     }
     try {
-      return (await readdir(join(paths.installRoot, ".runtime-leases"))).some((entry) => entry.endsWith(".json"));
+      return await readFile(blockingReady, "utf8") === "ready";
     } catch (error) {
       if (errno(error) === "ENOENT") return false;
       throw error;
     }
-  }, "the installed runtime lease");
+  }, "the installed blocking provider");
+  assert.equal(
+    (await readdir(join(paths.installRoot, ".runtime-leases"))).some((entry) => entry.endsWith(".json")),
+    true,
+    "the active installed runtime must hold a lease",
+  );
   await assert.rejects(
     runCommand(commandShim, ["uninstall", "--yes"], {
       cwd: paths.workspace,
