@@ -27,6 +27,35 @@ async function temporary(t: TestContext): Promise<string> {
   return root;
 }
 
+async function waitForStartedProcess(path: string, timeoutMs = 5_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const pid = Number(await readFile(path, "utf8"));
+      assert.ok(Number.isSafeInteger(pid) && pid > 0, "started process PID must be a positive safe integer");
+      return pid;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    if (Date.now() >= deadline) throw new Error(`Process ${pid} did not exit`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 interface PackageFixture {
   id?: string;
   version: string;
@@ -69,9 +98,18 @@ async function writePackageFixture(root: string, fixture: PackageFixture): Promi
 async function writeFakeNpm(root: string): Promise<string> {
   const script = join(root, "fake-npm.mjs");
   await writeFile(script, `
-import { appendFile, mkdir, symlink, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 const [capturePath, markerPath, ...args] = process.argv.slice(2);
+const waitForPath = async (target) => {
+  for (;;) {
+    try { await access(target); return; } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+const gatedSurvivor = ${JSON.stringify("const fs = process.getBuiltinModule('node:fs'); fs.writeFileSync(process.argv[1], String(process.pid)); const timer = setInterval(() => { if (!fs.existsSync(process.argv[2])) return; clearInterval(timer); fs.writeFileSync(process.argv[3], 'survived'); }, 10)")};
 const manifest = JSON.parse(await import("node:fs/promises").then(({ readFile }) => readFile(join(process.cwd(), "package.json"), "utf8")));
 await appendFile(capturePath, JSON.stringify({
   args,
@@ -115,12 +153,18 @@ for (const [name, spec] of Object.entries(dependencies)) {
   if (name === "slow-dependency") await new Promise((resolve) => setTimeout(resolve, 2_000));
   if (name === "noisy-dependency") process.stdout.write("x".repeat(4096));
   if (name === "noisy-tree-dependency") {
-    process.getBuiltinModule("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify("setTimeout(() => process.getBuiltinModule('node:fs').writeFileSync(process.argv[1], 'survived'), 400)")}, markerPath], { stdio: "ignore" });
+    const startedPath = markerPath + ".noisy-tree-started";
+    const releasePath = markerPath + ".noisy-tree-release";
+    process.getBuiltinModule("node:child_process").spawn(process.execPath, ["-e", gatedSurvivor, startedPath, releasePath, markerPath], { stdio: "ignore" });
+    await waitForPath(startedPath);
     process.stdout.write("x".repeat(4096));
     await new Promise(() => {});
   }
   if (name === "tree-dependency") {
-    process.getBuiltinModule("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify("setTimeout(() => process.getBuiltinModule('node:fs').writeFileSync(process.argv[1], 'survived'), 400)")}, markerPath], { stdio: "ignore" });
+    const startedPath = markerPath + ".tree-started";
+    const releasePath = markerPath + ".tree-release";
+    process.getBuiltinModule("node:child_process").spawn(process.execPath, ["-e", gatedSurvivor, startedPath, releasePath, markerPath], { stdio: "ignore" });
+    await waitForPath(startedPath);
     await new Promise(() => {});
   }
   if (name === "manifest-mutator") {
@@ -420,8 +464,14 @@ test("dependency commands are bounded and cannot alter the package manifest", as
     dependency: "tree-dependency",
     spec: "1.0.0",
   });
-  await assert.rejects(timed.install(treeSource), /timed out after 50ms/u);
-  await new Promise<void>((resolve) => setTimeout(resolve, 550));
+  const treeManager = fakeManager(root, fakeNpm, capture, marker);
+  const controller = new AbortController();
+  const treeInstall = treeManager.install(treeSource, "user", { signal: controller.signal });
+  const treePid = await waitForStartedProcess(`${marker}.tree-started`);
+  controller.abort(new Error("cancel dependency process tree"));
+  await assert.rejects(treeInstall, /cancel dependency process tree/u);
+  await writeFile(`${marker}.tree-release`, "release");
+  await waitForProcessExit(treePid);
   await assert.rejects(access(marker), /ENOENT/u);
 
   const noisySource = join(root, "noisy-source");
@@ -444,7 +494,9 @@ test("dependency commands are bounded and cannot alter the package manifest", as
     spec: "1.0.0",
   });
   await assert.rejects(bounded.install(noisyTreeSource), /output exceeded 128 bytes/u);
-  await new Promise<void>((resolve) => setTimeout(resolve, 550));
+  const noisyTreePid = await waitForStartedProcess(`${marker}.noisy-tree-started`);
+  await writeFile(`${marker}.noisy-tree-release`, "release");
+  await waitForProcessExit(noisyTreePid);
   await assert.rejects(access(marker), /ENOENT/u);
 
   const mutationSource = join(root, "mutation-source");
