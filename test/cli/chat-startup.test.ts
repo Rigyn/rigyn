@@ -2668,8 +2668,8 @@ test("session picker rename and delete actions mutate SQLite without leaving the
   assert.equal(inspection.getThread("rename-session").name, "renamed-session");
   assert.equal(inspection.getThread("current-session").name, "current-session");
 
-  session.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 50));
+  await waitForOutputAfter(session.read, deletePromptOffset, "Deleted session delete-me");
+  session.child.stdin.write("\u001b[27u");
   session.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
   assert.equal(await finishChat(session), 0, session.read());
 });

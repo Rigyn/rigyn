@@ -397,6 +397,11 @@ test("packed artifact installs into a blank home and completes an offline extens
     ...installerEnvironment,
     npm_config_offline: "false",
   };
+  assert.equal(
+    installerEnvironment.npm_execpath,
+    undefined,
+    "the self-contained installer must work without npm lifecycle metadata",
+  );
   const globalSentinel = join(paths.fakeGlobal, "global-sentinel.txt");
   await writeFile(globalSentinel, "must remain untouched\n");
   const immutableSourcePaths = ["package.json", "package-lock.json", "dist/bin/rigyn.js"];

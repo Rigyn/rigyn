@@ -1,6 +1,6 @@
 import { lstat, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   assertNoOtherActiveRuntimes,
@@ -20,10 +20,27 @@ if (updateSpec === "" || updateSpec.includes("\0") || Buffer.byteLength(updateSp
   throw new Error("RIGYN_UPDATE_SPEC is invalid");
 }
 
-function npmCommand(args) {
-  return process.env.npm_execpath
-    ? { command: process.execPath, args: [process.env.npm_execpath, ...args] }
-    : { command: process.platform === "win32" ? "npm.cmd" : "npm", args };
+async function npmCommand(args) {
+  if (process.platform !== "win32") {
+    return process.env.npm_execpath
+      ? { command: process.execPath, args: [process.env.npm_execpath, ...args] }
+      : { command: "npm", args };
+  }
+  const candidates = [
+    process.env.npm_execpath,
+    join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    resolve(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ].filter((value) => value !== undefined && value !== "").map((value) => resolve(value));
+  for (const candidate of candidates) {
+    try {
+      if ((await lstat(candidate)).isFile()) {
+        return { command: process.execPath, args: [candidate, ...args] };
+      }
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  }
+  throw new Error("npm requires npm-cli.js to be installed beside Node.js on Windows");
 }
 
 function childEnvironment(root) {
@@ -65,7 +82,7 @@ async function update() {
       const prefix = join(staging, "package");
       await mkdir(prefix, { recursive: true, mode: 0o700 });
       const environment = childEnvironment(staging);
-      const npm = npmCommand([
+      const npm = await npmCommand([
         "install",
         "--global=false",
         "--omit=dev",
