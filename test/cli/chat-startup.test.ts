@@ -230,13 +230,15 @@ test("a full-screen action picker returns to chat instead of exiting the process
   session.child.stdin.write("/model\r");
   await waitForOutput(session.read, "Use /login to connect a provider");
   assert.equal(session.child.exitCode, null, session.read());
-  session.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100));
+  let closeOffset = session.read().length;
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, closeOffset, "no-model");
   session.child.stdin.write("/resume\r");
   await waitForOutput(session.read, "No sessions in this workspace");
   assert.equal(session.child.exitCode, null, session.read());
-  session.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100));
+  closeOffset = session.read().length;
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, closeOffset, "no-model");
   session.child.stdin.write("/session\r");
   await waitForOutput(session.read, "Messages: 0 user · 0 assistant · 0 tool");
   session.child.stdin.write("/exit\r");
@@ -733,8 +735,9 @@ test("commands submitted during a response defer in order and never become provi
   assert.equal((await readFile(extensionLog, "utf8")).trim(), "mark");
   assert.equal((await readFile(shellEventLog, "utf8")).trim(), "hidden:true");
   assert.deepEqual((await readFile(providerLog, "utf8")).trim().split("\n"), ["alpha:begin route"]);
-  session.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 50));
+  const closeOffset = session.read().length;
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, closeOffset, "beta • thinking off");
   submit("/exit");
   assert.equal(await finishChat(session), 0, session.read());
 });
@@ -901,8 +904,9 @@ test("interactive model selection and cycling scope survive a process restart", 
 
   second.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutput(second.read, "Auto-compact");
-  second.child.stdin.write("\u001b");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  const settingsCloseOffset = second.read().length;
+  second.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(second.read, settingsCloseOffset, "alpha • low");
   second.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
   assert.equal(await finishChat(second), 0, second.read());
 
@@ -1155,8 +1159,8 @@ test("an empty model picker explains /login and cancellation returns to chat", {
   await waitForOutput(session.read, "No available models. Use /login to connect a provider.");
   assert.doesNotMatch(session.read(), /Only showing models from configured providers/u);
   const cancellationOffset = session.read().length;
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, cancellationOffset, "no-model");
   session.child.stdin.write("\u001b[200~/session\u001b[201~\r");
   await waitForOutputAfter(session.read, cancellationOffset, "Messages: 0 user · 0 assistant · 0 tool");
   assert.doesNotMatch(session.read().slice(cancellationOffset), /Selection cancelled/u);
@@ -1174,8 +1178,9 @@ test("environment auth does not expose unverified built-in models and the empty 
 
   session.child.stdin.write(Buffer.from([12]));
   await waitForOutput(session.read, "No available models. Use /login to connect a provider.");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  const cancellationOffset = session.read().length;
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, cancellationOffset, "no-model");
 
   session.child.stdin.write("\u001b[200~/session\u001b[201~\r");
   await waitForOutput(session.read, "Messages: 0 user · 0 assistant · 0 tool");
@@ -1880,14 +1885,18 @@ test("scoped-model selector persists exact models and settings cancellation pres
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
   await waitForOutput(session.read, "Rigyn v0.1.0 · Ready");
+  const closeOverlay = async (): Promise<void> => {
+    const offset = session.read().length;
+    session.child.stdin.write("\u001b[27u");
+    await waitForOutputAfter(session.read, offset, "alpha • thinking off");
+  };
   session.child.stdin.write("\u001b[200~/scoped-models\u001b[201~\r");
   await waitForOutput(session.read, "Scoped Models");
   session.child.stdin.write("beta\r");
   session.child.stdin.write(Buffer.from([19]));
   await waitForOutput(session.read, "Saved model cycling defaults");
   assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).scopedModels, ["scope-offline/alpha"]);
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   let settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
@@ -1896,8 +1905,7 @@ test("scoped-model selector persists exact models and settings cancellation pres
   await waitForOutputAfter(session.read, settingsOffset, "Steering mode  all");
   await waitForFileOutput(configPath, '"steeringMode": "all"');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).steeringMode, "all");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
@@ -1906,48 +1914,43 @@ test("scoped-model selector persists exact models and settings cancellation pres
   await waitForOutputAfter(session.read, settingsOffset, "Follow-up mode  all");
   await waitForFileOutput(configPath, '"followUpMode": "all"');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).followUpMode, "all");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutputAfter(session.read, settingsOffset, "Double-Escape action");
   session.child.stdin.write("Double-Escape action\r");
   await waitForOutputAfter(session.read, settingsOffset, "Double-Escape action  fork");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"doubleEscapeAction": "fork"');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).doubleEscapeAction, "fork");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutputAfter(session.read, settingsOffset, "ChatGPT transport");
   session.child.stdin.write("ChatGPT transport\r");
   await waitForOutputAfter(session.read, settingsOffset, "ChatGPT transport  websocket-cached");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"transport": "websocket-cached"');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).providers["openai-codex"].transport, "websocket-cached");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutputAfter(session.read, settingsOffset, "Provider retry attempts");
   session.child.stdin.write("Provider retry attempts\r");
   await waitForOutputAfter(session.read, settingsOffset, "Provider retry attempts  4");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"maxAttempts": 4');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).providerRetry.maxAttempts, 4);
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
 
   settingsOffset = session.read().length;
   session.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutputAfter(session.read, settingsOffset, "Project trust default");
   session.child.stdin.write("Project trust default\r");
   await waitForOutputAfter(session.read, settingsOffset, "Project trust default  always");
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"defaultProjectTrust": "always"');
   assert.equal(JSON.parse(await readFile(configPath, "utf8")).defaultProjectTrust, "always");
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await closeOverlay();
   session.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
   assert.equal(await finishChat(session), 0, session.read());
   assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).scopedModels, ["scope-offline/alpha"]);
@@ -2005,16 +2008,20 @@ test("settings apply auto-compaction and outbound-image choices immediately and 
   await waitForOutput(first.read, "Auto-compact");
   first.child.stdin.write("Auto-compact\r");
   await waitForOutput(first.read, "Auto-compact  false");
-  first.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"autoCompaction": false');
+  const autoCompactCloseOffset = first.read().length;
+  first.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(first.read, autoCompactCloseOffset, "fixture • thinking off");
 
   const outboundOffset = first.read().length;
   first.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutputAfter(first.read, outboundOffset, "Auto-compact");
   first.child.stdin.write("Block images\r");
   await waitForOutputAfter(first.read, outboundOffset, "Block images  true");
-  first.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 75));
+  await waitForFileOutput(configPath, '"outboundImages": "block"');
+  const outboundCloseOffset = first.read().length;
+  first.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(first.read, outboundCloseOffset, "fixture • thinking off");
 
   const persisted = JSON.parse(await readFile(configPath, "utf8"));
   assert.equal(persisted.autoCompaction, false);
@@ -2091,8 +2098,9 @@ test("scoped-model reorder persists cycle order and drives forward and backward 
   assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")).scopedModels, [
     "scope-order/beta", "scope-order/alpha", "scope-order/gamma",
   ]);
-  session.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100));
+  const closeOffset = session.read().length;
+  session.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(session.read, closeOffset, "alpha • thinking off");
 
   let offset = session.read().length;
   session.child.stdin.write(Buffer.from([16]));
@@ -2428,8 +2436,9 @@ test("entry labels survive a full-TUI process restart and can be filtered, times
   await waitForOutput(first.read, "Add entry label");
   first.child.stdin.write("restart bookmark\r");
   await waitForOutput(first.read, "Labeled label-root: restart bookmark");
-  first.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 35));
+  const firstCloseOffset = first.read().length;
+  first.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(first.read, firstCloseOffset, "no-model");
   first.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
   assert.equal(await finishChat(first), 0, first.read());
 
@@ -2447,8 +2456,9 @@ test("entry labels survive a full-TUI process restart and can be filtered, times
   second.child.stdin.write(Buffer.from([21]));
   second.child.stdin.write("\r");
   await waitForOutput(second.read, "Removed label from label-root");
-  second.child.stdin.write(Buffer.from([27]));
-  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 35));
+  const secondCloseOffset = second.read().length;
+  second.child.stdin.write("\u001b[27u");
+  await waitForOutputAfter(second.read, secondCloseOffset, "no-model");
   second.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
   assert.equal(await finishChat(second), 0, second.read());
 
