@@ -203,9 +203,14 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
     "scripts/verify-release-artifact.mjs",
     "SHA256SUMS",
     "RELEASE_NOTES.md",
+    'gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft',
     "npm publish",
     "--provenance",
   ]) assert.ok(releaseWorkflow.includes(fragment), `release.yml must contain ${fragment}`);
+  assert.ok(
+    !releaseWorkflow.includes('releases/tags/$GITHUB_REF_NAME'),
+    "release.yml must not use the published-tag endpoint to inspect draft releases",
+  );
   const actionCount = await checkActionPins(projectRoot);
 
   return {

@@ -112,8 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./.release/release-manifest.json').version")"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq .draft)"
+          if draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
             test "$draft" = true
             gh release edit "$GITHUB_REF_NAME" --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md --draft
           else

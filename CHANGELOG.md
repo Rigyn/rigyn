@@ -4,6 +4,10 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+### Fixed
+
+- Tagged release retries inspect existing drafts through the release CLI instead of GitHub's published-tag endpoint, so a failed npm publication can resume without deleting release state.
+
 ## [0.1.1] - 2026-07-14
 
 ### Changed
