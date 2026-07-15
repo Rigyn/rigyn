@@ -3444,7 +3444,11 @@ export class RuntimeExtensionHost {
     registration: RuntimeToolRegistration,
   ): void {
     this.#assertLive(entry, generation);
-    if (this.#tools.has(registration.name)) throw new Error("Runtime extension registered a duplicate tool");
+    const prior = this.#tools.get(registration.name);
+    if (prior !== undefined) {
+      if (this.#diagnoseCrossExtensionToolCollision(entry, registration.name, prior)) return;
+      throw new Error("Runtime extension registered a duplicate tool");
+    }
     const tool = new RuntimeHarnessTool(
       registration,
       (context) => this.#runtimeToolContext(entry, generation, context),
@@ -5488,6 +5492,24 @@ export class RuntimeExtensionHost {
     }
   }
 
+  #diagnoseCrossExtensionToolCollision(
+    entry: ExtensionRuntimeEntry,
+    name: string,
+    prior: HarnessTool,
+  ): boolean {
+    const owner = this.#toolOwners.get(prior);
+    if (
+      owner === undefined ||
+      (owner.extensionId === entry.extensionId && owner.sourcePath === entry.sourcePath)
+    ) return false;
+    this.addDiagnostic({
+      extensionId: entry.extensionId,
+      sourcePath: entry.sourcePath,
+      message: `Runtime tool ${name} from ${entry.extensionId} (${entry.sourcePath}) was ignored because ${owner.extensionId} (${owner.sourcePath}) registered it first`,
+    });
+    return true;
+  }
+
   commit(staged: StagedActivation): void {
     if (this.#closed) throw new Error("Runtime extension host is closed");
     if (staged.committed) throw new Error("Runtime extension activation is already committed");
@@ -5516,7 +5538,8 @@ export class RuntimeExtensionHost {
     // Extension tools use first-owner wins across packages. Re-registering within
     // one activation keeps the last definition, matching ordinary map semantics.
     for (const tool of tools) {
-      if (!this.#tools.has(tool.name)) {
+      const prior = this.#tools.get(tool.name);
+      if (prior === undefined) {
         const runtimeTool = new RuntimeHarnessTool(
           tool,
           (context) => this.#runtimeToolContext(staged.entry, staged.generation, context),
@@ -5528,7 +5551,7 @@ export class RuntimeExtensionHost {
           extensionId: staged.entry.extensionId,
           sourcePath: staged.entry.sourcePath,
         });
-      }
+      } else this.#diagnoseCrossExtensionToolCollision(staged.entry, tool.name, prior);
     }
     for (const command of commands) this.#commands.push({
       entry: staged.entry,

@@ -1,5 +1,5 @@
 const BOOLEAN_FLAGS = new Set([
-  "help", "version", "json", "print", "yes", "all", "no-browser", "reindex",
+  "help", "version", "json", "print", "yes", "all", "no-browser", "reindex", "redact",
   "continue", "resume", "all-tools", "no-tools", "no-builtin-tools", "no-session", "local",
   "no-extensions", "no-context-files",
   "approve", "no-approve", "allow-scripts", "offline", "verbose", "no-skills", "no-prompt-templates", "no-themes",

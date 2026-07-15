@@ -48,7 +48,7 @@ test("extension capability matrix references real docs, examples, tests, and pub
   const hosts = (id: string): string[] => matrix.capabilities.find((entry) => entry.id === id)?.hosts ?? [];
   assert.deepEqual(hosts("tools-and-active-selection"), matrix.hosts);
   assert.deepEqual(hosts("tool-renderers"), ["tui"]);
-  assert.deepEqual(hosts("runtime-commands"), ["tui", "rpc"]);
+  assert.deepEqual(hosts("runtime-commands"), ["tui", "print", "json", "rpc"]);
   assert.deepEqual(hosts("runtime-shortcuts"), ["tui"]);
   assert.deepEqual(hosts("invocation-flags"), ["tui", "print", "json"]);
   assert.deepEqual(hosts("interactive-dialog-and-presentation-ui"), ["tui", "rpc"]);

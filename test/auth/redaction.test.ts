@@ -48,12 +48,20 @@ test("registered-secret memory is explicitly bounded without silently accepting 
 
 test("structured redaction is cycle-, accessor-, and prototype-safe", () => {
   const redactor = new SecretRedactor();
-  const value: Record<string, unknown> = { safe: "ok", accessToken: "secret-value" };
+  const shared = { path: "src/math.mjs" };
+  const value: Record<string, unknown> = {
+    safe: "ok",
+    accessToken: "secret-value",
+    first: shared,
+    second: shared,
+  };
   value.self = value;
   Object.defineProperty(value, "computed", { enumerable: true, get: () => { throw new Error("must not run"); } });
   Object.defineProperty(value, "__proto__", { enumerable: true, value: { polluted: true } });
   const redacted = redactor.redactValue(value) as Record<string, unknown>;
   assert.equal(redacted.accessToken, "[REDACTED]");
+  assert.deepEqual(redacted.first, shared);
+  assert.deepEqual(redacted.second, shared);
   assert.equal(redacted.self, "[Circular]");
   assert.equal(redacted.computed, "[Accessor]");
   assert.deepEqual(redacted.__proto__, { polluted: true });

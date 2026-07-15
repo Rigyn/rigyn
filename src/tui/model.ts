@@ -752,7 +752,7 @@ export class TuiModel {
           ),
         },
         status: userShell.isError ? "failed" : "completed",
-        expanded: false,
+        expanded: true,
       });
       return;
     }
@@ -798,6 +798,7 @@ export class TuiModel {
       images?: readonly TranscriptImage[];
     } = {},
   ): void {
+    const expanded = status === "completed" || status === "failed" || status === "in_doubt";
     const entry = this.#entries.findLast((item) => item.callId === callId);
     if (entry === undefined) {
       this.#append({
@@ -817,13 +818,14 @@ export class TuiModel {
               ...(values.result === undefined ? {} : { result: values.result }),
             } }),
         status,
-        expanded: false,
+        expanded,
         ...(values.images === undefined || values.images.length === 0 ? {} : { images: values.images }),
       });
       return;
     }
     entry.title = sanitizeTerminalText(name);
     entry.status = status;
+    entry.expanded = expanded;
     if (values.text !== undefined) entry.text = sanitizeTerminalText(values.text);
     if (values.summary !== undefined) entry.summary = sanitizeTerminalText(values.summary);
     if (values.inputPreview !== undefined) entry.inputPreview = sanitizeTerminalText(values.inputPreview);

@@ -17,6 +17,12 @@ test("keybindings normalize modifier order and replace defaults per action", () 
   assert.equal(bindings.matches("tui.input.newLine", { key: "newline", ctrl: true }), true);
 });
 
+test("tool details need no default expansion key but remain remappable", () => {
+  assert.deepEqual(new Keybindings().keys("app.tools.expand"), []);
+  const bindings = new Keybindings({ "app.tools.expand": "alt+t" });
+  assert.deepEqual(bindings.keys("app.tools.expand"), ["alt+t"]);
+});
+
 test("keybindings reject unknown actions and malformed keys", () => {
   assert.throws(() => parseKeybindings({ "app.unknown": "ctrl+x" }), /Unknown keybinding actions/u);
   assert.throws(() => parseKeybindings({ "app.model.select": "cmd+x" }), /modifiers/u);

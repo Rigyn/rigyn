@@ -136,7 +136,7 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<KeybindingAction, readonly str
   "app.model.cycleBackward": ["ctrl+shift+p"],
   "app.thinking.cycle": ["shift+tab"],
   "app.thinking.toggle": ["ctrl+t"],
-  "app.tools.expand": ["ctrl+o", "alt+e"],
+  "app.tools.expand": [],
   "app.message.followUp": ["alt+enter"],
   "app.message.dequeue": ["alt+up"],
   "app.message.copy": ["ctrl+x"],

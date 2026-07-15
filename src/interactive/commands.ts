@@ -25,7 +25,7 @@ export const INTERACTIVE_COMMANDS: readonly InteractiveCommandDefinition[] = [
   { name: "settings", syntax: "settings", activePolicy: DEFER, hidden: false, help: true, palette: { id: "settings", label: "Open settings menu", detail: "/settings", value: "/settings" } },
   { name: "model", syntax: "model [PROVIDER/MODEL]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "model", label: "Select model", detail: "/model", value: "/model" } },
   { name: "scoped-models", syntax: "scoped-models", activePolicy: DEFER, hidden: false, help: true, palette: { id: "scoped-models", label: "Configure model cycling", detail: "/scoped-models", value: "/scoped-models" } },
-  { name: "export", syntax: "export [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "export", label: "Export session", detail: "/export [FILE]", value: "/export" } },
+  { name: "export", syntax: "export [--redact] [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "export", label: "Export session", detail: "/export [--redact] [FILE]", value: "/export" } },
   { name: "import", syntax: "import [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "import", label: "Import session", detail: "/import [FILE]", value: "/import" } },
   { name: "copy", syntax: "copy", activePolicy: DEFER, hidden: false, help: true, palette: { id: "copy", label: "Copy last assistant message", detail: "/copy", value: "/copy" } },
   { name: "name", syntax: "name [NAME]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "name", label: "Set session name", detail: "/name [NAME]", value: "/name" } },
@@ -66,6 +66,20 @@ export function interactiveCommandPalette(): Array<NonNullable<InteractiveComman
     ...command.palette,
     ...(command.palette.keywords === undefined ? {} : { keywords: [...command.palette.keywords] }),
   }]);
+}
+
+export interface InteractiveExportRequest {
+  redact: boolean;
+  pathArgument: string;
+}
+
+export function parseInteractiveExportRequest(value: string): InteractiveExportRequest {
+  const trimmed = value.trim();
+  if (trimmed === "--redact") return { redact: true, pathArgument: "" };
+  if (trimmed.startsWith("--redact") && /^\s/u.test(trimmed.slice("--redact".length))) {
+    return { redact: true, pathArgument: trimmed.slice("--redact".length).trimStart() };
+  }
+  return { redact: false, pathArgument: trimmed };
 }
 
 export function renderInteractiveCommandHelp(): string {

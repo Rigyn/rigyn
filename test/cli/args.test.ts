@@ -13,9 +13,10 @@ test("list-models accepts an optional search without consuming the next flag", (
 });
 
 test("mode and export retain their required values", () => {
-  const parsed = parseArguments(["--mode", "json", "--export", "session.html"]);
+  const parsed = parseArguments(["--mode", "json", "--export", "session.html", "--redact"]);
   assert.equal(flagString(parsed, "mode"), "json");
   assert.equal(flagString(parsed, "export"), "session.html");
+  assert.equal(flagBoolean(parsed, "redact"), true);
   assert.throws(() => parseArguments(["--mode"]), /--mode requires a value/u);
   assert.throws(() => parseArguments(["--export", "--offline"]), /--export requires a value/u);
 });

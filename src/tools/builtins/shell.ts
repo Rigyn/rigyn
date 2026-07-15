@@ -9,6 +9,7 @@ import type { HarnessTool, ResourceClaim, ToolContext, ToolResult } from "../typ
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1_000;
+const DEFAULT_TIMEOUT_SECONDS = 600;
 
 const schema: Record<string, JsonValue> = {
   type: "object",
@@ -16,12 +17,12 @@ const schema: Record<string, JsonValue> = {
   required: ["command"],
   properties: {
     command: { type: "string", minLength: 1, maxLength: 131072 },
-    timeout: { type: "number" },
+    timeout: { type: "number", description: `Timeout in seconds (default ${DEFAULT_TIMEOUT_SECONDS})` },
   },
 };
 
 function timeoutMilliseconds(value: number | undefined): number {
-  if (value === undefined) return MAX_TIMEOUT_MS;
+  if (value === undefined) return DEFAULT_TIMEOUT_SECONDS * 1_000;
   if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid timeout: must be a finite number of seconds");
   const milliseconds = value * 1_000;
   if (milliseconds > MAX_TIMEOUT_MS) throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_SECONDS} seconds`);
@@ -114,7 +115,7 @@ export class ShellTool implements HarnessTool {
 
     let status: string | undefined;
     if (result.cancelled) status = "Command aborted";
-    else if (result.timedOut) status = `Command timed out after ${timeout ?? MAX_TIMEOUT_SECONDS} seconds`;
+    else if (result.timedOut) status = `Command timed out after ${timeout ?? DEFAULT_TIMEOUT_SECONDS} seconds`;
     else if (result.signal !== null) status = `Command terminated by ${result.signal}`;
     else if (result.exitCode !== 0 && result.exitCode !== null) status = `Command exited with code ${result.exitCode}`;
     if (status !== undefined) content = `${content === "(no output)" ? "" : `${content}\n\n`}${status}`;

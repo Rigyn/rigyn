@@ -77,7 +77,14 @@ import { expandPath, harnessPaths, type HarnessPaths } from "./paths.js";
 import { runRpcServer } from "./rpc.js";
 import { persistDefaultSelection, persistUiPreferences, persistUiTheme, updateGlobalConfig } from "./setup.js";
 import { runProductInstallAction } from "./product-install.js";
-import { exportThreadHtml, exportThreadMarkdown, importThreadJsonl } from "../service/session-transfer.js";
+import {
+  exportThreadHtml,
+  exportThreadMarkdown,
+  exportThreadRedactedHtml,
+  exportThreadRedactedMarkdown,
+  importThreadJsonl,
+} from "../service/session-transfer.js";
+import { parseInteractiveExportRequest } from "../interactive/commands.js";
 import { buildSessionTree, type SessionTreeRow } from "../service/index.js";
 import type { RunInputQueueLease } from "../service/harness.js";
 import {
@@ -124,6 +131,7 @@ import {
 import { ProjectTrustResolver, type ProjectTrustOverride } from "./project-trust.js";
 
 const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
+const REDACTED_JSONL_ERROR = "Redacted exports support HTML or Markdown, not JSONL";
 const STARTUP_INVENTORY_ITEMS = 8;
 const STARTUP_INVENTORY_ITEM_BYTES = 160;
 type CodexTransportSetting = "auto" | "sse" | "websocket" | "websocket-cached";
@@ -209,10 +217,11 @@ function primaryBinding(keybindings: Keybindings, action: KeybindingAction): str
 }
 
 export function formatHotkeys(keybindings: Keybindings): string {
+  const toolDetails = bindingHint(keybindings, "app.tools.expand");
   return [
     `Model: ${bindingHint(keybindings, "app.model.select")} picker · ${bindingHint(keybindings, "app.model.cycleForward")} next · ${bindingHint(keybindings, "app.model.cycleBackward")} previous`,
     `Thinking: ${bindingHint(keybindings, "app.thinking.cycle")} level · ${bindingHint(keybindings, "app.thinking.toggle")} reasoning`,
-    `Tools/editor: ${bindingHint(keybindings, "app.tools.expand")} tools · ${bindingHint(keybindings, "app.editor.external")} external editor`,
+    `Tools/editor: ${toolDetails === "" ? "" : `${toolDetails} tool details · `}${bindingHint(keybindings, "app.editor.external")} external editor`,
     `Messages: ${bindingHint(keybindings, "tui.input.newLine")} newline · ${bindingHint(keybindings, "app.message.followUp")} follow-up · ${bindingHint(keybindings, "app.message.dequeue")} restore queue`,
     `Sessions/transcript: ${bindingHint(keybindings, "app.session.resume")} session picker · ${bindingHint(keybindings, "tui.editor.pageUp")} / ${bindingHint(keybindings, "tui.editor.pageDown")} scroll`,
     `Control: ${bindingHint(keybindings, "app.interrupt")} cancel · ${bindingHint(keybindings, "app.clear")} clear/exit twice · ${bindingHint(keybindings, "app.exit")} exit · ${bindingHint(keybindings, "app.suspend")} suspend`,
@@ -353,7 +362,7 @@ export function formatCompactStartupReport(
   const loaded = compactStartupInventory(inventory);
   return [
     `Rigyn v${RIGYN_VERSION} · Ready`,
-    `${primaryBinding(keybindings, "app.interrupt")} interrupt · ${primaryBinding(keybindings, "app.clear")} clear/exit twice · ${primaryBinding(keybindings, "app.exit")} exit${suspend === "" ? "" : ` · ${suspend} suspend`} · / commands · ! bash · ${primaryBinding(keybindings, "app.tools.expand")} help`,
+    `${primaryBinding(keybindings, "app.interrupt")} interrupt · ${primaryBinding(keybindings, "app.clear")} clear/exit twice · ${primaryBinding(keybindings, "app.exit")} exit${suspend === "" ? "" : ` · ${suspend} suspend`} · / commands · ! bash`,
     "",
     ...(loaded === undefined ? [] : [loaded]),
     modelSelected
@@ -4431,14 +4440,29 @@ async function chatCommandOperation(
         continue;
       }
       if (line === "/export" || line.startsWith("/export ")) {
-        const requested = line.startsWith("/export ") ? parseInteractivePathArgument(line.slice(8), "/export") : "";
-        const outputPath = expandPath(requested || `rigyn-${threadId}.html`, runtime.workspace);
+        const request = parseInteractiveExportRequest(line.startsWith("/export ") ? line.slice(8) : "");
+        const requested = request.pathArgument === ""
+          ? ""
+          : parseInteractivePathArgument(request.pathArgument, "/export");
+        const outputPath = expandPath(
+          requested || (request.redact ? "rigyn-share.html" : `rigyn-${threadId}.html`),
+          runtime.workspace,
+        );
         const lower = outputPath.toLowerCase();
-        const data = lower.endsWith(".jsonl")
-          ? runtime.store.exportThread(threadId)
-          : lower.endsWith(".md")
-            ? exportThreadMarkdown(runtime.store, threadId, branch)
-            : exportThreadHtml(runtime.store, threadId, branch);
+        if (request.redact && lower.endsWith(".jsonl")) throw new Error(REDACTED_JSONL_ERROR);
+        const redactedOptions = {
+          ...(branch === undefined ? {} : { branch }),
+          workspaceRoot: runtime.workspace,
+        };
+        const data = request.redact
+          ? lower.endsWith(".md") || lower.endsWith(".markdown")
+            ? exportThreadRedactedMarkdown(runtime.store, threadId, redactedOptions)
+            : exportThreadRedactedHtml(runtime.store, threadId, redactedOptions)
+          : lower.endsWith(".jsonl")
+            ? runtime.store.exportThread(threadId)
+            : lower.endsWith(".md")
+              ? exportThreadMarkdown(runtime.store, threadId, branch)
+              : exportThreadHtml(runtime.store, threadId, branch);
         await mkdir(dirname(outputPath), { recursive: true });
         await writeFile(outputPath, data, { encoding: "utf8", flag: "wx", mode: 0o600 });
         terminal.notify(`Exported session to ${outputPath}`);
@@ -5049,6 +5073,9 @@ async function exportFlagCommand(argumentsValue: ParsedArguments): Promise<void>
   const output = flagString(argumentsValue, "export");
   if (output === undefined) throw new Error("--export requires an output file");
   if (flagBoolean(argumentsValue, "no-session")) throw new Error("--export cannot be combined with --no-session");
+  const redact = flagBoolean(argumentsValue, "redact");
+  const lower = output.toLowerCase();
+  if (redact && lower.endsWith(".jsonl")) throw new Error(REDACTED_JSONL_ERROR);
   const runtime = await loadRuntime({
     ...runtimeOptions(argumentsValue),
     extensions: false,
@@ -5064,12 +5091,19 @@ async function exportFlagCommand(argumentsValue: ParsedArguments): Promise<void>
       : resolveSessionReference(runtime.store, reference, { workspaceRoot: runtime.workspace });
     if (thread === undefined) throw new Error("No saved session exists in this workspace");
     const branch = flagString(argumentsValue, "branch");
-    const lower = output.toLowerCase();
-    const data = lower.endsWith(".jsonl")
-      ? runtime.store.exportThread(thread.threadId)
-      : lower.endsWith(".md") || lower.endsWith(".markdown")
-        ? exportThreadMarkdown(runtime.store, thread.threadId, branch)
-        : exportThreadHtml(runtime.store, thread.threadId, branch);
+    const redactedOptions = {
+      ...(branch === undefined ? {} : { branch }),
+      workspaceRoot: runtime.workspace,
+    };
+    const data = redact
+      ? lower.endsWith(".md") || lower.endsWith(".markdown")
+        ? exportThreadRedactedMarkdown(runtime.store, thread.threadId, redactedOptions)
+        : exportThreadRedactedHtml(runtime.store, thread.threadId, redactedOptions)
+      : lower.endsWith(".jsonl")
+        ? runtime.store.exportThread(thread.threadId)
+        : lower.endsWith(".md") || lower.endsWith(".markdown")
+          ? exportThreadMarkdown(runtime.store, thread.threadId, branch)
+          : exportThreadHtml(runtime.store, thread.threadId, branch);
     if (output === "-") {
       writeMachineOutput(data.endsWith("\n") ? data : `${data}\n`);
       return;
@@ -5158,6 +5192,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
           : undefined;
       writeMachineOutput(renderCliHelp(topic));
       return;
+    }
+    if (flagBoolean(argumentsValue, "redact") && !argumentsValue.flags.has("export")) {
+      throw new Error("--redact requires --export FILE");
     }
     if (outputMode === "rpc") {
       await runRpcServer(argumentsValue);

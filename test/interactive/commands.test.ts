@@ -7,6 +7,7 @@ import {
   interactiveCommand,
   interactiveCommandNames,
   interactiveCommandPalette,
+  parseInteractiveExportRequest,
   renderInteractiveCommandHelp,
 } from "../../src/interactive/commands.js";
 
@@ -34,8 +35,22 @@ test("palette and help are generated from visible registry metadata", () => {
   const help = renderInteractiveCommandHelp();
   assert.match(help, /\/model \[PROVIDER\/MODEL\]/u);
   assert.match(help, /\/compact \[INSTRUCTIONS\]/u);
+  assert.match(help, /\/export \[--redact\] \[FILE\]/u);
   assert.match(help, /\/resume/u);
   assert.equal(help.split("\n").every((line) => line.length <= 80), true);
   assert.match(help, /\/quit/u);
   assert.doesNotMatch(help, /\/follow TEXT\s+\/follow/u);
+});
+
+test("interactive export recognizes the optional leading redaction flag", () => {
+  assert.deepEqual(parseInteractiveExportRequest(""), { redact: false, pathArgument: "" });
+  assert.deepEqual(parseInteractiveExportRequest(" transcript.md "), {
+    redact: false,
+    pathArgument: "transcript.md",
+  });
+  assert.deepEqual(parseInteractiveExportRequest("--redact"), { redact: true, pathArgument: "" });
+  assert.deepEqual(parseInteractiveExportRequest(' --redact   "share copy.md" '), {
+    redact: true,
+    pathArgument: '"share copy.md"',
+  });
 });

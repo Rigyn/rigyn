@@ -26,10 +26,10 @@ test("TUI model folds streaming and tool events into bounded transcript entries"
       result: { content: "line 1\nline 2", isError: false },
     },
     status: "completed",
-    expanded: false,
+    expanded: true,
   });
   assert.equal(model.toggleTool("call_1"), true);
-  assert.equal(model.entries[1]?.expanded, true);
+  assert.equal(model.entries[1]?.expanded, false);
 });
 
 test("TUI keeps forward-compatible provider telemetry out of the user transcript", () => {
@@ -91,6 +91,7 @@ test("TUI model updates one bounded tool card for live progress and clears it at
   assert.equal(model.entries.length, 1);
   assert.equal(model.entries[0]?.id, "tool:call_live");
   assert.equal(model.entries[0]?.status, "running");
+  assert.equal(model.entries[0]?.expanded, false);
   assert.doesNotMatch(model.entries[0]?.text ?? "", /\u001b/u);
   assert.match(model.entries[0]?.text ?? "", /stderr \(33 bytes\)/u);
   assert.match(model.entries[0]?.text ?? "", /deliberately long/u);
@@ -111,6 +112,7 @@ test("TUI model updates one bounded tool card for live progress and clears it at
   assert.equal(model.entries[0]?.id, "tool:call_live");
   assert.equal(model.entries[0]?.text, "Command exited 0.");
   assert.equal(model.entries[0]?.toolData?.progress, undefined);
+  assert.equal(model.entries[0]?.expanded, true);
 });
 
 test("TUI model keeps replaceable structured progress on the native tool card until completion", () => {
@@ -187,6 +189,7 @@ test("completed shell cards retain the latest output instead of the provider pre
   assert.match(model.entries[0]?.text ?? "", /LATEST FAILURE/u);
   assert.match(model.entries[0]?.text ?? "", /Command exited with code 1/u);
   assert.doesNotMatch(model.entries[0]?.text ?? "", /old output from the beginning/u);
+  assert.equal(model.entries[0]?.expanded, true);
 });
 
 test("TUI model merges canonical tool results into the lifecycle row", () => {
@@ -235,7 +238,7 @@ test("TUI model merges canonical tool results into the lifecycle row", () => {
       result: { content: "first result\nsecond result", isError: false },
     },
     status: "completed",
-    expanded: false,
+    expanded: true,
   });
 });
 
@@ -273,6 +276,7 @@ test("mutation tool cards preserve bounded input through completion and hide suc
   model.apply(completed);
   assert.equal(model.entries[0]?.status, "completed");
   assert.equal(model.entries[0]?.text, "");
+  assert.equal(model.entries[0]?.expanded, true);
   assert.match(model.entries[0]?.toolData?.result?.content ?? "", /sha256/u);
   assert.match(completed.event.type === "tool_completed" ? completed.event.preview : "", /sha256/u);
 
@@ -599,7 +603,7 @@ test("persisted user shell messages project into bounded shell cards without mut
   assert.equal(projected.title, "shell");
   assert.equal(projected.summary, "npm test");
   assert.equal(projected.status, "failed");
-  assert.equal(projected.expanded, false);
+  assert.equal(projected.expanded, true);
   assert.match(projected.text, /LATEST FAILURE/u);
   assert.match(projected.text, /stderr detail/u);
   assert.match(projected.text, /earlier output truncated/u);
@@ -609,7 +613,7 @@ test("persisted user shell messages project into bounded shell cards without mut
   assert.equal(projected.toolData?.result?.isError, true);
   assert.deepEqual(projected.toolData?.result?.metadata, { exitCode: 7, truncated: true });
   assert.equal(model.toggleTool(projected.callId), true);
-  assert.equal(projected.expanded, true);
+  assert.equal(projected.expanded, false);
 
   model.apply(envelope({
     type: "message_appended",
@@ -669,12 +673,13 @@ test("tool expansion toggles all rows together unless a call is selected", () =>
     model.apply(envelope({ type: "tool_requested", callId, name: "read", input: { path: callId }, index: sequence }, sequence));
     model.apply(envelope({ type: "tool_completed", callId, name: "read", index: sequence, isError: false, preview: `${callId}\nresult` }, sequence + 10));
   }
-  assert.equal(model.toggleTool(), true);
   assert.deepEqual(model.entries.map((entry) => entry.expanded), [true, true]);
   assert.equal(model.toggleTool(), true);
   assert.deepEqual(model.entries.map((entry) => entry.expanded), [false, false]);
+  assert.equal(model.toggleTool(), true);
+  assert.deepEqual(model.entries.map((entry) => entry.expanded), [true, true]);
   assert.equal(model.toggleTool("call_2"), true);
-  assert.deepEqual(model.entries.map((entry) => entry.expanded), [false, true]);
+  assert.deepEqual(model.entries.map((entry) => entry.expanded), [true, false]);
 });
 
 test("startup help stays outside session history and expands with tool output", () => {
@@ -818,6 +823,7 @@ test("TUI marks an interrupted tool with an unknown outcome as in doubt", () => 
   }, 3));
   assert.equal(model.entries[0]?.status, "in_doubt");
   assert.match(model.entries[0]?.text ?? "", /before completion/u);
+  assert.equal(model.entries[0]?.expanded, true);
 });
 
 test("reasoning summaries default collapsed and toggle together", () => {

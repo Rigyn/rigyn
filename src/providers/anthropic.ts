@@ -747,7 +747,12 @@ function buildAnthropicMessages(request: ProviderRequest, allowEmptySignature: b
         if (block.type === "text") return [{ type: "text", text: block.text }];
         if (block.type === "image") return [anthropicImageContent(block)];
         if (block.type === "tool_call") {
-          return [{ type: "tool_use", id: block.callId, name: outboundToolName(block.name, oauth), input: block.arguments }];
+          return [{
+            type: "tool_use",
+            id: block.callId,
+            name: outboundToolName(block.name, oauth),
+            input: asRecord(block.arguments) ?? {},
+          }];
         }
         if (block.type === "tool_result") {
           const content = (block.images?.length ?? 0) === 0
@@ -778,7 +783,8 @@ function normalizeAnthropicAssistantBlocks(
     const type = asString(block.type);
     if (type === "tool_use") {
       const name = asString(block.name);
-      return name === undefined ? [value] : [{ ...block, name: outboundToolName(name, oauth) }];
+      const normalized = { ...block, input: asRecord(block.input) ?? {} };
+      return name === undefined ? [normalized] : [{ ...normalized, name: outboundToolName(name, oauth) }];
     }
     if (type !== "thinking") return [value];
 

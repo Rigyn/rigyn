@@ -251,7 +251,7 @@ test("automatic compaction controls are typed, bounded, and have conservative de
   assert.throws(() => parseHarnessConfig({ compactionToolResultBytes: 63 }), /integer >= 64/u);
 });
 
-test("agent step limits are opt-in and remain strictly positive when configured", () => {
+test("agent step limit overrides remain strictly positive when configured", () => {
   assert.equal(parseHarnessConfig({}).maxSteps, undefined);
   assert.equal(parseHarnessConfig({ maxSteps: 75 }).maxSteps, 75);
   assert.throws(() => parseHarnessConfig({ maxSteps: 0 }), /integer >= 1/u);

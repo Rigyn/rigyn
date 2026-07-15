@@ -409,20 +409,21 @@ test("turn selection refresh failure and cancellation settle the run", async (t)
 });
 
 test("agent runs beyond fifty model turns by default while honoring an explicit step limit", async () => {
-  const toolTurns = 51;
-  const scripts = Array.from({ length: toolTurns }, (_, index) => () => events([
+  const toolScripts = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => () => events([
     { type: "response_start" as const, model: "model" },
-    { type: "tool_call_start" as const, index: 0, id: `long-call-${index}`, name: "echo" },
+    { type: "tool_call_start" as const, index: 0, id: `${prefix}-call-${index}`, name: "echo" },
     {
       type: "tool_call_end" as const,
       index: 0,
-      id: `long-call-${index}`,
+      id: `${prefix}-call-${index}`,
       name: "echo",
       rawArguments: JSON.stringify({ value: index }),
       arguments: { value: String(index) },
     },
     { type: "response_end" as const, reason: "tool_calls" as const, state },
   ]));
+  const toolTurns = 51;
+  const scripts = toolScripts(toolTurns, "long");
   const provider = new ScriptedProvider([
     ...scripts,
     () => events([
@@ -442,6 +443,39 @@ test("agent runs beyond fifty model turns by default while honoring an explicit 
   });
   assert.equal(result.steps, toolTurns + 1);
   assert.equal(result.finalText, "long task completed");
+
+  const boundedProvider = new ScriptedProvider(toolScripts(64, "bounded"));
+  const boundedHarness = await setup(boundedProvider);
+  await assert.rejects(boundedHarness.runner.run({
+    threadId: "default-limited-run",
+    prompt: "work",
+    provider: boundedProvider,
+    model: "model",
+    tools: boundedHarness.tools,
+    toolContext: boundedHarness.toolContext,
+  }), /Step limit reached after 64 model invocations/u);
+  assert.equal(boundedProvider.requests.length, 64);
+
+  const extendedProvider = new ScriptedProvider([
+    ...toolScripts(64, "extended"),
+    () => events([
+      { type: "response_start", model: "model" },
+      { type: "text_delta", part: 0, text: "extended task completed" },
+      { type: "response_end", reason: "stop", state },
+    ]),
+  ]);
+  const extendedHarness = await setup(extendedProvider);
+  const extended = await extendedHarness.runner.run({
+    threadId: "extended-limit-run",
+    prompt: "work",
+    provider: extendedProvider,
+    model: "model",
+    tools: extendedHarness.tools,
+    toolContext: extendedHarness.toolContext,
+    maxSteps: 65,
+  });
+  assert.equal(extended.steps, 65);
+  assert.equal(extended.finalText, "extended task completed");
 
   const limitedProvider = new ScriptedProvider([scripts[0]!]);
   const limitedHarness = await setup(limitedProvider);

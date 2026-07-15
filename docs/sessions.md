@@ -14,7 +14,8 @@ By default, a new workspace conversation is stored in the global SQLite database
 /fork      continue from an earlier event on a new branch
 /clone     copy the current reachable history into a new session
 /tree      navigate history and branches
-/export    write a self-contained HTML export
+/export [--redact] [FILE]
+           write a presentation export; --redact creates a review-required share copy
 /import    import a session export
 ```
 
@@ -25,6 +26,8 @@ rigyn --continue --all --workspace ~/another-project
 ```
 
 Machine-readable JSONL exports start with an explicit format and schema version. See [Session JSONL export contract](session-export.md) for record ordering, import identity remapping, limits, and compatibility guarantees.
+
+From a shell, `rigyn --export share.html --redact` and `rigyn --export share.md --redact` create presentation-only copies that remove tool payloads, persisted `!` shell shortcut output, images, artifacts, structural IDs, and exact timestamps while redacting known secret patterns and workspace/home roots. Redacted JSONL is refused before output creation. This reduces accidental disclosure but does not guarantee anonymization; review the entire copy before sharing it.
 
 Session lookup is workspace-scoped unless `--all` is used or an explicit verified database reference is supplied. Exact IDs and unambiguous partial IDs are accepted; ambiguous references fail instead of guessing.
 

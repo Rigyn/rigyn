@@ -248,7 +248,7 @@ test("Anthropic subscription credentials use bearer OAuth compatibility headers"
   assert.match(headers?.get("anthropic-beta") ?? "", /claude-code-20250219/u);
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "rigyn/0.1.1");
+  assert.equal(headers?.get("user-agent"), "rigyn/0.1.2");
   assert.equal(posted?.system, undefined);
   assert.deepEqual((posted?.tools as Array<{ name: string }>).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");
@@ -258,6 +258,94 @@ test("Anthropic subscription credentials use bearer OAuth compatibility headers"
     end?.type === "response_end" && end.state.kind === "anthropic_messages" ? end.state.assistantBlocks[0] : undefined,
     { type: "tool_use", id: "tool-1", name: "read", input: { path: "README.md" } },
   );
+});
+
+test("Anthropic repairs non-object tool inputs before canonical and provider-state replay", async () => {
+  const terminal = sse(
+    { type: "message_start", message: { id: "message-replay", model: "claude-test", usage: { input_tokens: 1 } } },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  );
+  const posted: Record<string, unknown>[] = [];
+  const adapter = new AnthropicAdapter({
+    apiKey: "secret",
+    promptCache: "off",
+    fetch: fakeFetch(async (incoming) => {
+      posted.push(await incoming.json() as Record<string, unknown>);
+      return streamResponse(byteChunks(terminal));
+    }),
+  });
+  const canonical = request("anthropic");
+  canonical.messages.push(
+    {
+      id: "assistant-invalid-canonical-tool",
+      role: "assistant",
+      content: [{
+        type: "tool_call",
+        callId: "canonical-call",
+        name: "read",
+        arguments: null,
+        rawArguments: "null",
+      }],
+      createdAt: "2026-07-09T00:01:00.000Z",
+    },
+    {
+      id: "canonical-tool-result",
+      role: "tool",
+      content: [{
+        type: "tool_result",
+        callId: "canonical-call",
+        name: "read",
+        content: "Tool input must be an object",
+        isError: true,
+      }],
+      createdAt: "2026-07-09T00:02:00.000Z",
+    },
+    {
+      id: "canonical-current-user",
+      role: "user",
+      content: [{ type: "text", text: "Try again." }],
+      createdAt: "2026-07-09T00:03:00.000Z",
+    },
+  );
+  await collect(adapter.stream(canonical, new AbortController().signal));
+
+  const state = request("anthropic");
+  state.providerState = {
+    kind: "anthropic_messages",
+    assistantBlocks: [{
+      type: "tool_use",
+      id: "state-call",
+      name: "read",
+      input: "[Circular]",
+    }],
+  };
+  state.messages.push(
+    {
+      id: "assistant-invalid-state-tool",
+      role: "assistant",
+      content: [{ type: "tool_call", callId: "state-call", name: "read", arguments: null }],
+      createdAt: "2026-07-09T00:01:00.000Z",
+    },
+    {
+      id: "state-tool-result",
+      role: "tool",
+      content: [{
+        type: "tool_result",
+        callId: "state-call",
+        name: "read",
+        content: "Tool input must be an object",
+        isError: true,
+      }],
+      createdAt: "2026-07-09T00:02:00.000Z",
+    },
+  );
+  await collect(adapter.stream(state, new AbortController().signal));
+
+  const canonicalMessages = posted[0]?.messages as Array<{ content: Array<{ type: string; input?: unknown }> }>;
+  const stateMessages = posted[1]?.messages as Array<{ content: Array<{ type: string; input?: unknown }> }>;
+  assert.deepEqual(canonicalMessages[1]?.content[0]?.input, {});
+  assert.deepEqual(stateMessages[1]?.content[0]?.input, {});
 });
 
 test("Anthropic maps harness effort levels to each current model's thinking contract", async () => {

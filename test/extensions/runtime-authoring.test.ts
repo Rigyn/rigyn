@@ -605,7 +605,7 @@ test("duplicate command names remain independently invokable and duplicate tools
     api.registerTool({ name: "shared_tool", description: "second tool", inputSchema: { type: "object" }, execute() { return { content: "second", isError: false }; } });
     api.registerTool({ name: "second_only", description: "second only", inputSchema: { type: "object" }, execute() { return { content: "two", isError: false }; } });
   };\n`;
-  const { host } = await fixture(context, [first, second]);
+  const { host, root } = await fixture(context, [first, second]);
 
   assert.deepEqual(host.commands().map((entry) => [entry.name, entry.baseName, entry.description]), [
     ["review:1", "review", "first command"],
@@ -621,8 +621,73 @@ test("duplicate command names remain independently invokable and duplicate tools
     ["first_only", "first only"],
     ["second_only", "second only"],
   ]);
-  assert.deepEqual(host.diagnostics(), []);
+  assert.deepEqual(host.diagnostics(), [{
+    extensionId: "extension-1",
+    sourcePath: join(root, "extension-1.mjs"),
+    message: `Runtime tool shared_tool from extension-1 (${join(root, "extension-1.mjs")}) was ignored because extension-0 (${join(root, "extension-0.mjs")}) registered it first`,
+  }]);
   await host.close();
+});
+
+test("duplicate tool ownership distinguishes matching extension IDs at different source paths", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-owner-identity-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const first = `export default (api) => {
+    api.registerTool({ name: "same_id_tool", description: "first source", inputSchema: { type: "object" }, execute() { return { content: "first", isError: false }; } });
+  };\n`;
+  const second = `export default (api) => {
+    api.registerTool({ name: "same_id_tool", description: "second source", inputSchema: { type: "object" }, execute() { return { content: "second", isError: false }; } });
+  };\n`;
+  const firstPath = join(root, "first.mjs");
+  const secondPath = join(root, "second.mjs");
+  await Promise.all([
+    writeFile(firstPath, first),
+    writeFile(secondPath, second),
+  ]);
+  const host = await loadRuntimeExtensions([
+    { extensionId: "shared.extension", sourcePath: firstPath, sha256: sha256(first) },
+    { extensionId: "shared.extension", sourcePath: secondPath, sha256: sha256(second) },
+  ], { workspace: root });
+  try {
+    assert.equal(host.tools().find((tool) => tool.definition.name === "same_id_tool")?.definition.description, "first source");
+    assert.deepEqual(host.diagnostics(), [{
+      extensionId: "shared.extension",
+      sourcePath: secondPath,
+      message: `Runtime tool same_id_tool from shared.extension (${secondPath}) was ignored because shared.extension (${firstPath}) registered it first`,
+    }]);
+  } finally {
+    await host.close();
+  }
+});
+
+test("late duplicate tools diagnose cross-extension collisions without changing same-owner errors", async (context) => {
+  const first = `export default (api) => { globalThis.__authoringFirstToolApi = api; };\n`;
+  const second = `export default (api) => { globalThis.__authoringSecondToolApi = api; };\n`;
+  const { host, root } = await fixture(context, [first, second]);
+  const firstApi = (globalThis as Record<string, any>).__authoringFirstToolApi;
+  const secondApi = (globalThis as Record<string, any>).__authoringSecondToolApi;
+  const registration = (description: string) => ({
+    name: "late_shared_tool",
+    description,
+    inputSchema: { type: "object" },
+    execute() { return { content: description, isError: false }; },
+  });
+  try {
+    firstApi.registerTool(registration("first late tool"));
+    secondApi.registerTool(registration("second late tool"));
+
+    assert.equal(host.tools().find((tool) => tool.definition.name === "late_shared_tool")?.definition.description, "first late tool");
+    assert.deepEqual(host.diagnostics(), [{
+      extensionId: "extension-1",
+      sourcePath: join(root, "extension-1.mjs"),
+      message: `Runtime tool late_shared_tool from extension-1 (${join(root, "extension-1.mjs")}) was ignored because extension-0 (${join(root, "extension-0.mjs")}) registered it first`,
+    }]);
+    assert.throws(() => firstApi.registerTool(registration("same owner duplicate")), /duplicate tool/u);
+  } finally {
+    await host.close();
+    delete (globalThis as Record<string, unknown>).__authoringFirstToolApi;
+    delete (globalThis as Record<string, unknown>).__authoringSecondToolApi;
+  }
 });
 
 test("input, prompt, context, and message reducers chain in load order and isolate failures", async (context) => {

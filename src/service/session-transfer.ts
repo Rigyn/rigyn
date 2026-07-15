@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 
+import { defaultSecretRedactor } from "../auth/redaction.js";
 import { createId } from "../core/ids.js";
 import type { EventEnvelope } from "../core/events.js";
 import type { CanonicalMessage, ContentBlock } from "../core/types.js";
@@ -15,6 +17,8 @@ const MAX_IMPORT_BYTES = 256 * 1024 * 1024;
 const MAX_IMPORT_LINES = 100_000;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_HTML_EXPORT_BYTES = 64 * 1024 * 1024;
+const USER_SHELL_MESSAGE_PREFIX = "[User shell command]\n";
+const SHARE_CONTROL_CHARACTERS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
@@ -262,12 +266,16 @@ function messageHtml(message: CanonicalMessage, timestamp: string): string {
   return `<article class="message ${html(message.role)}"><header><strong>${html(message.role)}</strong>${purpose}<time>${html(timestamp)}</time></header>${visible}</article>`;
 }
 
-function boundedHtml(parts: readonly string[]): string {
+function boundedExport(parts: readonly string[], label: string): string {
   const value = parts.join("");
   if (Buffer.byteLength(value, "utf8") > MAX_HTML_EXPORT_BYTES) {
-    throw new Error(`HTML export exceeds the ${MAX_HTML_EXPORT_BYTES} byte limit`);
+    throw new Error(`${label} export exceeds the ${MAX_HTML_EXPORT_BYTES} byte limit`);
   }
   return value;
+}
+
+function boundedHtml(parts: readonly string[]): string {
+  return boundedExport(parts, "HTML");
 }
 
 export function exportThreadHtml(store: SessionStore, threadId: string, branch?: string): string {
@@ -307,5 +315,119 @@ export function exportThreadHtml(store: SessionStore, threadId: string, branch?:
     `<div class="layout"><nav aria-label="Branches">${branches.map((entry) => entry.button).join("")}</nav><main>${branches.map((entry) => entry.panel).join("")}</main></div>`,
     "<script>(()=>{const buttons=[...document.querySelectorAll('.branch-button')];const panels=[...document.querySelectorAll('.branch')];for(const button of buttons)button.addEventListener('click',()=>{for(const item of buttons)item.classList.toggle('selected',item===button);for(const panel of panels){const selected=panel.id===button.dataset.target;panel.hidden=!selected;panel.classList.toggle('selected',selected)}});const search=document.getElementById('search');search.addEventListener('input',()=>{const query=search.value.toLocaleLowerCase();for(const message of document.querySelectorAll('.message'))message.hidden=query!==''&&!message.textContent.toLocaleLowerCase().includes(query)})})();</script>",
     "</body></html>\n",
+  ]);
+}
+
+const REDACTED_SHARE_NOTICE = "Redacted share copy; review before publishing.";
+
+export interface RedactedSessionExportOptions {
+  branch?: string;
+  workspaceRoot?: string;
+  homeRoot?: string;
+}
+
+interface RedactedSessionEntry {
+  role: "user" | "assistant" | "extension";
+  text: string;
+}
+
+function redactedRootReplacements(
+  thread: ThreadRecord,
+  options: RedactedSessionExportOptions,
+): Array<{ root: string; replacement: string }> {
+  const roots: Array<[string | undefined, string]> = [
+    [options.workspaceRoot ?? thread.workspaceRoot, "[WORKSPACE]"],
+    [options.homeRoot ?? homedir(), "[HOME]"],
+  ];
+  const replacements: Array<{ root: string; replacement: string }> = [];
+  const seen = new Set<string>();
+  for (const [root, replacement] of roots) {
+    if (root === undefined || root.length <= 1) continue;
+    for (const variant of [root, root.replaceAll("\\", "/"), root.replaceAll("/", "\\")]) {
+      if (variant.length <= 1 || seen.has(variant)) continue;
+      seen.add(variant);
+      replacements.push({ root: variant, replacement });
+    }
+  }
+  return replacements.sort((left, right) => right.root.length - left.root.length);
+}
+
+function redactedSessionEntries(
+  store: SessionStore,
+  threadId: string,
+  options: RedactedSessionExportOptions,
+): RedactedSessionEntry[] {
+  const thread = store.getThread(threadId);
+  const selected = options.branch ?? thread.defaultBranch;
+  const roots = redactedRootReplacements(thread, options);
+  const redact = (value: string): string => {
+    let result = value.replace(/\r\n?/gu, "\n").replace(SHARE_CONTROL_CHARACTERS, "");
+    for (const replacement of roots) result = result.replaceAll(replacement.root, replacement.replacement);
+    return defaultSecretRedactor.redact(result);
+  };
+  const visibleMessage = (message: CanonicalMessage): RedactedSessionEntry | undefined => {
+    if (message.role !== "user" && message.role !== "assistant") return undefined;
+    const text = message.displayText
+      ?? message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n\n");
+    if (message.role === "user" && (
+      text.startsWith(USER_SHELL_MESSAGE_PREFIX)
+      || text.startsWith(USER_SHELL_MESSAGE_PREFIX.replace("\n", "\r\n"))
+    )) return undefined;
+    const redacted = redact(text);
+    if (redacted.trim() === "") return undefined;
+    return { role: message.role, text: redacted };
+  };
+
+  return store.listEvents(threadId, selected).flatMap((envelope) => {
+    const message = envelope.event.type === "message_appended"
+      ? envelope.event.message
+      : envelope.event.type === "branch_summary_created"
+        ? envelope.event.summary
+        : undefined;
+    if (message !== undefined) {
+      const visible = visibleMessage(message);
+      return visible === undefined ? [] : [visible];
+    }
+    if (envelope.event.type !== "extension_message" || envelope.event.transcript === false) return [];
+    const text = redact(envelope.event.transcript.text);
+    return text.trim() === "" ? [] : [{ role: "extension" as const, text }];
+  });
+}
+
+export function exportThreadRedactedMarkdown(
+  store: SessionStore,
+  threadId: string,
+  options: RedactedSessionExportOptions = {},
+): string {
+  const entries = redactedSessionEntries(store, threadId, options);
+  const messages = entries.map((entry) => {
+    const longestBacktickRun = [...entry.text.matchAll(/`+/gu)]
+      .reduce((longest, match) => Math.max(longest, match[0].length), 0);
+    const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+    return `## ${entry.role[0]!.toUpperCase()}${entry.role.slice(1)}\n\n${fence}\n${entry.text}\n${fence}`;
+  }).join("\n\n");
+  return boundedExport([
+    `# Rigyn session share copy\n\n> ${REDACTED_SHARE_NOTICE}\n`,
+    messages === "" ? "" : `\n${messages}\n`,
+  ], "Redacted Markdown");
+}
+
+export function exportThreadRedactedHtml(
+  store: SessionStore,
+  threadId: string,
+  options: RedactedSessionExportOptions = {},
+): string {
+  const entries = redactedSessionEntries(store, threadId, options);
+  const messages = entries.map((entry) =>
+    `<article class="message ${entry.role}"><header><strong>${entry.role}</strong></header><pre>${html(entry.text)}</pre></article>`).join("");
+  return boundedHtml([
+    "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">",
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">",
+    "<title>Rigyn session share copy</title><style>",
+    ":root{color-scheme:dark light;font:15px/1.5 system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:#101114;color:#e8e8e8}main{max-width:72rem;margin:auto;padding:1.5rem}h1{font-size:1.35rem}.notice{padding:.75rem;border:1px solid #8c7937;border-radius:.4rem;background:#29240f;color:#f2dda0}.message{margin:1rem 0;border:1px solid #363942;border-left-width:.3rem;border-radius:.45rem;background:#17191e;overflow:hidden}.message.user{border-left-color:#66aaff}.message.assistant{border-left-color:#7bd88f}.message.extension{border-left-color:#b5a0ff}.message header{padding:.55rem .8rem;background:#20232a}.message pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:.8rem;font:13px/1.55 ui-monospace,monospace}.empty{color:#a8adb7}@media print{body{background:#fff;color:#000}.message{break-inside:avoid;background:#fff}}",
+    "</style></head><body><main><h1>Rigyn session share copy</h1>",
+    `<p class="notice">${html(REDACTED_SHARE_NOTICE)}</p>`,
+    messages === "" ? '<p class="empty">No shareable prose on this branch.</p>' : messages,
+    "</main></body></html>\n",
   ]);
 }

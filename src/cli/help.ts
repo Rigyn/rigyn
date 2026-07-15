@@ -68,6 +68,7 @@ Other:
       --mode MODE           Output mode: text (default), json, or rpc
       --list-models [TEXT]  List models from connected providers and exit
       --export FILE         Export the selected or latest session and exit
+      --redact              With --export, write a review-required HTML/Markdown share copy
   -a, --approve             Trust project-local resources for this invocation
   -na, --no-approve         Ignore project-local resources for this invocation
       --offline             Skip startup network refreshes

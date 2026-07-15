@@ -224,8 +224,14 @@ test("credential-gated live provider contract", { skip: !ENABLED, timeout: 180_0
         return;
       }
       const prefix = `${"stable-cache-prefix ".repeat(2_500)}\n`;
-      const prompt = userMessage("live-cache-prompt", `${prefix}Reply briefly.`);
-      const run = async () => await collect(adapter, request(PROVIDER, selected.id, [prompt], {
+      const system: CanonicalMessage = {
+        id: "live-cache-system",
+        role: "system",
+        content: [{ type: "text", text: prefix }],
+        createdAt: "2026-07-11T00:00:00.000Z",
+      };
+      const prompt = userMessage("live-cache-prompt", "Reply briefly.");
+      const run = async () => await collect(adapter, request(PROVIDER, selected.id, [system, prompt], {
         maxOutputTokens: 32,
         sessionId: "live-provider-cache-smoke",
       }), AbortSignal.timeout(60_000));

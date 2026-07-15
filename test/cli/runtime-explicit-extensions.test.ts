@@ -293,10 +293,10 @@ test("extensions commands reports active runtime and declarative commands", asyn
   });
 });
 
-test("one-shot run expands an installed runtime command inside the harness", async () => {
+test("one-shot print and JSON runs expand an installed runtime command inside the harness", async () => {
   await withRuntimeEnvironment(async ({ workspace, configHome }) => {
     await writeManagedExtension(configHome);
-    const result = await runCli([
+    const common = [
       "run",
       "/managed-command ignored arguments",
       "--workspace",
@@ -308,11 +308,22 @@ test("one-shot run expands an installed runtime command inside the harness", asy
       "--model",
       "gallery-offline-v1",
       "--no-session",
-      "--print",
-    ], { ...process.env });
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(result.stderr, "");
-    assert.equal(result.stdout, "Offline provider: managed-command\n");
+    ];
+    const printed = await runCli([...common, "--print"], { ...process.env });
+    assert.equal(printed.code, 0, printed.stderr);
+    assert.equal(printed.stderr, "");
+    assert.equal(printed.stdout, "Offline provider: managed-command\n");
+
+    const json = await runCli([...common, "--json"], { ...process.env });
+    assert.equal(json.code, 0, json.stderr);
+    assert.equal(json.stderr, "");
+    const events = json.stdout.trim().split("\n").map((line) => JSON.parse(line) as {
+      event: { type: string; text?: string };
+    });
+    assert.equal(
+      events.filter(({ event }) => event.type === "text_delta").at(-1)?.event.text,
+      "Offline provider: managed-command",
+    );
   });
 });
 

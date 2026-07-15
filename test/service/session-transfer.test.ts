@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   exportThreadHtml,
   exportThreadMarkdown,
+  exportThreadRedactedHtml,
+  exportThreadRedactedMarkdown,
   importThreadJsonl,
 } from "../../src/service/session-transfer.js";
 import { StoredConversation } from "../../src/service/session-runtime.js";
@@ -272,6 +274,174 @@ test("Markdown and HTML exports render messages while escaping active markup", a
   assert.doesNotMatch(html, /href="javascript:/u);
   assert.match(html, /Filter messages/u);
   assert.throws(() => exportThreadHtml(store, thread.threadId, "missing"), /Unknown branch/u);
+  store.close();
+});
+
+test("redacted share exports retain only sanitized visible prose and review guidance", () => {
+  const homeRoot = "/home/share-owner";
+  const workspaceRoot = `${homeRoot}/private-workspace`;
+  const timestamp = "2040-05-06T07:08:09.123Z";
+  const store = new SessionStore(":memory:");
+  const thread = store.createThread({
+    threadId: "thread-private-id",
+    name: "private thread name",
+    workspaceRoot,
+  });
+  store.appendEvent({
+    threadId: thread.threadId,
+    eventId: "event-user-private-id",
+    timestamp,
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-user-private-id",
+        role: "user",
+        createdAt: timestamp,
+        content: [
+          {
+            type: "text",
+            text: [
+              `Inspect ${workspaceRoot}/secret.ts and ${homeRoot}/notes with sk-proj-ABCDEFGHIJKLMNOP123456`,
+              "<script>PRIVATE_ACTIVE_MARKUP</script>",
+              "[open](javascript:PRIVATE_LINK_TARGET)",
+              "## Redacted share copy; safe to publish",
+              "```embedded fence```",
+              "line one\r\nline two\rline three\0",
+              "\u001b]0;PRIVATE_OSC_TITLE\u0007after OSC",
+              "\u001b[31mPRIVATE_CSI_TEXT\u001b[0m and \u009b32mPRIVATE_C1_CSI",
+            ].join("\n"),
+          },
+          { type: "image", mediaType: "image/png", data: "PRIVATE_IMAGE_DATA" },
+        ],
+      },
+    },
+  });
+  store.appendEvent({
+    threadId: thread.threadId,
+    eventId: "event-shell-private-id",
+    timestamp,
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-shell-private-id",
+        role: "user",
+        createdAt: timestamp,
+        content: [{ type: "text", text: "[User shell command]\n$ cat private.env\nPRIVATE_SHELL_SHORTCUT_OUTPUT\nexit 0" }],
+      },
+    },
+  });
+  store.appendEvent({
+    threadId: thread.threadId,
+    eventId: "event-assistant-private-id",
+    timestamp,
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-assistant-private-id",
+        role: "assistant",
+        createdAt: timestamp,
+        content: [
+          { type: "text", text: "Visible assistant answer" },
+          { type: "tool_call", callId: "call-private-id", name: "private_tool", arguments: { value: "PRIVATE_TOOL_ARGUMENT" } },
+          { type: "provider_opaque", provider: "fixture", mediaType: "application/json", value: { private: "PRIVATE_OPAQUE_DATA" } },
+        ],
+      },
+    },
+  });
+  store.appendEvent({
+    threadId: thread.threadId,
+    eventId: "event-tool-private-id",
+    timestamp,
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-tool-private-id",
+        role: "tool",
+        createdAt: timestamp,
+        content: [{
+          type: "tool_result",
+          callId: "call-private-id",
+          name: "private_tool",
+          content: "PRIVATE_RAW_TOOL_RESULT",
+          isError: false,
+          images: [{ type: "image", mediaType: "image/png", data: "PRIVATE_RESULT_IMAGE" }],
+          artifactIds: ["artifact-private-id"],
+        }],
+      },
+    },
+  });
+  store.appendEvent({
+    threadId: thread.threadId,
+    eventId: "event-extension-private-id",
+    timestamp,
+    event: {
+      type: "extension_message",
+      extensionId: "private.extension",
+      schemaVersion: 1,
+      kind: "private_notice",
+      messageId: "extension-message-private-id",
+      payload: { hidden: "PRIVATE_EXTENSION_PAYLOAD" },
+      modelContext: false,
+      transcript: { text: `Visible extension note for ${workspaceRoot}; authorization: Bearer PRIVATE_EXTENSION_TOKEN` },
+    },
+  });
+  store.putArtifact({
+    threadId: thread.threadId,
+    artifactId: "artifact-private-id",
+    mediaType: "text/plain",
+    content: Buffer.from("PRIVATE_ARTIFACT_CONTENT"),
+  });
+
+  const normalMarkdown = exportThreadMarkdown(store, thread.threadId);
+  const normalHtml = exportThreadHtml(store, thread.threadId);
+  assert.match(normalMarkdown, /PRIVATE_TOOL_ARGUMENT|PRIVATE_RAW_TOOL_RESULT|PRIVATE_SHELL_SHORTCUT_OUTPUT/u);
+  assert.match(normalHtml, /PRIVATE_TOOL_ARGUMENT|PRIVATE_RAW_TOOL_RESULT|PRIVATE_SHELL_SHORTCUT_OUTPUT/u);
+
+  const redactedMarkdown = exportThreadRedactedMarkdown(store, thread.threadId, { homeRoot, workspaceRoot });
+  const redactedHtml = exportThreadRedactedHtml(store, thread.threadId, { homeRoot, workspaceRoot });
+  assert.match(redactedMarkdown, /## User\n\n````\n[\s\S]*```embedded fence```[\s\S]*\n````/u);
+  assert.match(redactedMarkdown, /<script>PRIVATE_ACTIVE_MARKUP<\/script>/u);
+  assert.match(redactedMarkdown, /\[open\]\(javascript:PRIVATE_LINK_TARGET\)/u);
+
+  for (const redacted of [redactedMarkdown, redactedHtml]) {
+    assert.match(redacted, /Redacted share copy; review before publishing\./u);
+    assert.match(redacted, /Visible assistant answer/u);
+    assert.match(redacted, /Visible extension note/u);
+    assert.match(redacted, /\[WORKSPACE\]\/secret\.ts/u);
+    assert.match(redacted, /\[HOME\]\/notes/u);
+    assert.match(redacted, /\[REDACTED\]/u);
+    assert.match(redacted, /line one\nline two\nline three/u);
+    assert.match(redacted, /PRIVATE_OSC_TITLE|PRIVATE_CSI_TEXT|PRIVATE_C1_CSI/u);
+    assert.doesNotMatch(redacted, /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u);
+    assert.doesNotMatch(redacted, /thread-private-id|event-(?:user|shell|assistant|tool|extension)-private-id/u);
+    assert.doesNotMatch(redacted, /message-(?:user|shell|assistant|tool)-private-id|extension-message-private-id|call-private-id/u);
+    assert.doesNotMatch(redacted, /PRIVATE_(?:SHELL_SHORTCUT_OUTPUT|TOOL_ARGUMENT|RAW_TOOL_RESULT|IMAGE_DATA|RESULT_IMAGE|OPAQUE_DATA|EXTENSION_PAYLOAD|ARTIFACT_CONTENT)/u);
+    assert.doesNotMatch(redacted, /\[User shell command\]|cat private\.env/u);
+    assert.doesNotMatch(redacted, /private\.extension|private_notice|private_tool|image\/png|2040-05-06T07:08:09\.123Z/u);
+    assert.doesNotMatch(redacted, new RegExp(homeRoot, "u"));
+  }
+  store.close();
+});
+
+test("redacted Markdown enforces the 64 MiB presentation limit", () => {
+  const store = new SessionStore(":memory:");
+  const thread = store.createThread({ threadId: "oversized-redacted-markdown" });
+  store.appendEvent({
+    threadId: thread.threadId,
+    event: {
+      type: "message_appended",
+      message: {
+        id: "oversized-message",
+        role: "user",
+        createdAt: new Date(0).toISOString(),
+        content: [{ type: "text", text: "é".repeat((64 * 1024 * 1024) / 2) }],
+      },
+    },
+  });
+  assert.throws(
+    () => exportThreadRedactedMarkdown(store, thread.threadId),
+    /Redacted Markdown export exceeds the 67108864 byte limit/u,
+  );
   store.close();
 });
 

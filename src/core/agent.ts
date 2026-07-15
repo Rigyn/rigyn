@@ -54,6 +54,8 @@ import {
 import { HarnessError } from "./errors.js";
 import { isJsonValue, type JsonValue } from "./json.js";
 
+const DEFAULT_AGENT_MAX_STEPS = 64;
+
 export interface AgentExtensionReducers {
   beforeAgentStart?(event: {
     prompt: string;
@@ -1060,7 +1062,7 @@ export class AgentRunner {
     const runId = createId("run");
     const signal = control.abortController.signal;
     const sink = this.#events(request.threadId, runId, request.branch, signal);
-    const maxSteps = request.maxSteps;
+    const maxSteps = request.maxSteps ?? DEFAULT_AGENT_MAX_STEPS;
     let step = 0;
     let finalText = "";
     let providerState: ProviderState | undefined;
@@ -1801,7 +1803,6 @@ export class AgentRunner {
         }
       }
 
-      if (maxSteps === undefined) throw new Error("Unbounded agent loop exited unexpectedly");
       const failure: AdapterError = {
         category: "provider",
         message: `Step limit reached after ${maxSteps} model invocations`,

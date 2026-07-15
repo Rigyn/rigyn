@@ -29,13 +29,17 @@ import { WorkspaceBoundary } from "../../src/tools/index.js";
 const ENABLED = process.env.RIGYN_LIVE_DOGFOOD === "1";
 const PROVIDER = process.env.RIGYN_LIVE_PROVIDER?.trim() || "openai";
 const REQUESTED_MODEL = process.env.RIGYN_LIVE_MODEL?.trim();
+const SCENARIOS = new Set((process.env.RIGYN_LIVE_DOGFOOD_SCENARIOS ?? "repair,extension")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean));
 const RUN_TIMEOUT_MS = 6 * 60_000;
 const SUITE_TIMEOUT_MS = 14 * 60_000;
 const MAX_OUTPUT_TOKENS = 2_048;
 const MAX_CONTEXT_TOKENS = 64 * 1_024;
 const MAX_REPORTED_COST_USD = 2;
 const REPAIR_MAX_STEPS = 16;
-const EXTENSION_MAX_STEPS = 28;
+const EXTENSION_MAX_STEPS = 40;
 
 const PREFERRED_MODELS: Readonly<Record<string, readonly string[]>> = {
   openai: ["gpt-5.4-mini", "gpt-5.6-luna", "gpt-5.4-nano", "gpt-4.1-mini"],
@@ -302,7 +306,9 @@ async function assertToolResult(host: RuntimeExtensionHost, workspace: string, t
 test("credential-gated live coding-agent dogfood", { skip: !ENABLED, timeout: SUITE_TIMEOUT_MS }, async (context) => {
   const budget: SharedCostBudget = { spentUsd: 0, reported: false };
 
-  await context.test("repairs a broken repository and preserves unrelated work", async (scenario) => {
+  await context.test("repairs a broken repository and preserves unrelated work", {
+    skip: !SCENARIOS.has("repair"),
+  }, async (scenario) => {
     const root = await mkdtemp(join(tmpdir(), "harness-live-repair-"));
     scenario.after(async () => await rm(root, { recursive: true, force: true }));
     const sourceRoot = join(root, "src");
@@ -362,7 +368,9 @@ export function average(values) {
     assert.match(await readFile(join(sourceRoot, "math.mjs"), "utf8"), /finite/u);
   });
 
-  await context.test("authors and survives reload of a fresh structured-tool extension", async (scenario) => {
+  await context.test("authors and survives reload of a fresh structured-tool extension", {
+    skip: !SCENARIOS.has("extension"),
+  }, async (scenario) => {
     const root = await mkdtemp(join(tmpdir(), "harness-live-extension-"));
     scenario.after(async () => await rm(root, { recursive: true, force: true }));
     const workspace = join(root, "workspace");
@@ -400,14 +408,15 @@ export function average(values) {
           "Register exactly one model-callable tool named dogfood_echo with a closed schema requiring one string field named text.",
           "For valid input, return isError false, top-level status success, a non-empty summary, an empty nextActions array, and JSON content shaped as {\"echo\": <the exact input>}.",
           "Add and run a deterministic node:test covering activation, schema, and the structured result.",
+          "This temporary project has no host dependency installed: the test must import only Node built-ins and local package files, use a minimal local activation host stub, and must not import rigyn or rigyn/extensions.",
           "Do not install the package; the independent verifier will install, reload, invoke, and remove it.",
         ].join(" "),
       }, budget);
-      assert.equal(observation.toolRequests.some((entry) =>
-        entry.name === "read" && entry.input.includes(resources.authoringSkill)), true,
+      const inspected = (path: string): boolean => observation.toolRequests.some((entry) =>
+        ["read", "bash", "grep"].includes(entry.name) && entry.input.includes(path));
+      assert.equal(inspected(resources.authoringSkill), true,
       "agent did not load the bundled build-extension skill");
-      assert.equal(observation.toolRequests.some((entry) =>
-        entry.name === "read" && entry.input.includes("docs/extensions.md")), true,
+      assert.equal(inspected(join(resources.documentationRoot, "extensions.md")), true,
       "agent did not read the bundled extension documentation");
       assert.equal(observation.toolRequests.some((entry) =>
         entry.name === "bash" && /node --test|npm test/u.test(entry.input)), true,

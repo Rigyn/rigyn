@@ -46,11 +46,11 @@
       "id": "runtime-commands",
       "status": "implemented",
       "authoring": true,
-      "hosts": ["tui", "rpc"],
+      "hosts": ["tui", "print", "json", "rpc"],
       "apiMembers": ["registerCommand", "getCommands"],
       "docs": ["docs/extensions.md"],
       "examples": ["examples/package-starter", "examples/reference-package"],
-      "tests": ["test/extensions/runtime-authoring.test.ts", "test/interfaces/rpc-extension-runtime.test.ts"]
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/cli/runtime-explicit-extensions.test.ts", "test/interfaces/rpc-extension-runtime.test.ts"]
     },
     {
       "id": "runtime-shortcuts",

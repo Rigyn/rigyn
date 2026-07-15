@@ -625,6 +625,13 @@ export class HarnessService {
         return {
           emit: async (event) => {
             const sanitized = defaultSecretRedactor.redactValue(event) as RuntimeEvent;
+            if (
+              sanitized.type === "message_appended" &&
+              sanitized.providerState !== undefined &&
+              sanitized.providerStateSerialized !== undefined
+            ) {
+              sanitized.providerStateSerialized = JSON.stringify(sanitized.providerState);
+            }
             const envelope = await persistent.emit(sanitized);
             await this.#observeRuntimeEnvelope(envelope, projection, signal);
             if (this.#options.managedExtensionLifecycle !== false) {

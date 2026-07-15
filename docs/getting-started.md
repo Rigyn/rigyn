@@ -25,10 +25,10 @@ node --version
 npm --version
 ```
 
-Install a private per-user copy from the v0.1.1 GitHub release:
+Install a private per-user copy from the v0.1.2 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.1/rigyn-0.1.1.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.2/rigyn-0.1.2.tgz -- rigyn self-install
 rigyn --version
 ```
 
@@ -98,7 +98,7 @@ Start with a task that has a concrete result and a verification step:
 Explain how this project starts, then identify the smallest safe fix for the failing test. Do not edit yet.
 ```
 
-After reviewing the answer, ask it to implement and verify the change. Rigyn displays model text, reasoning summaries when supplied by the provider, tool calls, bounded command output, edits, token usage, cache usage, and cost metadata when known. `Ctrl+O` expands tool details and `Ctrl+T` expands reasoning summaries.
+After reviewing the answer, ask it to implement and verify the change. Rigyn displays model text, reasoning summaries when supplied by the provider, bounded live command output, complete retained tool details after completion, edits, token usage, cache usage, and cost metadata when known. `Ctrl+T` expands reasoning summaries.
 
 Type `/` for the command palette or `/hotkeys` for the active key map. Prefix a command with `!` to run it yourself without sending it to the model:
 

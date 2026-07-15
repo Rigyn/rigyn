@@ -294,11 +294,13 @@ function hangingLines(prefix: string, value: string, width: number, role: ThemeR
 }
 
 function userMessageLines(value: string, width: number): RenderedLine[] {
-  return wrapCells(value, Math.max(1, width - 2)).map((line) => ({
+  const padding = { text: "", role: "userMessage" as const, fill: true };
+  const content = wrapCells(value, Math.max(1, width - 2)).map((line) => ({
     text: ` ${line}`,
     role: "userMessage" as const,
     fill: true,
   }));
+  return [padding, ...content, padding];
 }
 
 function startupLines(value: string, width: number): RenderedLine[] {
@@ -424,11 +426,11 @@ function transcriptLines(
       resultLines = [
         ...(remaining === 0 || !tail
           ? []
-          : [{ text: `${omission} (${remaining} earlier lines, Ctrl+O to expand)`, role: "muted" as const }]),
+          : [{ text: `${omission} (${remaining} earlier lines)`, role: "muted" as const }]),
         ...visible,
         ...(remaining === 0 || tail
           ? []
-          : [{ text: `${omission} (${remaining} more lines, Ctrl+O to expand)`, role: "muted" as const }]),
+          : [{ text: `${omission} (${remaining} more lines)`, role: "muted" as const }]),
       ];
     }
     const custom = entry.callId === undefined ? undefined : toolRenderBlocks?.get(entry.callId);

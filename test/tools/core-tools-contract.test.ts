@@ -124,6 +124,33 @@ test("bash uses seconds for timeout, runs at the session cwd, and returns unlabe
   assert.doesNotMatch(result.content, /stdout:|stderr:|Command exited/u);
 });
 
+test("bash defaults omitted timeouts to ten minutes", async (t) => {
+  let received: CommandSpec | undefined;
+  const runner: ProcessRunner = {
+    async run(spec): Promise<CommandResult> {
+      received = spec;
+      return {
+        exitCode: null,
+        signal: null,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        timedOut: true,
+        cancelled: false,
+        durationMs: 600_000,
+      };
+    },
+  };
+  const workspace = await fixture({ runner });
+  t.after(async () => await workspace.close());
+
+  const result = await new ShellTool("bash").execute({ command: "ignored" }, workspace.context);
+  assert.equal(received?.timeoutMs, 600_000);
+  assert.equal(result.content, "Command timed out after 600 seconds");
+  assert.equal(result.isError, true);
+});
+
 test("read truncates at 2,000 complete lines and provides an exact offset", async (t) => {
   const workspace = await fixture();
   t.after(async () => await workspace.close());

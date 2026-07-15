@@ -4,9 +4,24 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.2] - 2026-07-14
+
+### Added
+
+- Review-required redacted HTML and Markdown session exports preserve visible conversation prose while omitting tool payloads, artifacts, provider-private data, identifiers, timestamps, and known secrets.
+
+### Changed
+
+- Completed tool cards show all retained detail automatically while in-progress output remains bounded; the default tool-expansion shortcut is removed, user messages have clearer separation, and assistant text uses a neutral terminal color.
+- Agent runs now default to 64 model invocations and model-initiated shell commands default to a 600-second timeout; explicit positive overrides remain supported.
+- Runtime extension commands are documented and verified across interactive, print, JSON, and RPC hosts.
+
 ### Fixed
 
 - Tagged release retries inspect existing drafts through the release CLI instead of GitHub's published-tag endpoint, so a failed npm publication can resume without deleting release state.
+- Uninstalling without `--yes` reports one concise confirmation instruction instead of a child-process stack trace.
+- Cross-extension tool-name collisions keep the first owner and report both conflicting packages without crashing activation; late duplicate registration by the same extension remains an error.
+- Structured secret redaction preserves shared non-cyclic object values, keeps serialized provider state synchronized with its redacted representation, and normalizes malformed Anthropic tool inputs before transport.
 
 ## [0.1.1] - 2026-07-14
 

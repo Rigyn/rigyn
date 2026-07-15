@@ -24,6 +24,15 @@ Continuation reuses the workspace-scoped durable thread. Forking preserves the o
 
 Inside the TUI, `/export archive.jsonl` writes the versioned machine-readable format and `/import archive.jsonl` creates a new workspace-bound session. HTML is intended for reading; Markdown is a visible transcript; JSONL is the round-trip interchange format. See [the export contract](session-export.md).
 
+For a review-required presentation copy, use one of:
+
+```sh
+rigyn --export share.html --redact
+rigyn --export share.md --redact
+```
+
+The TUI equivalent is `/export --redact [FILE]`. Redacted export omits tool payloads, persisted `!` shell shortcut output, images, artifacts, IDs, and exact timestamps, and replaces known secrets plus workspace/home roots. It supports HTML and Markdown, not JSONL. It reduces disclosure risk but cannot guarantee anonymization, so read the complete file before publishing it.
+
 ## Inspect resource loading without executing an agent run
 
 ```sh

@@ -47,7 +47,7 @@ Each run:
 - validates every invocation against the tool schema;
 - schedules non-conflicting tools in parallel and sequential tools as barriers;
 - persists progress and results;
-- continues until a terminal provider reason, cancellation, failure, or an explicitly configured `maxSteps` limit.
+- continues until a terminal provider reason, cancellation, failure, or the 64-turn default `maxSteps` limit (which hosts may override explicitly).
 
 Finish reasons and provider errors are normalized without discarding upstream request IDs or retry metadata. Retry behavior is narrow: transient failures before an unsafe partial response may retry; an authoritative context overflow may trigger one compaction retry.
 

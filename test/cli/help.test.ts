@@ -32,6 +32,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.ok(global.indexOf("Sessions:") < global.indexOf("Tools and resources:"));
   assert.ok(global.indexOf("Tools and resources:") < global.indexOf("Other:"));
   assert.match(global, /--extension PATH\s+Load an extension; repeatable/u);
+  assert.match(global, /--redact\s+With --export, write a review-required/u);
   assert.match(global, /--allow-scripts\s+Run reviewed dependency lifecycle scripts/u);
   assert.match(global, /--all\s+With continue\/resume\/session, search every indexed workspace/u);
   assert.match(global, /--workspace DIR\s+Use DIR as the project workspace/u);

@@ -139,7 +139,7 @@ test("frame renderer produces a stable transcript, editor, and footer layout", (
   assert.doesNotMatch(frame.text, /Rigyn|thr_1/u);
 });
 
-test("successful reads show a bounded preview and reveal the rest when expanded", () => {
+test("running reads show a bounded preview without depending on an expansion key", () => {
   const theme = createTheme("mono", { color: false, unicode: false });
   const read = {
     id: "tool:read",
@@ -161,7 +161,7 @@ test("successful reads show a bounded preview and reveal the rest when expanded"
     "  | fourth",
     "  | fifth",
     "  | sixth",
-    "  \\ ... (2 more lines, Ctrl+O to expand)",
+    "  \\ ... (2 more lines)",
     "-".repeat(60),
   ].join("\n"));
   assert.equal(snapshot(renderTranscript([{ ...read, expanded: true }], 60, theme)), [
@@ -205,7 +205,8 @@ test("native tool cards combine bounded previews, metadata, and one frame", () =
   assert.match(lines[1] ?? "", /✓ Read · \[ts\] src\/parser\.ts · 7 lines read · limited/u);
   assert.match(rendered, /│ one/u);
   assert.match(rendered, /│   two/u);
-  assert.match(rendered, /Ctrl\+O to expand/u);
+  assert.match(rendered, /… \(1 more lines\)/u);
+  assert.doesNotMatch(rendered, /Ctrl\+O/u);
   assert.equal(lines.at(-1), "─".repeat(52));
   assert.equal(lines.filter((line) => /^─+$/u.test(line)).length, 2);
   assert.ok(lines.every((line) => cellWidth(line) <= 52));
@@ -683,7 +684,7 @@ test("compact frames omit fixed-height top padding without losing the editor cur
   assert.equal(full.text.split("\n").length, 24);
 });
 
-test("collapsed tool output stays multiline and expands without duplicating its header", () => {
+test("bounded tool output stays multiline and expands without duplicating its header", () => {
   const base: TuiViewState = {
     context: { status: "idle" },
     transcript: [{
@@ -712,7 +713,7 @@ test("collapsed tool output stays multiline and expands without duplicating its 
   const theme = createTheme("mono", { color: false, unicode: false });
   const collapsed = snapshot(renderTranscript(base.transcript, 80, theme));
   assert.match(collapsed, /\+ Shell · npm test · 1m 1s · exit 0 · full output: \/tmp\/npm-test\.log/u);
-  assert.match(collapsed, /\| \.\.\. \(2 earlier lines, Ctrl\+O to expand\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
+  assert.match(collapsed, /\| \.\.\. \(2 earlier lines\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
   assert.doesNotMatch(collapsed, /\| one|\| two/u);
 
   const expanded = snapshot(renderTranscript([{ ...base.transcript[0]!, expanded: true }], 80, theme));
@@ -720,7 +721,7 @@ test("collapsed tool output stays multiline and expands without duplicating its 
   assert.equal(expanded.match(/\+ Shell/gu)?.length, 1);
 });
 
-test("persisted user shell history renders as one expandable shell card", () => {
+test("persisted user shell history renders as one expanded shell card by default", () => {
   const model = new TuiModel(DEFAULT_TUI_LIMITS);
   model.apply(envelope({
     type: "message_appended",
@@ -735,15 +736,16 @@ test("persisted user shell history renders as one expandable shell card", () => 
     },
   }, 1));
   const theme = createTheme("mono", { color: false, unicode: false });
-  const collapsed = snapshot(renderTranscript(model.entries, 80, theme));
-  assert.match(collapsed, /\+ Shell · npm test · exit 0/u);
-  assert.match(collapsed, /\| \.\.\. \(2 earlier lines, Ctrl\+O to expand\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
-  assert.doesNotMatch(collapsed, /\[User shell command\]|user-shell-render/u);
+  const expanded = snapshot(renderTranscript(model.entries, 80, theme));
+  assert.match(expanded, /\+ Shell · npm test · exit 0/u);
+  assert.match(expanded, /\| one\n  \| two\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
+  assert.doesNotMatch(expanded, /\[User shell command\]|user-shell-render/u);
 
   assert.equal(model.toggleTool("user-shell:user-shell-render"), true);
-  const expanded = snapshot(renderTranscript(model.entries, 80, theme));
-  assert.match(expanded, /\| one\n  \| two\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
-  assert.equal(expanded.match(/\+ Shell/gu)?.length, 1);
+  const collapsed = snapshot(renderTranscript(model.entries, 80, theme));
+  assert.match(collapsed, /\| \.\.\. \(2 earlier lines\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
+  assert.doesNotMatch(collapsed, /\| one|\| two/u);
+  assert.equal(collapsed.match(/\+ Shell/gu)?.length, 1);
 });
 
 test("mutation cards render structured input through the existing collapse and keep errors visible", () => {
@@ -932,7 +934,7 @@ test("transcript image payloads stay outside styled text while captions reserve 
   const frame = renderTranscriptFrame(entries, 40, theme, { resolveImage: resolvePng, maxImageRows: 4 });
   assert.equal(frame.images?.length, 1);
   assert.equal(frame.images?.[0]?.rows, 2);
-  assert.equal(frame.text.split("\n").length, 4);
+  assert.equal(frame.text.split("\n").length, 6);
   assert.doesNotMatch(frame.text, new RegExp(data.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 });
 
@@ -1229,8 +1231,10 @@ test("transcript cards distinguish speakers and every tool state without noisy l
   ], 48, theme));
 
   assert.equal(rendered, [
+    "",
     " Fix the parser",
     " and keep the API stable",
+    "",
     "",
     "## Plan",
     "I will inspect the parser.",
@@ -1269,14 +1273,14 @@ test("transcript cards distinguish speakers and every tool state without noisy l
     { id: "s", kind: "tool", title: "edit", status: "completed", text: "" },
     { id: "e", kind: "tool", title: "fetch", status: "failed", text: "" },
   ], 20, coloredTheme).split("\n");
-  assert.ok([coloredLines[0], coloredLines[3], coloredLines[7], coloredLines[11], coloredLines[15]]
+  assert.ok([coloredLines[0], coloredLines[5], coloredLines[9], coloredLines[13], coloredLines[17]]
     .every((line) => cellWidth(line ?? "") > 0 && cellWidth(line ?? "") <= 20));
   assert.ok(coloredLines[0]?.startsWith(coloredTheme.codes.userMessage));
-  assert.ok(coloredLines[3]?.startsWith(coloredTheme.codes.toolPending));
-  assert.ok(coloredLines[7]?.startsWith(coloredTheme.codes.toolRunning));
-  assert.ok(coloredLines[11]?.startsWith(coloredTheme.codes.toolSuccess));
-  assert.ok(coloredLines[15]?.startsWith(coloredTheme.codes.toolError));
-  assert.doesNotMatch(coloredLines[1] ?? "", /48;/u);
+  assert.ok(coloredLines[5]?.startsWith(coloredTheme.codes.toolPending));
+  assert.ok(coloredLines[9]?.startsWith(coloredTheme.codes.toolRunning));
+  assert.ok(coloredLines[13]?.startsWith(coloredTheme.codes.toolSuccess));
+  assert.ok(coloredLines[17]?.startsWith(coloredTheme.codes.toolError));
+  assert.equal(coloredTheme.codes.assistant, coloredTheme.codes.code);
 });
 
 test("thinking level changes the editor border role", () => {

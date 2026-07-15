@@ -4,7 +4,7 @@ Rigyn exposes a bounded structural UI to runtime extensions. Extensions describe
 
 This is the supported extension surface. The internal `TuiController` and live-surface renderer are implementation details and may change without becoming a separate UI SDK.
 
-The native transcript presents each tool as one theme-aware framed card. Its header combines lifecycle state, canonical built-in result metadata, and a bounded input summary; its body keeps file/search previews, recent shell output, and mutation diffs vertically bounded. `Ctrl+O` expands the retained detail. Provider reasoning summaries wrap to the terminal width instead of creating horizontally growing rows. A registered tool renderer replaces the call or result slots it returns; missing, invalid, expired, or failed slots use the native host presentation.
+The native transcript presents each tool as one theme-aware framed card. Its header combines lifecycle state, canonical built-in result metadata, and a bounded input summary. Running cards keep live file/search previews, recent shell output, and mutation diffs vertically bounded; completed cards show all retained detail automatically. Provider reasoning summaries wrap to the terminal width instead of creating horizontally growing rows. A registered tool renderer replaces the call or result slots it returns; missing, invalid, expired, or failed slots use the native host presentation.
 
 The focused runnable example is [`examples/custom-overlay.mjs`](../examples/custom-overlay.mjs).
 

@@ -116,11 +116,12 @@ test("startup content is present in the first full-screen frame", () => {
   controller.close();
 });
 
-test("committed startup help can still be revealed with the tool-expansion key", async () => {
+test("committed startup help can still be revealed with a custom tool-expansion key", async () => {
   const { input, output, controller } = fullController();
+  controller.setKeybindings(new Keybindings({ "app.tools.expand": "alt+t" }));
   controller.setStartup("compact startup", "expanded startup resources");
   output.chunks.length = 0;
-  input.write(Buffer.from([15]));
+  input.write("\u001bt");
   await tick();
   assert.match(output.text, /expanded startup resources/u);
   controller.close();
@@ -1505,7 +1506,7 @@ test("suspend, new, tree, and fork application actions are independently remappa
   controller.close();
 });
 
-test("Ctrl+P cycles models and Ctrl+O expands tool results", async () => {
+test("Ctrl+P cycles models and completed tools commit all retained details", async () => {
   const actions: TuiAction[] = [];
   const { input, output, controller } = fullController({ actions });
   controller.start();
@@ -1518,35 +1519,31 @@ test("Ctrl+P cycles models and Ctrl+O expands tool results", async () => {
   assert.equal(actions[0]?.type, "select");
   if (actions[0]?.type === "select") assert.deepEqual(actions[0].item.value, { provider: "anthropic", model: "beta" });
 
-  controller.render(envelope({ type: "tool_requested", callId: "call-1", name: "read", input: { path: "README.md" }, index: 0 }));
-  controller.render(envelope({
-    type: "tool_completed",
-    callId: "call-1",
-    name: "read",
-    index: 0,
-    isError: false,
-    preview: "one\ntwo\nthree\nfour\nfive\nsix",
-  }, 2));
-  controller.render(envelope({
-    type: "message_appended",
-    message: {
-      id: "tool-message-1",
-      role: "tool",
-      content: [{
-        type: "tool_result",
-        callId: "call-1",
-        name: "read",
-        content: "one\ntwo\nthree\nfour\nfive\nsix",
-        isError: false,
-      }],
-      createdAt: "2026-01-01T00:00:00.000Z",
-    },
-  }, 3));
-  await tick();
-  output.chunks.length = 0;
-  input.write(Buffer.from([15]));
-  await tick();
-  assert.match(output.text, /six/u);
+  for (const [offset, callId] of ["call-1", "call-2"].entries()) {
+    const content = Array.from({ length: 8 }, (_, index) => `${callId}-line-${index + 1}`).join("\n");
+    const sequence = offset * 3 + 1;
+    controller.render(envelope({ type: "tool_requested", callId, name: "read", input: { path: `${callId}.txt` }, index: offset }, sequence));
+    controller.render(envelope({
+      type: "tool_completed",
+      callId,
+      name: "read",
+      index: offset,
+      isError: false,
+      preview: content,
+    }, sequence + 1));
+    controller.render(envelope({
+      type: "message_appended",
+      message: {
+        id: `tool-message-${offset + 1}`,
+        role: "tool",
+        content: [{ type: "tool_result", callId, name: "read", content, isError: false }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    }, sequence + 2));
+    await tick();
+  }
+  assert.equal(output.text.split("call-1-line-8").length - 1, 1);
+  assert.equal(output.text.split("call-2-line-8").length - 1, 1);
   assert.doesNotMatch(output.text, /more lines/u);
   controller.close();
 });

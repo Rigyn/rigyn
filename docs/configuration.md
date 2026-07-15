@@ -63,7 +63,7 @@ Object keys merge recursively. Later scalar and array values replace earlier val
 | `providerRetry` | object | `{ maxAttempts: 3, baseDelayMs: 500, maxDelayMs: 30000, jitter: 0.2 }` | Bounded retry policy for transient provider failures. `/settings` exposes `maxAttempts`; delay and jitter tuning remain config-only. |
 | `compactionRetainRecentTurns` | integer | `2` | Minimum recent complete turns kept verbatim. |
 | `compactionToolResultBytes` | integer | `4096` | Maximum retained bytes for each old tool result. |
-| `maxSteps` | integer | unbounded | Optional maximum model turns in one run. Omit it to continue until a terminal provider result, cancellation, or failure. |
+| `maxSteps` | integer | `64` | Maximum model turns in one run. Configure a larger positive integer for deliberately longer tasks. |
 | `skillRoots` | string[] | `[]` | Additional skill files or directories. |
 | `extensionRoots` | string[] | `[]` | Additional extension roots. |
 | `packageResources` | object | `{}` | Per-package resource filters written by `rigyn config`. |
@@ -73,6 +73,8 @@ Object keys merge recursively. Later scalar and array values replace earlier val
 | `httpTransport` | object | `{}` | Proxy and network timeout controls. |
 
 Package-manager command values are argv arrays, not shell command strings. For example, `"npmCommand": ["mise", "exec", "node@24", "--", "npm"]` selects a version-manager wrapper without enabling shell interpolation. On Windows, configure a native executable or an interpreter plus script path; `.cmd` and `.bat` wrappers are rejected because they require shell parsing. Package installation still adds bounded arguments and disables lifecycle scripts by default; `--allow-scripts` is an explicit, per-transaction exception for reviewed production dependencies.
+
+Model-initiated `bash` commands default to a 600-second timeout when the tool call omits `timeout`. A tool call can request a different positive timeout explicitly.
 
 ## External tool execution boundary
 

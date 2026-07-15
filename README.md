@@ -14,10 +14,10 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.1.1 GitHub release:
+From the v0.1.2 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.1/rigyn-0.1.1.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.2/rigyn-0.1.2.tgz -- rigyn self-install
 rigyn
 ```
 
@@ -113,7 +113,7 @@ Useful interactive commands are:
 
 Type `/` to open the command palette. `! command` runs a user shell command without sending it to the model. While a response is active, normal submissions steer the current run and the follow-up shortcut queues work for the next turn. Queue behavior is configurable as one-at-a-time or all-at-once.
 
-The interface includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, expandable tool calls and results, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, `Ctrl+O` expands tool details, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
+The interface includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, bounded live tool output, complete retained tool details after completion, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
 
 ## Sessions and continuity
 

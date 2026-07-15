@@ -64,33 +64,37 @@ export class SecretRedactor {
   }
 
   redactValue(value: unknown): unknown {
-    const seen = new WeakSet<object>();
+    const active = new WeakSet<object>();
     let remaining = 10_000;
     const visit = (item: unknown, depth: number): unknown => {
       if (typeof item === "string") return this.redact(item);
       if (item === null || typeof item !== "object") return item;
-      if (seen.has(item)) return "[Circular]";
+      if (active.has(item)) return "[Circular]";
       if (depth >= 64 || remaining <= 0) return "[Truncated]";
-      seen.add(item);
+      active.add(item);
       remaining -= 1;
-      if (Array.isArray(item)) return item.map((entry) => visit(entry, depth + 1));
+      try {
+        if (Array.isArray(item)) return item.map((entry) => visit(entry, depth + 1));
 
-      const redacted: Record<string, unknown> = {};
-      for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(item))) {
-        if (descriptor.enumerable !== true) continue;
-        const next = SENSITIVE_KEY.test(key)
-          ? "[REDACTED]"
-          : "value" in descriptor
-            ? visit(descriptor.value, depth + 1)
-            : "[Accessor]";
-        Object.defineProperty(redacted, key, {
-          value: next,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        });
+        const redacted: Record<string, unknown> = {};
+        for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(item))) {
+          if (descriptor.enumerable !== true) continue;
+          const next = SENSITIVE_KEY.test(key)
+            ? "[REDACTED]"
+            : "value" in descriptor
+              ? visit(descriptor.value, depth + 1)
+              : "[Accessor]";
+          Object.defineProperty(redacted, key, {
+            value: next,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+        }
+        return redacted;
+      } finally {
+        active.delete(item);
       }
-      return redacted;
     };
     return visit(value, 0);
   }

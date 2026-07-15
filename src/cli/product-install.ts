@@ -8,6 +8,9 @@ export async function runProductInstallAction(
   action: ProductInstallAction,
   options: { yes?: boolean } = {},
 ): Promise<void> {
+  if (action === "uninstall" && options.yes !== true) {
+    throw new Error("Uninstall requires confirmation; run `rigyn uninstall --yes`");
+  }
   const scriptName = action === "install"
     ? "install-user.mjs"
     : action === "update"

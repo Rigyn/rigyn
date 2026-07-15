@@ -18,7 +18,7 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
     promptsAndCommands: ["/explain", "/inspect"],
     themes: ["paper"],
   });
-  assert.match(report, /^Rigyn v0\.1\.1 · Ready$/mu);
+  assert.match(report, /^Rigyn v0\.1\.2 · Ready$/mu);
   assert.match(report, /^Model: Ctrl\+K picker · Alt\+N next/mu);
   assert.match(report, /^Control: Ctrl\+X cancel/mu);
   assert.match(report, /^Commands: \/ opens the palette · \/login connects a provider/mu);
@@ -38,7 +38,7 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
     promptsAndCommands: ["/explain"],
     themes: ["paper"],
   });
-  assert.match(compact, /^Ctrl\+X interrupt · Ctrl\+C clear\/exit twice · Ctrl\+D exit(?: · Ctrl\+Z suspend)? · \/ commands · ! bash · Alt\+T help$/mu);
+  assert.match(compact, /^Ctrl\+X interrupt · Ctrl\+C clear\/exit twice · Ctrl\+D exit(?: · Ctrl\+Z suspend)? · \/ commands · ! bash$/mu);
   assert.match(compact, /^Loaded: 1 context · 1 extension · 1 skill · 1 prompt · 1 theme$/mu);
   assert.match(compact, /^No model connected · Start: \/login connects a provider · \/model selects an available model$/mu);
   assert.match(compact, /^Saved work: Alt\+R or \/resume · next launch: rigyn --continue$/mu);
@@ -47,6 +47,7 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
   const hotkeys = formatHotkeys(keybindings);
   assert.match(hotkeys, /^Model: Ctrl\+K picker · Alt\+N next/mu);
   assert.match(hotkeys, /^Sessions\/transcript: Alt\+R session picker/mu);
+  assert.match(hotkeys, /^Tools\/editor: Alt\+T tool details · /mu);
   assert.match(hotkeys, /^Control: Ctrl\+X cancel/mu);
   assert.equal(hotkeys.match(/!command includes output/gu)?.length, 1);
 });
@@ -65,6 +66,7 @@ test("startup report remains concise when no optional resources are present", ()
   });
   assert.doesNotMatch(compact, /^Loaded:/mu);
   assert.match(compact, /^Model ready · \/model switches the available model$/mu);
+  assert.match(formatHotkeys(new Keybindings()), /^Tools\/editor: Ctrl\+G external editor$/mu);
 });
 
 test("resume command preserves a custom session directory as one shell argument", () => {
