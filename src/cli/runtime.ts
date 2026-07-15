@@ -688,8 +688,12 @@ async function loadResourceGeneration(
     });
     for (const scope of trusted ? ["user", "project"] as const : ["user"] as const) {
       try {
-        installedPackages.push(...await packageManager.list(scope));
+        installedPackages.push(...await packageManager.list(
+          scope,
+          signal === undefined ? {} : { signal },
+        ));
       } catch (error) {
+        signal?.throwIfAborted();
         packageCatalogDiagnostics.push(
           `${scope} package provenance could not be catalogued: ${error instanceof Error ? error.message : String(error)}`,
         );

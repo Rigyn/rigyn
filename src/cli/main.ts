@@ -28,7 +28,6 @@ import {
 } from "../config/index.js";
 import type { ImageBlock, ModelInfo, OutboundImagePolicy, ProviderAdapter, ProviderId } from "../core/types.js";
 import type { EventEnvelope, ToolProgress } from "../core/events.js";
-import type { ExtensionMessageEvent, ExtensionStateEvent } from "../core/extension-entries.js";
 import type { QueueMode } from "../core/agent.js";
 import { createId } from "../core/ids.js";
 import {
@@ -2712,16 +2711,8 @@ async function chatCommandOperation(
       void task.finally(() => catalogTasks.delete(task));
     };
     const replayTranscript = (): void => {
-      terminal.clearTranscript();
       const selectedBranch = branch ?? runtime!.store.getThread(threadId).defaultBranch;
-      for (const event of runtime!.store.listEvents(threadId, selectedBranch)) {
-        if (event.event.type === "extension_state" || event.event.type === "extension_message") {
-          terminal.renderExtensionSession(
-            event as EventEnvelope<ExtensionStateEvent | ExtensionMessageEvent>,
-            selectedBranch,
-          );
-        } else terminal.render(event);
-      }
+      terminal.replaceTranscript(runtime!.store.listEvents(threadId, selectedBranch), selectedBranch);
     };
     const syncContext = (options: { announceRecovered?: boolean } = {}): void => {
       if (choice === undefined) terminal.clearModelContext();
@@ -3275,7 +3266,6 @@ async function chatCommandOperation(
               modelCatalog.clear();
               modelRefreshAbort?.abort(new Error("Runtime resources reloaded"));
               fileRefreshAbort?.abort(new Error("Runtime resources reloaded"));
-              replayTranscript();
               reloadedSummary = (await bindRuntimePresentation()).summary;
             },
           });
@@ -4421,7 +4411,6 @@ async function chatCommandOperation(
               modelCatalog.clear();
               modelRefreshAbort?.abort(new Error("Runtime resources reloaded"));
               fileRefreshAbort?.abort(new Error("Runtime resources reloaded"));
-              replayTranscript();
               reloadedSummary = (await bindRuntimePresentation()).summary;
             },
           });

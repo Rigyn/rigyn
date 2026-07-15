@@ -1842,8 +1842,12 @@ export class LocalExtensionPackageManager {
     });
   }
 
-  list(selectedScope?: ExtensionPackageScope): Promise<InstalledExtensionPackage[]> {
+  list(
+    selectedScope?: ExtensionPackageScope,
+    options: Pick<ExtensionPackageTransactionOptions, "signal"> = {},
+  ): Promise<InstalledExtensionPackage[]> {
     return this.#serialized(async () => {
+      options.signal?.throwIfAborted();
       if (selectedScope !== undefined) scope(selectedScope);
       const scopes: ExtensionPackageScope[] = selectedScope === undefined ? ["user", "project"] : [selectedScope];
       const result: InstalledExtensionPackage[] = [];
@@ -1875,7 +1879,7 @@ export class LocalExtensionPackageManager {
             }
             result.push(await this.#inspect(target, itemScope));
           }
-        });
+        }, options.signal);
       }
       return result.map(cloneInstalled);
     });

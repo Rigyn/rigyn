@@ -2103,6 +2103,30 @@ test("accessibility mode never emits cursor-control sequences", async () => {
   controller.close();
 });
 
+test("accessibility transcript replacement does not lose visible history behind non-rendering events", () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const controller = new TuiController({
+    input,
+    output,
+    mode: "accessible",
+    environment: { TERM: "xterm", RIGYN_ASCII: "1", NO_COLOR: "1" },
+    handleSignals: false,
+  });
+  controller.start();
+  output.chunks.length = 0;
+  const events = [envelope({ type: "text_delta", text: "retained visible history", part: 0 }, 1) as never];
+  for (let sequence = 2; sequence <= 2_002; sequence += 1) {
+    events.push(envelope({ type: "run_state", state: "streaming" }, sequence) as never);
+  }
+
+  controller.replaceTranscript(events, "main");
+
+  assert.match(output.text, /retained visible history/u);
+  assert.doesNotMatch(output.text, /\u001b/u);
+  controller.close();
+});
+
 test("resize causes a fresh bounded frame", async () => {
   const { output, controller } = fullController();
   controller.start();
@@ -2670,6 +2694,94 @@ test("full TUI owns generation-bound extension session renderers with branch-saf
     key: "invalid_branch",
     value: null,
   }, 33) as never, "../outside"), /requires a branch/u);
+  controller.close();
+});
+
+test("full TUI replaces a large transcript in one redraw and renders only live extension session entries", async () => {
+  const { output, controller } = fullController({ alternateScreen: true });
+  controller.start();
+  const generation = new AbortController();
+  const renderedStates: string[] = [];
+  const renderedMessages: string[] = [];
+  const renderedBranches: string[] = [];
+  controller.setSessionRenderers({
+    renderState: (value, branch) => {
+      renderedStates.push(value.event.key);
+      renderedBranches.push(branch);
+      return { lines: [{ spans: [{ text: `STATE ${value.event.key}`, role: "accent" }] }] };
+    },
+    renderMessage: (value, branch) => {
+      renderedMessages.push(value.event.kind);
+      renderedBranches.push(branch);
+      return { lines: [{ spans: [{ text: `MESSAGE ${value.event.kind}`, role: "success" }] }] };
+    },
+  }, generation.signal);
+  await tick();
+  const renderNow = controller.renderNow.bind(controller);
+  let redraws = 0;
+  controller.renderNow = () => {
+    redraws += 1;
+    renderNow();
+  };
+
+  const events = [envelope({
+    type: "extension_state",
+    extensionId: "owner.extension",
+    schemaVersion: 1,
+    key: "pruned",
+    value: { state: "old" },
+  }, 1) as never];
+  for (let sequence = 2; sequence <= 10_001; sequence += 1) {
+    events.push(envelope({
+      type: "warning",
+      code: `history-${sequence}`,
+      message: `Saved transcript event ${sequence}`,
+    }, sequence) as never);
+  }
+  events.push(
+    envelope({
+      type: "extension_message",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      kind: "hidden",
+      messageId: "hidden-replay",
+      payload: { private: true },
+      modelContext: false,
+      transcript: false,
+    }, 10_002) as never,
+    envelope({
+      type: "extension_state",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      key: "live",
+      value: { state: "current" },
+    }, 10_003) as never,
+    envelope({
+      type: "extension_message",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      kind: "visible",
+      messageId: "visible-replay",
+      payload: { renderer: true },
+      modelContext: false,
+      transcript: { text: "safe fallback" },
+    }, 10_004) as never,
+  );
+
+  output.chunks.length = 0;
+  controller.replaceTranscript(events, "resume/main");
+  assert.equal(output.chunks.length, 0, "bulk replacement must defer terminal output to the scheduled redraw");
+  assert.equal(redraws, 0);
+  await tick();
+
+  assert.equal(redraws, 1);
+  assert.ok(output.chunks.length > 0);
+  assert.deepEqual(renderedStates, ["live"]);
+  assert.deepEqual(renderedMessages, ["visible"]);
+  assert.deepEqual(renderedBranches, ["resume/main", "resume/main"]);
+  assert.match(output.text, /STATE live/u);
+  assert.match(output.text, /MESSAGE visible/u);
+  assert.doesNotMatch(output.text, /STATE pruned|MESSAGE hidden/u);
   controller.close();
 });
 

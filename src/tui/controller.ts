@@ -844,6 +844,37 @@ export class TuiController {
     else this.#renderClassic(envelope);
   }
 
+  replaceTranscript(envelopes: readonly EventEnvelope[], branch: string): void {
+    this.#ensureStarted();
+    if (
+      typeof branch !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(branch)
+      || branch.includes("..")
+    ) {
+      throw new Error("Transcript replacement requires a branch");
+    }
+    this.#resetTranscript();
+    this.#model.applyAll(envelopes);
+    const liveExtensionEntries = new Set(this.#model.entries.flatMap((entry) =>
+      entry.extension === undefined ? [] : [entry.id]));
+    for (const envelope of envelopes) {
+      if (!liveExtensionEntries.has(envelope.eventId)) continue;
+      if (envelope.event.type !== "extension_state" && envelope.event.type !== "extension_message") continue;
+      if (envelope.event.type === "extension_message" && envelope.event.transcript === false) continue;
+      const retained = retainSessionEvent(
+        envelope as EventEnvelope<ExtensionStateEvent | ExtensionMessageEvent>,
+        branch,
+      );
+      this.#sessionEvents.set(envelope.eventId, retained);
+      this.#sessionEventBytes += retained.bytes;
+    }
+    this.#pruneSessionEvents();
+    this.#syncActivityTimer();
+    this.#transcriptOffset = 0;
+    if (this.mode === "full") this.#scheduleRender();
+    else for (const envelope of envelopes) this.#renderClassic(envelope);
+  }
+
   notify(message: string, kind: "status" | "warning" | "error" = "status"): void {
     this.#ensureStarted();
     this.#model.addLocal(kind, message);
@@ -871,6 +902,11 @@ export class TuiController {
   }
 
   clearTranscript(): void {
+    this.#resetTranscript();
+    this.#scheduleRender();
+  }
+
+  #resetTranscript(): void {
     this.#model.clearTranscript();
     this.#sessionEvents.clear();
     this.#sessionEventBytes = 0;
@@ -878,7 +914,6 @@ export class TuiController {
     this.#inlineCommittedIds.clear();
     this.#inlineRevealedIds.clear();
     this.#transcriptOffset = 0;
-    this.#scheduleRender();
   }
 
   question(prompt: string, signal?: AbortSignal, options: { cancelable?: boolean } = {}): Promise<string> {

@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
+import { EXTENSION_PACKAGE_LOCK } from "../../src/extensions/index.js";
 
 async function httpFixture(
   handler: (request: IncomingMessage, response: ServerResponse) => void,
@@ -594,6 +595,26 @@ test("a pre-commit reload failure leaves the previous generation operational", a
         prompt: "stable:value",
       });
     } finally {
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime reload can be cancelled while extension package listing waits for a lock", async () => {
+  await withRuntimeEnvironment(async ({ workspace }) => {
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    const lock = join(runtime.paths.userExtensions, EXTENSION_PACKAGE_LOCK);
+    const controller = new AbortController();
+    await mkdir(runtime.paths.userExtensions, { recursive: true });
+    await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "held", createdAt: Date.now() })}\n`);
+    const cancel = setTimeout(() => controller.abort(new Error("cancel runtime reload")), 25);
+    const release = setTimeout(() => { void rm(lock, { force: true }); }, 150);
+    try {
+      await assert.rejects(runtime.reload({ signal: controller.signal }), /cancel runtime reload/u);
+    } finally {
+      clearTimeout(cancel);
+      clearTimeout(release);
+      await rm(lock, { force: true });
       await runtime.close();
     }
   });

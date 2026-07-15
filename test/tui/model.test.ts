@@ -4,6 +4,108 @@ import { TuiModel } from "../../src/tui/model.js";
 import { DEFAULT_TUI_LIMITS } from "../../src/tui/controller.js";
 import { envelope } from "./helpers.js";
 
+function richReplayEvents() {
+  return [
+    envelope({ type: "run_started", provider: "openai", model: "gpt-test" }, 1),
+    envelope({ type: "model_selected", provider: "openai", model: "gpt-test", reasoningEffort: "high" }, 2),
+    envelope({ type: "assistant_started", step: 1 }, 3),
+    envelope({ type: "reasoning_delta", text: "Inspect the saved work", part: 0, visibility: "summary" }, 4),
+    envelope({ type: "text_delta", text: "Reading files", part: 0 }, 5),
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "assistant-rich",
+        role: "assistant",
+        content: [{ type: "text", text: "Reading files" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    }, 6),
+    envelope({ type: "assistant_completed", finishReason: "tool_calls" }, 7),
+    envelope({
+      type: "tool_requested",
+      callId: "call-rich",
+      name: "read",
+      input: { path: "src/index.ts" },
+      index: 0,
+    }, 8),
+    envelope({ type: "tool_started", callId: "call-rich", name: "read", index: 0 }, 9),
+    envelope({
+      type: "tool_progress",
+      callId: "call-rich",
+      name: "read",
+      index: 0,
+      sequence: 0,
+      progress: { type: "result", content: "partial source", isError: false, metadata: { lines: 1 } },
+    }, 10),
+    envelope({
+      type: "tool_completed",
+      callId: "call-rich",
+      name: "read",
+      index: 0,
+      isError: false,
+      preview: "complete source",
+      result: {
+        type: "tool_result",
+        callId: "call-rich",
+        name: "read",
+        content: "complete source",
+        isError: false,
+        metadata: { lines: 2 },
+      },
+    }, 11),
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "tool-rich",
+        role: "tool",
+        content: [{
+          type: "tool_result",
+          callId: "call-rich",
+          name: "read",
+          content: "complete source",
+          isError: false,
+          metadata: { lines: 2 },
+        }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    }, 12),
+    envelope({
+      type: "extension_state",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      key: "counter",
+      value: { count: 2 },
+    }, 13),
+    envelope({
+      type: "extension_message",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      kind: "hidden",
+      messageId: "hidden-rich",
+      payload: { private: true },
+      modelContext: false,
+      transcript: false,
+    }, 14),
+    envelope({
+      type: "extension_message",
+      extensionId: "owner.extension",
+      schemaVersion: 1,
+      kind: "visible",
+      messageId: "visible-rich",
+      payload: { renderer: true },
+      modelContext: false,
+      transcript: { text: "Visible extension status" },
+    }, 15),
+    envelope({
+      type: "usage",
+      semantics: "final",
+      usage: { inputTokens: 120, outputTokens: 30, cacheReadTokens: 80, cost: "0.01" },
+    }, 16),
+    envelope({ type: "warning", code: "fixture", message: "Retained warning" }, 17),
+    envelope({ type: "run_completed", finishReason: "stop" }, 18),
+  ];
+}
+
 test("TUI model folds streaming and tool events into bounded transcript entries", () => {
   const model = new TuiModel({ ...DEFAULT_TUI_LIMITS, maxTranscriptBytes: 200, maxToolPreviewBytes: 40 });
   model.apply(envelope({ type: "run_started", provider: "openai", model: "gpt-test" }, 1));
@@ -30,6 +132,69 @@ test("TUI model folds streaming and tool events into bounded transcript entries"
   });
   assert.equal(model.toggleTool("call_1"), true);
   assert.equal(model.entries[1]?.expanded, false);
+});
+
+test("bulk replay produces the same rich transcript state as sequential event application", () => {
+  const events = richReplayEvents();
+  const sequential = new TuiModel(DEFAULT_TUI_LIMITS);
+  const bulk = new TuiModel(DEFAULT_TUI_LIMITS);
+
+  for (const event of events) sequential.apply(event);
+  bulk.applyAll(events);
+
+  assert.deepEqual(bulk.entries, sequential.entries);
+  assert.deepEqual(bulk.committableEntries(), sequential.committableEntries());
+  assert.deepEqual(bulk.context, sequential.context);
+  assert.deepEqual(bulk.usage, sequential.usage);
+  assert.equal(bulk.notice, sequential.notice);
+});
+
+test("bulk replay keeps a realistic ten-thousand-event tool history bounded", () => {
+  const events = [];
+  let sequence = 0;
+  for (let index = 0; index < 2_500; index += 1) {
+    const callId = `bulk-${index}`;
+    events.push(
+      envelope({
+        type: "tool_requested",
+        callId,
+        name: "read",
+        input: { path: `src/fixture-${index}.ts` },
+        index: 0,
+      }, sequence += 1),
+      envelope({ type: "tool_started", callId, name: "read", index: 0 }, sequence += 1),
+      envelope({
+        type: "tool_progress",
+        callId,
+        name: "read",
+        index: 0,
+        sequence: 0,
+        progress: {
+          type: "result",
+          content: `partial result ${index}`,
+          isError: false,
+          metadata: { index, phase: "running" },
+        },
+      }, sequence += 1),
+      envelope({
+        type: "tool_completed",
+        callId,
+        name: "read",
+        index: 0,
+        isError: false,
+        preview: `completed result ${index}`,
+      }, sequence += 1),
+    );
+  }
+  const model = new TuiModel(DEFAULT_TUI_LIMITS);
+
+  model.applyAll(events);
+
+  assert.equal(events.length, 10_000);
+  assert.equal(model.entries.length, DEFAULT_TUI_LIMITS.maxTranscriptEntries);
+  assert.equal(model.entries[0]?.callId, "bulk-500");
+  assert.equal(model.entries.at(-1)?.callId, "bulk-2499");
+  assert.match(model.notice ?? "", /Older transcript entries were discarded/u);
 });
 
 test("TUI keeps forward-compatible provider telemetry out of the user transcript", () => {

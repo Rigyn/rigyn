@@ -271,13 +271,28 @@ function toolCallSummary(input: JsonValue, maximumBytes: number): string | undef
   return byteTruncate(sanitizeTerminalText(summary).replaceAll("\n", " "), maximumBytes);
 }
 
+function transcriptEntryBytes(entry: TranscriptEntry): number {
+  const extension = entry.extension === undefined
+    ? ""
+    : `${entry.extension.type}\0${entry.extension.extensionId}\0${entry.extension.schemaVersion}\0${entry.extension.key}`;
+  return Buffer.byteLength(
+    `${entry.title ?? ""}${entry.summary ?? ""}${entry.inputPreview ?? ""}${entry.text}${entry.toolData === undefined ? "" : JSON.stringify(entry.toolData)}${extension}`,
+    "utf8",
+  ) + (entry.images ?? []).reduce(
+    (total, image) => total + 64 + Buffer.byteLength(image.block.mediaType, "utf8"),
+    0,
+  );
+}
+
 export class TuiModel {
   readonly #limits: TuiLimits;
   readonly #messageIds = new Set<string>();
   readonly #mutableEntryIds = new Set<string>();
   readonly #usageByRun = new Map<string, NormalizedUsage>();
+  readonly #entryBytes = new WeakMap<TranscriptEntry, number>();
   #startup: TranscriptEntry | undefined;
   #entries: TranscriptEntry[] = [];
+  #transcriptBytes = 0;
   #context: TuiContext = { active: false, status: "idle" };
   #usage: TuiUsageSummary | undefined;
   #notice: string | undefined;
@@ -346,6 +361,7 @@ export class TuiModel {
 
   clearTranscript(): void {
     this.#entries = [];
+    this.#transcriptBytes = 0;
     this.#messageIds.clear();
     this.#mutableEntryIds.clear();
     this.#usageByRun.clear();
@@ -399,6 +415,18 @@ export class TuiModel {
   }
 
   apply(envelope: EventEnvelope): void {
+    this.#apply(envelope);
+    this.#bound();
+  }
+
+  applyAll(envelopes: readonly EventEnvelope[]): void {
+    for (const envelope of envelopes) {
+      this.#apply(envelope);
+      this.#bound();
+    }
+  }
+
+  #apply(envelope: EventEnvelope): void {
     const event = envelope.event;
     switch (event.type) {
       case "run_started": {
@@ -688,7 +716,6 @@ export class TuiModel {
         this.#append({ id: envelope.eventId, kind: "warning", title: event.code, text: event.message });
         break;
     }
-    this.#bound();
   }
 
   #appendMessage(message: CanonicalMessage): void {
@@ -761,6 +788,7 @@ export class TuiModel {
       if (live !== undefined) {
         live.text = sanitizeTerminalText(text);
         if (images.length > 0) live.images = images;
+        this.#refreshEntryBytes(live);
         return;
       }
     }
@@ -779,6 +807,7 @@ export class TuiModel {
     const entry = this.#entries.findLast((item) => item.id === id);
     if (entry === undefined) this.#append({ id, kind, text: safe, ...(kind === "reasoning" ? { expanded: this.#reasoningExpanded } : {}) });
     else entry.text = byteTruncate(`${entry.text}${safe}`, this.#limits.maxTranscriptBytes);
+    if (entry !== undefined) this.#refreshEntryBytes(entry);
     this.#mutableEntryIds.add(id);
   }
 
@@ -848,6 +877,7 @@ export class TuiModel {
       ...(values.partialResult === undefined ? {} : { partialResult: values.partialResult }),
       ...(values.result === undefined ? {} : { result: values.result }),
     };
+    this.#refreshEntryBytes(entry);
   }
 
   #updateToolProgress(
@@ -896,33 +926,36 @@ export class TuiModel {
   }
 
   #append(entry: TranscriptEntry): void {
-    this.#entries.push({
+    const appended = {
       ...entry,
       text: sanitizeTerminalText(entry.text),
       ...(entry.title === undefined ? {} : { title: sanitizeTerminalText(entry.title) }),
       ...(entry.summary === undefined ? {} : { summary: sanitizeTerminalText(entry.summary) }),
       ...(entry.inputPreview === undefined ? {} : { inputPreview: sanitizeTerminalText(entry.inputPreview) }),
-    });
+    };
+    this.#entries.push(appended);
+    this.#refreshEntryBytes(appended);
+  }
+
+  #refreshEntryBytes(entry: TranscriptEntry): void {
+    const previous = this.#entryBytes.get(entry) ?? 0;
+    const next = transcriptEntryBytes(entry);
+    this.#entryBytes.set(entry, next);
+    this.#transcriptBytes += next - previous;
   }
 
   #bound(): void {
-    const entryBytes = (entry: TranscriptEntry): number => {
-      const extension = entry.extension === undefined
-        ? ""
-        : `${entry.extension.type}\0${entry.extension.extensionId}\0${entry.extension.schemaVersion}\0${entry.extension.key}`;
-      return Buffer.byteLength(
-        `${entry.title ?? ""}${entry.summary ?? ""}${entry.inputPreview ?? ""}${entry.text}${entry.toolData === undefined ? "" : JSON.stringify(entry.toolData)}${extension}`,
-        "utf8",
-      ) + (entry.images ?? []).reduce((total, image) => total + 64 + Buffer.byteLength(image.block.mediaType, "utf8"), 0);
-    };
-    let bytes = this.#entries.reduce(
-      (total, entry) => total + entryBytes(entry),
-      0,
-    );
-    while (this.#entries.length > this.#limits.maxTranscriptEntries || bytes > this.#limits.maxTranscriptBytes) {
-      const removed = this.#entries.shift();
+    let removeCount = 0;
+    while (
+      this.#entries.length - removeCount > this.#limits.maxTranscriptEntries
+      || this.#transcriptBytes > this.#limits.maxTranscriptBytes
+    ) {
+      const removed = this.#entries[removeCount];
       if (removed === undefined) break;
-      bytes -= entryBytes(removed);
+      this.#transcriptBytes -= this.#entryBytes.get(removed) ?? 0;
+      removeCount += 1;
+    }
+    for (const removed of this.#entries.splice(0, removeCount)) {
       this.#messageIds.delete(removed.id);
       this.#mutableEntryIds.delete(removed.id);
       this.#truncated = true;

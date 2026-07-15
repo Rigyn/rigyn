@@ -219,3 +219,26 @@ test("package managers coordinate through a recoverable cross-process lock", asy
   assert.deepEqual(await first.list("user"), []);
   await assert.rejects(access(lock), /ENOENT/u);
 });
+
+test("package listing can be cancelled while waiting for an active lock", async (t) => {
+  const root = await temporary(t);
+  const user = join(root, "user-extensions");
+  await mkdir(user, { recursive: true });
+  const lock = join(user, EXTENSION_PACKAGE_LOCK);
+  const packages = new LocalExtensionPackageManager({ user });
+  const controller = new AbortController();
+
+  await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "held", createdAt: Date.now() })}\n`);
+  const cancel = setTimeout(() => controller.abort(new Error("cancel package listing")), 25);
+  const release = setTimeout(() => { void rm(lock, { force: true }); }, 150);
+  try {
+    await assert.rejects(
+      packages.list("user", { signal: controller.signal }),
+      /cancel package listing/u,
+    );
+  } finally {
+    clearTimeout(cancel);
+    clearTimeout(release);
+    await rm(lock, { force: true });
+  }
+});
