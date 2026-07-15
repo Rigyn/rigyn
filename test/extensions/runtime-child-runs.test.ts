@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  ABSOLUTE_CHILD_RUN_LIMITS,
+  DEFAULT_CHILD_RUN_POLICY,
+  normalizeChildRunPolicy,
+  type ChildRunPolicy,
+} from "../../src/core/child-runs.js";
 import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { HarnessService } from "../../src/service/harness.js";
@@ -16,7 +22,7 @@ async function fixture(
   t: { after(callback: () => Promise<void>): void },
   source: string,
   scripts: readonly ScriptedProviderStep[],
-  options: { toolBackend?: ToolExecutionBackend } = {},
+  options: { toolBackend?: ToolExecutionBackend; childRuns?: Partial<ChildRunPolicy> } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-child-"));
   const sourcePath = join(root, "child-extension.mjs");
@@ -39,6 +45,7 @@ async function fixture(
     runtimeExtensions: host,
     extraTools: host.tools(),
     ...(options.toolBackend === undefined ? {} : { toolBackend: options.toolBackend }),
+    ...(options.childRuns === undefined ? {} : { childRuns: options.childRuns }),
     projectTrusted: false,
   });
   await service.initialize();
@@ -51,6 +58,134 @@ async function fixture(
   });
   return { root, host, provider, service, store };
 }
+
+test("child-run policy keeps compatibility defaults and rejects unsafe or inconsistent values", () => {
+  assert.deepEqual(normalizeChildRunPolicy(undefined), DEFAULT_CHILD_RUN_POLICY);
+  assert.throws(
+    () => normalizeChildRunPolicy({ maxConcurrent: ABSOLUTE_CHILD_RUN_LIMITS.maxConcurrent + 1 }),
+    /childRuns\.maxConcurrent must be a safe integer from 1 through 16/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ maxSteps: ABSOLUTE_CHILD_RUN_LIMITS.maxSteps + 1 }),
+    /childRuns\.maxSteps must be a safe integer from 1 through 256/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ maxTimeoutMs: ABSOLUTE_CHILD_RUN_LIMITS.maxTimeoutMs + 1 }),
+    /childRuns\.maxTimeoutMs must be a safe integer from 1 through 3600000/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ maxOutputLimitBytes: ABSOLUTE_CHILD_RUN_LIMITS.maxOutputLimitBytes + 1 }),
+    /childRuns\.maxOutputLimitBytes must be a safe integer from 1 through 8388608/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ defaultMaxSteps: 5, maxSteps: 4 }),
+    /defaultMaxSteps must not exceed childRuns\.maxSteps/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ defaultTimeoutMs: 2, maxTimeoutMs: 1 }),
+    /defaultTimeoutMs must not exceed childRuns\.maxTimeoutMs/u,
+  );
+  assert.throws(
+    () => normalizeChildRunPolicy({ defaultOutputLimitBytes: 2, maxOutputLimitBytes: 1 }),
+    /defaultOutputLimitBytes must not exceed childRuns\.maxOutputLimitBytes/u,
+  );
+});
+
+test("configured child-run defaults and maxima govern extension-requested runs", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "123456789" }] },
+    { kind: "turn", content: [{ type: "text", text: "abcdefgh" }] },
+  ], {
+    childRuns: {
+      maxConcurrent: 2,
+      defaultMaxSteps: 2,
+      maxSteps: 3,
+      defaultTimeoutMs: 1_000,
+      maxTimeoutMs: 2_000,
+      defaultOutputLimitBytes: 5,
+      maxOutputLimitBytes: 8,
+    },
+  });
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  for (const [field, selected, expected] of [
+    ["maxSteps", 4, /configured maximum of 3/u],
+    ["timeoutMs", 2_001, /configured maximum of 2000/u],
+    ["outputLimitBytes", 9, /configured maximum of 8/u],
+  ] as const) {
+    await assert.rejects(api.runChild({
+      threadId: parent.threadId,
+      prompt: `reject excessive ${field}`,
+      context: "fresh",
+      tools: ["read"],
+      [field]: selected,
+    }), expected);
+  }
+
+  const atMaximum = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "accept configured maxima",
+    context: "fresh",
+    tools: ["read"],
+    maxSteps: 3,
+    timeoutMs: 2_000,
+    outputLimitBytes: 8,
+  });
+  assert.equal(atMaximum.finalText, "12345678");
+  assert.equal(atMaximum.truncated, true);
+
+  const withDefaults = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "use configured defaults",
+    context: "fresh",
+    tools: ["read"],
+  });
+  assert.equal(withDefaults.finalText, "abcde");
+  assert.equal(withDefaults.truncated, true);
+  assert.equal(value.provider.callCount, 2);
+});
+
+test("active child runs reject queued turns so the step ceiling covers the whole operation", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [{
+    kind: "turn",
+    content: [{ type: "text", text: "one bounded child turn" }],
+    eventDelayMs: 100,
+  }]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  let announceStart!: (session: { threadId: string; branch: string }) => void;
+  const started = new Promise<{ threadId: string; branch: string }>((resolve) => { announceStart = resolve; });
+  const running = api.runChild({
+    threadId: parent.threadId,
+    prompt: "stay within one operation budget",
+    context: "fresh",
+    tools: [],
+    maxSteps: 1,
+    onStart: announceStart,
+  });
+  const child = await started;
+  await assert.rejects(api.sendUserMessage({
+    threadId: child.threadId,
+    branch: child.branch,
+    delivery: "follow_up",
+    text: "attempt another bounded turn",
+  }), /do not accept steering or follow-up messages/u);
+  const result = await running;
+  assert.equal(result.status, "success");
+  assert.equal(result.steps, 1);
+  assert.equal(value.provider.callCount, 1);
+});
 
 test("runtime child runs use the active service, explicit tools, bounded output, and session retention", async (t) => {
   const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
@@ -721,6 +856,13 @@ test("persisted child sessions survive a service restart and can continue", asyn
     projectTrusted: false,
   });
   await restarted.initialize();
+  await assert.rejects(api.runChild({
+    threadId: child.threadId,
+    branch: child.branch,
+    prompt: "attempt nested delegation after restart",
+    context: "fresh",
+    tools: [],
+  }), /Nested runtime child runs are disabled/u);
   const continued = await restarted.run({
     threadId: child.threadId,
     branch: child.branch,
@@ -765,4 +907,75 @@ test("runtime child concurrency is bounded and all admitted children settle inde
   assert.deepEqual(results.map((result) => result.status), ["success", "success", "success", "success"]);
   assert.equal(new Set(results.map((result) => result.threadId)).size, 4);
   assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+});
+
+test("configured runtime child concurrency is enforced", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, Array.from({ length: 2 }, (_entry, index) => ({
+    kind: "turn" as const,
+    content: [{ type: "text" as const, text: `configured-child-${index}` }],
+    eventDelayMs: 100,
+  })), { childRuns: { maxConcurrent: 2 } });
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const admitted = Array.from({ length: 2 }, (_entry, index) => api.runChild({
+    threadId: parent.threadId,
+    prompt: `configured child ${index}`,
+    context: "fresh",
+    tools: ["read"],
+  }));
+
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "third child",
+    context: "fresh",
+    tools: ["read"],
+  }), /At most 2 runtime child runs/u);
+  const results = await Promise.all(admitted);
+  assert.deepEqual(results.map((result) => result.status), ["success", "success"]);
+});
+
+test("runtime resource replacement applies the next child-run policy", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "accepted after policy reload" }] },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const resources = (childRuns: Partial<ChildRunPolicy>) => ({
+    providers: new ProviderRegistry([value.provider]),
+    projectTrusted: false,
+    skills: [],
+    extraTools: value.host.tools(),
+    runtimeExtensions: value.host,
+    childRuns,
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  await value.service.replaceRuntimeResources(resources({ defaultMaxSteps: 2, maxSteps: 2 }));
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "rejected by the reloaded policy",
+    context: "fresh",
+    tools: ["read"],
+    maxSteps: 3,
+  }), /configured maximum of 2/u);
+
+  await value.service.replaceRuntimeResources(resources({ defaultMaxSteps: 3, maxSteps: 65 }));
+  const accepted = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "accepted by the next policy",
+    context: "fresh",
+    tools: ["read"],
+    maxSteps: 65,
+  });
+  assert.equal(accepted.status, "success");
+  assert.equal(accepted.finalText, "accepted after policy reload");
 });

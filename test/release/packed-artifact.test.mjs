@@ -364,6 +364,7 @@ function assertSafePackageFiles(files) {
     "examples/state-migration/runtime/index.mjs",
     "examples/reload-safety/runtime/index.mjs",
     "resources/package-gallery.json",
+    "resources/config.jsonc",
     "resources/schemas/package-gallery-v1.json",
     "resources/prompts/build-extension.md",
     "resources/skills/build-extension/SKILL.md",
@@ -543,12 +544,22 @@ test("packed artifact installs into a blank home and completes an offline extens
     await access(join(paths.installRoot, "app", "node_modules", ...dependency.split("/"), license), constants.R_OK);
   }
   await Promise.all([
+    access(join(packageRoot, "resources", "config.jsonc")),
     access(join(packageRoot, "resources", "prompts", "build-extension.md")),
     access(join(packageRoot, "resources", "skills", "build-extension", "SKILL.md")),
     access(join(packageRoot, "resources", "skills", "build-extension", "references", "dashboard.md")),
   ]);
   const appManifest = JSON.parse(await readFile(join(paths.installRoot, "app", "package.json"), "utf8"));
   assert.equal(appManifest.dependencies?.["rigyn"], packed[0].version);
+  const globalConfigPath = join(paths.installRoot, "config", "rigyn", "config.jsonc");
+  const packagedConfigTemplate = await readFile(join(packageRoot, "resources", "config.jsonc"), "utf8");
+  assert.equal(await readFile(globalConfigPath, "utf8"), packagedConfigTemplate);
+  const globalConfigMetadata = await lstat(globalConfigPath);
+  assert.equal(globalConfigMetadata.isFile(), true);
+  assert.equal(globalConfigMetadata.isSymbolicLink(), false);
+  if (process.platform !== "win32") {
+    assert.equal(globalConfigMetadata.mode & 0o077, 0, "the installation-local config must be private");
+  }
   await assert.rejects(access(join(paths.installRoot, "app", "package-lock.json")), (error) => errno(error) === "ENOENT");
   const ripgrepModule = pathToFileURL(join(packageRoot, "dist", "tools", "ripgrep.js")).href;
   const ripgrepCheck = await runCommand(process.execPath, [
@@ -706,9 +717,11 @@ export default function activate(api: any) {
   const keepBin = join(paths.installRoot, "bin", "keep.txt");
   const credentialKeyPath = join(paths.installRoot, "config", "rigyn", "credentials.key");
   const credentialKeyBefore = process.platform === "win32" ? undefined : await readFile(credentialKeyPath, "utf8");
+  const customizedConfig = `${packagedConfigTemplate}\n// retained user edit\n`;
   await Promise.all([
     writeFile(keepRoot, "keep root\n"),
     writeFile(keepBin, "keep bin\n"),
+    writeFile(globalConfigPath, customizedConfig, { mode: 0o600 }),
   ]);
   const interruptedApp = join(paths.installRoot, ".app-previous");
   await rename(join(paths.installRoot, "app"), interruptedApp);
@@ -733,6 +746,7 @@ export default function activate(api: any) {
   await assert.rejects(access(interruptedApp), (error) => errno(error) === "ENOENT");
   assert.equal(await readFile(keepRoot, "utf8"), "keep root\n");
   assert.equal(await readFile(keepBin, "utf8"), "keep bin\n");
+  assert.equal(await readFile(globalConfigPath, "utf8"), customizedConfig);
   assert.equal(await readFile(globalSentinel, "utf8"), "must remain untouched\n");
   if (credentialKeyBefore !== undefined) assert.equal(await readFile(credentialKeyPath, "utf8"), credentialKeyBefore);
   assert.equal((await lstat(packageRoot)).isSymbolicLink(), false);
@@ -763,6 +777,7 @@ export default function activate(api: any) {
   });
   assert.match(selfUpdate.stdout, /Updated Rigyn from .* to /u);
   assert.equal(selfUpdate.stderr, "");
+  assert.equal(await readFile(globalConfigPath, "utf8"), customizedConfig);
   for (const residue of [".app-previous", ".app-install", ".build-install", ".install-transaction.json"]) {
     await assert.rejects(access(join(paths.installRoot, residue)), (error) => errno(error) === "ENOENT");
   }

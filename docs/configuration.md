@@ -4,6 +4,8 @@ Project package declarations are deliberately separate from configuration. Put t
 
 Rigyn reads comment-friendly JSONC configuration. Unknown keys are rejected so misspellings do not silently change behavior.
 
+A first-time self-contained installation creates a complete commented `config.jsonc` reference. Every stable public key is represented, with defaults, allowed values, or valid override examples where the value is provider- or environment-dependent. Commented entries do not freeze defaults or change behavior, and existing configuration is never overwritten. Run `rigyn config show --effective` to print the merged, validated public configuration with stable config-level defaults for the selected workspace. Provider-internal model behavior, live session selection, and environment-derived proxy credentials are outside that command's scope. Credentials and OAuth tokens are stored separately and never appear in either output.
+
 ## Locations and precedence
 
 On Linux and other XDG systems, the default paths are:
@@ -64,6 +66,7 @@ Object keys merge recursively. Later scalar and array values replace earlier val
 | `compactionRetainRecentTurns` | integer | `2` | Minimum recent complete turns kept verbatim. |
 | `compactionToolResultBytes` | integer | `4096` | Maximum retained bytes for each old tool result. |
 | `maxSteps` | integer | `64` | Maximum model turns in one run. Configure a larger positive integer for deliberately longer tasks. |
+| `childRuns` | object | bounded defaults below | Defaults and operator maxima for in-process `runChild` delegation. |
 | `skillRoots` | string[] | `[]` | Additional skill files or directories. |
 | `extensionRoots` | string[] | `[]` | Additional extension roots. |
 | `packageResources` | object | `{}` | Per-package resource filters written by `rigyn config`. |
@@ -75,6 +78,26 @@ Object keys merge recursively. Later scalar and array values replace earlier val
 Package-manager command values are argv arrays, not shell command strings. For example, `"npmCommand": ["mise", "exec", "node@24", "--", "npm"]` selects a version-manager wrapper without enabling shell interpolation. On Windows, configure a native executable or an interpreter plus script path; `.cmd` and `.bat` wrappers are rejected because they require shell parsing. Package installation still adds bounded arguments and disables lifecycle scripts by default; `--allow-scripts` is an explicit, per-transaction exception for reviewed production dependencies.
 
 Model-initiated `bash` commands default to a 600-second timeout when the tool call omits `timeout`. A tool call can request a different positive timeout explicitly.
+
+## Child runs
+
+`childRuns` controls in-process child sessions created by trusted extensions. Existing extensions remain compatible: their per-call `maxSteps`, `timeoutMs`, and `outputLimitBytes` requests still work when they are no larger than the active operator maxima. Omitted values use the configured defaults.
+
+```jsonc
+{
+  "childRuns": {
+    "maxConcurrent": 4,
+    "defaultMaxSteps": 32,
+    "maxSteps": 64,
+    "defaultTimeoutMs": 600000,
+    "maxTimeoutMs": 600000,
+    "defaultOutputLimitBytes": 65536,
+    "maxOutputLimitBytes": 1048576
+  }
+}
+```
+
+Defaults must not exceed their corresponding maxima. Rigyn also enforces compiled safety ceilings of 16 concurrent children, 256 model steps, a 3,600,000 millisecond timeout, and 8,388,608 returned bytes. These absolute guardrails are not configuration defaults and cannot be raised. An active child does not accept steering or follow-up turns, so the step limit bounds the entire child operation rather than each queued turn. Nested child delegation remains disabled across persistence and restart: a parent may run bounded sibling children, but a child cannot recursively create another child. Changes apply to subsequent child runs after `/reload`; reload remains unavailable while any parent or child run is active.
 
 ## External tool execution boundary
 
@@ -149,7 +172,7 @@ Pricing values are USD per million tokens. Tiers replace only the listed rates w
       "noProxy": "localhost,127.0.0.1,.internal.example"
     },
     "connectTimeoutMs": 10000,
-    "headersTimeoutMs": 30000,
+    "headersTimeoutMs": 300000,
     "bodyTimeoutMs": 300000
   }
 }

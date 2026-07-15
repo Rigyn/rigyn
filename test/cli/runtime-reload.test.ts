@@ -118,6 +118,42 @@ async function writeTransactionalExtension(configHome: string, version?: string)
   );
 }
 
+async function writeChildPolicyExtension(configHome: string): Promise<void> {
+  const directory = join(configHome, "rigyn", "extensions", "child-policy-reload");
+  await mkdir(join(directory, "runtime"), { recursive: true });
+  await writeFile(join(directory, "extension.json"), JSON.stringify({
+    schemaVersion: 1,
+    id: "child-policy-reload",
+    name: "Child policy reload",
+    contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+  }));
+  await writeFile(join(directory, "runtime", "index.mjs"), `
+    export default function activate(api) {
+      globalThis.__runtimeReloadChildApi = api;
+      api.registerProvider({
+        id: "reload-child-provider",
+        async *stream(request, signal) {
+          signal.throwIfAborted();
+          yield { type: "response_start", model: request.model };
+          yield { type: "text_delta", part: 0, text: "reloaded child policy" };
+          yield { type: "response_end", reason: "stop", state: { kind: "chat_completions", assistantMessage: { role: "assistant", content: "reloaded child policy" } } };
+        },
+        async listModels(signal) {
+          signal.throwIfAborted();
+          const capability = { value: "supported", source: "configuration", observedAt: "2026-07-15T00:00:00.000Z" };
+          return [{ id: "reload-child-model", provider: "reload-child-provider", capabilities: { tools: capability, reasoning: capability, images: capability } }];
+        },
+      });
+    }
+  `);
+}
+
+async function writeChildPolicyConfig(configHome: string, defaultMaxSteps: number, maxSteps: number): Promise<void> {
+  await writeFile(join(configHome, "rigyn", "config.jsonc"), JSON.stringify({
+    childRuns: { defaultMaxSteps, maxSteps },
+  }));
+}
+
 async function writeHelperExtension(
   configHome: string,
   extension: "mjs" | "js" | "mts" | "ts",
@@ -267,6 +303,43 @@ test("runtime reload swaps resources in place and preserves stable session owner
       "start:v2:reload",
       "dispose:v2",
     ]);
+  });
+});
+
+test("runtime reload applies child-run policy changes and retains the prior policy after invalid config", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    await writeChildPolicyExtension(configHome);
+    await writeChildPolicyConfig(configHome, 2, 2);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    try {
+      const parent = await runtime.service.createSession();
+      let api = (globalThis as Record<string, any>).__runtimeReloadChildApi;
+      const request = {
+        threadId: parent.threadId,
+        prompt: "exercise reloaded policy",
+        context: "fresh",
+        tools: [],
+        provider: "reload-child-provider",
+        model: "reload-child-model",
+        maxSteps: 3,
+      };
+      await assert.rejects(api.runChild(request), /configured maximum of 2/u);
+
+      await writeChildPolicyConfig(configHome, 3, 4);
+      await runtime.reload();
+      api = (globalThis as Record<string, any>).__runtimeReloadChildApi;
+      const accepted = await api.runChild(request);
+      assert.equal(accepted.status, "success");
+      assert.equal(accepted.finalText, "reloaded child policy");
+
+      await writeChildPolicyConfig(configHome, 5, 4);
+      await assert.rejects(runtime.reload(), /defaultMaxSteps must not exceed childRuns\.maxSteps/u);
+      const retained = await api.runChild(request);
+      assert.equal(retained.status, "success");
+    } finally {
+      delete (globalThis as Record<string, unknown>).__runtimeReloadChildApi;
+      await runtime.close();
+    }
   });
 });
 

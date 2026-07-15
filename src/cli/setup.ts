@@ -11,6 +11,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import { applyEdits, modify } from "jsonc-parser";
 
 import { parseJsoncObject, type JsonObject } from "../config/index.js";
@@ -22,6 +23,7 @@ const DEFAULT_RETRY_DELAY_MS = 25;
 const SQLITE_BUSY = 5;
 const SQLITE_LOCKED = 6;
 const TEMPORARY_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/iu;
+const GLOBAL_CONFIG_TEMPLATE = fileURLToPath(new URL("../../resources/config.jsonc", import.meta.url));
 
 interface ConfigLease {
   release(): Promise<void>;
@@ -284,7 +286,7 @@ async function configSource(path: string): Promise<string> {
   try {
     return await readFile(path, "utf8");
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return "{}\n";
+    if (errorCode(error) === "ENOENT") return await readFile(GLOBAL_CONFIG_TEMPLATE, "utf8");
     throw error;
   }
 }

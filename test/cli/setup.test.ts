@@ -128,6 +128,60 @@ async function assertNoWriteArtifacts(configPath: string): Promise<void> {
   );
 }
 
+test("the first config write preserves active values in a complete commented template", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-config-template-"));
+  const paths = pathsFor(root);
+  await persistDefaultSelection(paths, { provider: "anthropic", model: "claude-sonnet" });
+  const source = await readFile(paths.globalConfig, "utf8");
+  const config = await readConfig(paths.globalConfig);
+  assert.equal(config.defaultProvider, "anthropic");
+  assert.equal(config.defaultModel, "claude-sonnet");
+  assert.match(source, /Rigyn global configuration/u);
+  for (const key of [
+    "defaultProvider",
+    "defaultModel",
+    "theme",
+    "thinking",
+    "steeringMode",
+    "followUpMode",
+    "outboundImages",
+    "scopedModels",
+    "packageResources",
+    "databasePath",
+    "shellPath",
+    "npmCommand",
+    "gitCommand",
+    "executionBackend",
+    "httpTransport",
+    "providerRetry",
+    "contextTokenBudget",
+    "summaryTokenBudget",
+    "autoCompaction",
+    "compactionRetainRecentTurns",
+    "compactionToolResultBytes",
+    "maxSteps",
+    "childRuns",
+    "providers",
+    "models",
+    "oauthRegistrations",
+    "skillRoots",
+    "extensionRoots",
+    "doubleEscapeAction",
+    "defaultProjectTrust",
+  ]) assert.match(source, new RegExp(`// "${key}"`, "u"));
+  for (const expected of [
+    '"headersTimeoutMs": 300000',
+    '"webSocketConnectTimeoutMs": 15000',
+    '"baseUrl": "https://api.anthropic.com/v1"',
+    '"baseUrl": "https://generativelanguage.googleapis.com/v1"',
+    '"baseUrl": "https://api.mistral.ai/v1"',
+    '"metadataSource": "maintained"',
+  ]) assert.ok(source.includes(expected), `configuration template is missing ${expected}`);
+  assert.match(source, /"defaultProvider": "anthropic"/u);
+  assert.match(source, /"defaultModel": "claude-sonnet"/u);
+  await assertNoWriteArtifacts(paths.globalConfig);
+});
+
 test("interactive model selection updates defaults without dropping existing config", async () => {
   const root = await mkdtemp(join(tmpdir(), "harness-default-selection-"));
   const paths = pathsFor(root);
@@ -139,7 +193,9 @@ test("interactive model selection updates defaults without dropping existing con
   assert.equal(config.isolation, "direct");
   assert.equal(config.defaultProvider, "anthropic");
   assert.equal(config.defaultModel, "claude-sonnet");
-  assert.match(await readFile(paths.globalConfig, "utf8"), /\/\/ retained setting/u);
+  const source = await readFile(paths.globalConfig, "utf8");
+  assert.match(source, /\/\/ retained setting/u);
+  assert.doesNotMatch(source, /Rigyn global configuration/u);
   if (process.platform !== "win32") {
     assert.equal((await stat(paths.globalConfig)).mode & 0o777, 0o600);
     assert.equal((await stat(`${paths.globalConfig}.lock.sqlite3`)).mode & 0o777, 0o600);

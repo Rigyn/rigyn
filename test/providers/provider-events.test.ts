@@ -293,7 +293,7 @@ test("Anthropic subscription credentials use bearer OAuth compatibility headers"
   assert.match(headers?.get("anthropic-beta") ?? "", /claude-code-20250219/u);
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "rigyn/0.1.4");
+  assert.equal(headers?.get("user-agent"), "rigyn/0.1.5");
   assert.equal(posted?.system, undefined);
   assert.deepEqual((posted?.tools as Array<{ name: string }>).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");

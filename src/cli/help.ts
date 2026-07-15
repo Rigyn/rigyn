@@ -185,8 +185,12 @@ Dependency lifecycle scripts remain disabled unless --allow-scripts is provided.
 
 Usage:
   rigyn config [-l]
+  rigyn config show [--effective] [--json] [--workspace DIR]
+  rigyn config trust|untrust|trusted [--workspace DIR]
 
 Opens package resource configuration for user or project scope.
+show prints the resolved configuration. show --effective also expands stable
+config-level defaults and redacts credential-shaped values and URL credentials.
 `,
   diagnostics: `${header}
 

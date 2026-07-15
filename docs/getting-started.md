@@ -25,10 +25,10 @@ node --version
 npm --version
 ```
 
-Install a private per-user copy from the v0.1.4 GitHub release:
+Install a private per-user copy from the v0.1.5 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.4/rigyn-0.1.4.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.5/rigyn-0.1.5.tgz -- rigyn self-install
 rigyn --version
 ```
 
@@ -175,7 +175,7 @@ Direct development runs use the normal XDG locations instead:
 ~/.local/state/rigyn/         sessions and model catalogs
 ```
 
-`XDG_CONFIG_HOME` and `XDG_STATE_HOME` replace those roots when set. Run `rigyn config` to open package-resource configuration and `/settings` for common interactive settings. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Configuration](configuration.md).
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` replace those roots when set. A first self-contained installation creates a complete commented `config.jsonc` reference without credentials and never overwrites an existing file. Run `rigyn config` to open package-resource configuration, `rigyn config show --effective` to inspect merged public values and stable config-level defaults, and `/settings` for common interactive settings. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Configuration](configuration.md).
 
 ## 8. Update, diagnose, or remove
 

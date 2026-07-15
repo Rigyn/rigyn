@@ -4,6 +4,17 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.5] - 2026-07-15
+
+### Added
+
+- Child-run defaults and operator maxima are configurable through `childRuns`; extension per-call limits remain compatible and `/reload` applies the next validated policy without restarting the harness.
+- First-time self-contained installations create a complete commented public-configuration reference, and `rigyn config show --effective` reports merged values and stable config-level defaults without exposing credentials.
+
+### Security
+
+- Child delegation retains compiled ceilings of 16 concurrent runs, 256 model steps, a one-hour timeout, and 8 MiB of returned text. Recursive child delegation remains permanently disabled.
+
 ## [0.1.4] - 2026-07-15
 
 ### Fixed

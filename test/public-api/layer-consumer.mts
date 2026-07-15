@@ -11,7 +11,10 @@ import {
   type ContextBudget,
 } from "rigyn/context";
 import {
+  ABSOLUTE_CHILD_RUN_LIMITS,
+  DEFAULT_CHILD_RUN_POLICY,
   HarnessError,
+  type ChildRunPolicy,
   type ProviderAdapter,
 } from "rigyn/core";
 import {
@@ -100,6 +103,8 @@ export const layerValues = [
   SecretRedactor,
   parseJsoncObject,
   deriveContextBudget,
+  ABSOLUTE_CHILD_RUN_LIMITS,
+  DEFAULT_CHILD_RUN_POLICY,
   HarnessError,
   ExtensionCatalog,
   sniffImageMediaType,
@@ -130,7 +135,7 @@ export interface LayerConsumerContracts {
   auth: AuthCredential;
   config: HarnessConfig;
   context: ContextBudget;
-  core: ProviderAdapter;
+  core: ProviderAdapter & { childRuns?: ChildRunPolicy };
   extensions: ExtensionBundle;
   images: ClipboardImage;
   interfaces: RpcRequest & { methods?: RpcMethodMap; notifications?: RpcNotificationMap };

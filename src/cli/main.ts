@@ -24,6 +24,7 @@ import {
   resolveConfig,
   TrustStore,
   type DefaultProjectTrust,
+  type HarnessConfig,
   type JsonObject,
 } from "../config/index.js";
 import type { ImageBlock, ModelInfo, OutboundImagePolicy, ProviderAdapter, ProviderId } from "../core/types.js";
@@ -71,7 +72,7 @@ import { copyToNativeClipboard, imageCoordinateHint, preprocessImage, readClipbo
 import { discoverInstructions, loadSkill, resolveEffectiveContextBudget, type SkillMetadata } from "../context/index.js";
 import { flagBoolean, flagString, flagStrings, parseArguments, type ParsedArguments } from "./args.js";
 import { resolveRequestedModel } from "./model-resolution.js";
-import { loadRuntime, type LoadedRuntime } from "./runtime.js";
+import { BUILTIN_PROVIDER_CONFIGS, loadRuntime, type LoadedRuntime } from "./runtime.js";
 import { expandPath, harnessPaths, type HarnessPaths } from "./paths.js";
 import { runRpcServer } from "./rpc.js";
 import { persistDefaultSelection, persistUiPreferences, persistUiTheme, updateGlobalConfig } from "./setup.js";
@@ -5107,6 +5108,59 @@ async function exportFlagCommand(argumentsValue: ParsedArguments): Promise<void>
   }
 }
 
+async function effectiveConfig(
+  config: HarnessConfig,
+  paths: HarnessPaths,
+  workspace: string,
+): Promise<Record<string, unknown>> {
+  const shellPath = (await commandShellArgv(
+    "",
+    config.shellPath === undefined ? {} : { configuredPath: config.shellPath },
+  ))[0];
+  return {
+    ...config,
+    defaultProvider: config.defaultProvider ?? "openai",
+    defaultModel: config.defaultModel ?? null,
+    theme: config.theme ?? "dark",
+    thinking: config.thinking ?? "off",
+    databasePath: expandPath(config.databasePath ?? paths.database, workspace),
+    shellPath,
+    npmCommand: config.npmCommand ?? ["npm"],
+    gitCommand: config.gitCommand ?? ["git"],
+    executionBackend: config.executionBackend === undefined
+      ? null
+      : {
+          ...config.executionBackend,
+          timeoutMs: config.executionBackend.timeoutMs ?? 600_000,
+          outputLimitBytes: config.executionBackend.outputLimitBytes ?? 2 * 1_024 * 1_024,
+        },
+    httpTransport: {
+      ...config.httpTransport,
+      connectTimeoutMs: config.httpTransport.connectTimeoutMs ?? 10_000,
+      headersTimeoutMs: config.httpTransport.headersTimeoutMs ?? 300_000,
+      bodyTimeoutMs: config.httpTransport.bodyTimeoutMs ?? 300_000,
+    },
+    contextTokenBudget: config.contextTokenBudget ?? null,
+    summaryTokenBudget: config.summaryTokenBudget ?? null,
+    maxSteps: config.maxSteps ?? 64,
+    providers: { ...BUILTIN_PROVIDER_CONFIGS, ...config.providers },
+  };
+}
+
+function redactConfigOutput(value: unknown): unknown {
+  const visit = (item: unknown): unknown => {
+    if (typeof item === "string") {
+      return item
+        .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/giu, "$1[REDACTED]@")
+        .replace(/([?&](?:access_?token|api_?key|client_?secret|code|password|secret|token)=)[^&\s]+/giu, "$1[REDACTED]");
+    }
+    if (Array.isArray(item)) return item.map(visit);
+    if (item === null || typeof item !== "object") return item;
+    return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, visit(entry)]));
+  };
+  return visit(defaultSecretRedactor.redactValue(value));
+}
+
 async function configCommand(argumentsValue: ParsedArguments): Promise<void> {
   const action = argumentsValue.positionals[0];
   if (action === undefined) {
@@ -5130,11 +5184,15 @@ async function configCommand(argumentsValue: ParsedArguments): Promise<void> {
       projectPath: join(workspace, ".rigyn", "config.jsonc"),
       projectTrusted: trusted,
     });
-    printValue({
-      ...parseHarnessConfig(resolved.value),
+    const parsed = parseHarnessConfig(resolved.value);
+    const config = flagBoolean(argumentsValue, "effective")
+      ? await effectiveConfig(parsed, paths, workspace)
+      : parsed;
+    printValue(redactConfigOutput({
+      ...config,
       sources: resolved.appliedSources,
       projectIgnored: resolved.projectIgnored,
-    }, flagBoolean(argumentsValue, "json"));
+    }), flagBoolean(argumentsValue, "json"));
   } else throw new Error(`Unknown config action: ${action}`);
 }
 
@@ -5182,6 +5240,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       writeMachineOutput(renderCliHelp(topic));
       return;
     }
+    if (flagBoolean(argumentsValue, "effective") && (
+      argumentsValue.command !== "config" || argumentsValue.positionals[0] !== "show"
+    )) throw new Error("--effective requires `rigyn config show`");
     if (flagBoolean(argumentsValue, "redact") && !argumentsValue.flags.has("export")) {
       throw new Error("--redact requires --export FILE");
     }

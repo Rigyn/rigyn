@@ -273,6 +273,57 @@ async function ensureLocalCredentialKey() {
   }
 }
 
+async function ensureGlobalConfigTemplate() {
+  const directory = join(installRoot, "config", "rigyn");
+  const path = join(directory, "config.jsonc");
+  await ensurePrivateDirectory(directory);
+  const contents = await readFile(join(projectRoot, "resources", "config.jsonc"), "utf8");
+  let handle;
+  try {
+    handle = await open(path, "wx", 0o600);
+  } catch (error) {
+    if (errno(error) !== "EEXIST") throw error;
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Configuration must be a regular file: ${path}`);
+    }
+    return undefined;
+  }
+  const identity = await handle.stat();
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+    await handle.close();
+    return { path, contents };
+  } catch (error) {
+    try {
+      await handle.close();
+    } catch {
+      // Preserve the original write, sync, or close failure.
+    }
+    try {
+      const metadata = await lstat(path);
+      if (metadata.isFile() && !metadata.isSymbolicLink() && metadata.dev === identity.dev && metadata.ino === identity.ino) {
+        await rm(path, { force: true });
+      }
+    } catch (cleanupError) {
+      if (errno(cleanupError) !== "ENOENT") {
+        throw new AggregateError([error, cleanupError], "Configuration template creation failed and cleanup was incomplete");
+      }
+    }
+    throw error;
+  }
+}
+
+async function removeUncommittedConfigTemplate(change) {
+  if (change === undefined || !(await exists(change.path))) return;
+  const metadata = await lstat(change.path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) return;
+  if (await readFile(change.path, "utf8") === change.contents) {
+    await rm(change.path, { force: true });
+  }
+}
+
 async function ensureCommand(launcher, previousMarker) {
   if (process.platform === "win32") return { path: launcher };
   const commandDirectory = dirname(paths.command);
@@ -302,6 +353,7 @@ async function install() {
     let appSwap;
     let launcherChange;
     let commandChange;
+    let configTemplateChange;
     let transactionStarted = false;
     let committed = false;
     let rollbackComplete = false;
@@ -382,6 +434,7 @@ async function install() {
         throw new Error("Installed package resolves to the source checkout");
       }
 
+      configTemplateChange = await ensureGlobalConfigTemplate();
       appSwap = await beginAppSwap(join(installRoot, "app"));
       await ensureLocalCredentialKey();
       const launcherContents = process.platform === "win32" ? windowsLauncher() : posixLauncher(installRoot);
@@ -415,6 +468,7 @@ async function install() {
           async () => await restoreRegularFile(commandChange),
           async () => await restoreRegularFile(launcherChange),
           async () => { if (appSwap !== undefined) await rollbackAppSwap(appSwap); },
+          async () => await removeUncommittedConfigTemplate(configTemplateChange),
         ]) {
           try {
             await rollback();

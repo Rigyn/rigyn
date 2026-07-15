@@ -68,6 +68,10 @@ import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import { HarnessError } from "../core/errors.js";
+import {
+  normalizeChildRunPolicy,
+  type ChildRunPolicy,
+} from "../core/child-runs.js";
 import type { BranchRecord, RunInputQueueRecord } from "../storage/types.js";
 import {
   BRANCH_SUMMARY_LIMITS,
@@ -119,9 +123,7 @@ import {
 } from "./session-catalog.js";
 
 const CANCELLED_EXTENSION_OBSERVER_SETTLEMENT_TIMEOUT_MS = 1_000;
-const MAX_CONCURRENT_RUNTIME_CHILD_RUNS = 4;
-const DEFAULT_RUNTIME_CHILD_TIMEOUT_MS = 600_000;
-const DEFAULT_RUNTIME_CHILD_OUTPUT_BYTES = 64 * 1024;
+const RUNTIME_CHILD_INSTRUCTION_SOURCE = "runtime child run";
 const MAX_PROMPT_COMPOSITION_SOURCES = 128;
 const MAX_PROMPT_COMPOSITION_TOOLS = 128;
 const MAX_PROMPT_COMPOSITION_SKILLS = 256;
@@ -341,6 +343,7 @@ export interface HarnessOptions {
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
   retry?: RetryPolicy;
+  childRuns?: Partial<ChildRunPolicy>;
   /** Own session and generic-event dispatch unless a CLI or RPC host already does so. */
   managedExtensionLifecycle?: boolean;
   /** Callback-free discovery metadata supplied by the owning runtime. */
@@ -360,6 +363,7 @@ export interface HarnessRuntimeResources {
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
   retry?: RetryPolicy;
+  childRuns?: Partial<ChildRunPolicy>;
   resourceCatalog?: Pick<HarnessResourceCatalogSources, "extensions" | "packages" | "projectPackages" | "packageDiagnostics">;
 }
 
@@ -599,6 +603,7 @@ export class HarnessService {
   readonly #sessions = new Map<string, { branch?: string; cwd: string }>();
   readonly #pendingExtensionTurns = new Map<string, Map<number, RuntimeTurnEndEvent>>();
   readonly #childRunDepth = new Map<string, number>();
+  #childRunPolicy: ChildRunPolicy;
   #activeChildRuns = 0;
   #skills: SkillMetadata[] = [];
   #workspaceBoundary: WorkspaceBoundary | undefined;
@@ -611,6 +616,7 @@ export class HarnessService {
 
   constructor(options: HarnessOptions) {
     this.#options = options;
+    this.#childRunPolicy = normalizeChildRunPolicy(options.childRuns);
     this.#workspaceRoot = resolve(options.workspace);
     const conversation = new StoredConversation(options.store);
     this.#runner = new AgentRunner({
@@ -1287,6 +1293,12 @@ export class HarnessService {
     images?: ImageBlock[],
   ): void {
     this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
+    if (this.#childRunDepth.has(threadId)) {
+      throw new HarnessError(
+        "RUNTIME_CHILD_QUEUE",
+        "Active runtime child runs do not accept steering or follow-up messages",
+      );
+    }
     const branch = this.#manager.activeBranch(threadId);
     if (branch === undefined) throw new Error(`Thread has no active run: ${threadId}`);
     const record = this.#options.store.enqueueRunInput({
@@ -1422,7 +1434,10 @@ export class HarnessService {
   ): Promise<void> {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are already reloading");
-    if (this.#manager.activeCount() !== 0) throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
+    if (this.#manager.activeCount() !== 0 || this.#activeChildRuns !== 0) {
+      throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
+    }
+    const childRunPolicy = normalizeChildRunPolicy(resources.childRuns);
     const previous = {
       providers: this.#options.providers,
       projectTrusted: this.#options.projectTrusted,
@@ -1435,6 +1450,7 @@ export class HarnessService {
       compactionRetainRecentTurns: this.#options.compactionRetainRecentTurns,
       compactionToolResultBytes: this.#options.compactionToolResultBytes,
       retry: this.#options.retry,
+      childRunPolicy: this.#childRunPolicy,
       resourceCatalog: this.#options.resourceCatalog,
       skills: this.#skills,
     };
@@ -1445,7 +1461,9 @@ export class HarnessService {
     try {
       if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service closed while resources were reloading");
       options.signal?.throwIfAborted();
-      if (this.#manager.activeCount() !== 0) throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
+      if (this.#manager.activeCount() !== 0 || this.#activeChildRuns !== 0) {
+        throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
+      }
       if (this.#options.managedExtensionLifecycle !== false) {
         await Promise.allSettled(sessions.map(async ([threadId, session]) => await this.#observeRuntime("session_end", {
           reason: "reload",
@@ -1473,6 +1491,7 @@ export class HarnessService {
       else this.#options.compactionToolResultBytes = resources.compactionToolResultBytes;
       if (resources.retry === undefined) delete this.#options.retry;
       else this.#options.retry = { ...resources.retry };
+      this.#childRunPolicy = childRunPolicy;
       if (resources.resourceCatalog === undefined) delete this.#options.resourceCatalog;
       else this.#options.resourceCatalog = resources.resourceCatalog;
       this.#bindExtensionSessionHost(this.#options.runtimeExtensions);
@@ -1512,6 +1531,7 @@ export class HarnessService {
       else this.#options.compactionToolResultBytes = previous.compactionToolResultBytes;
       if (previous.retry === undefined) delete this.#options.retry;
       else this.#options.retry = { ...previous.retry };
+      this.#childRunPolicy = previous.childRunPolicy;
       if (previous.resourceCatalog === undefined) delete this.#options.resourceCatalog;
       else this.#options.resourceCatalog = previous.resourceCatalog;
       this.#bindExtensionSessionHost(this.#options.runtimeExtensions);
@@ -2285,9 +2305,23 @@ export class HarnessService {
       ? 0
       : this.#childRunDepth.get(input.requesterThreadId) ?? 0;
     const parentDepth = Math.max(targetDepth, requesterDepth);
-    if (parentDepth >= 1) throw new Error("Nested runtime child runs are disabled");
-    if (this.#activeChildRuns >= MAX_CONCURRENT_RUNTIME_CHILD_RUNS) {
-      throw new Error(`At most ${MAX_CONCURRENT_RUNTIME_CHILD_RUNS} runtime child runs may execute concurrently`);
+    const durableChild = this.#isRuntimeChildThread(input.threadId) || (
+      input.requesterThreadId !== undefined && this.#isRuntimeChildThread(input.requesterThreadId)
+    );
+    if (parentDepth >= 1 || durableChild) throw new Error("Nested runtime child runs are disabled");
+    const childRunPolicy = this.#childRunPolicy;
+    const requestedLimits = [
+      ["maxSteps", input.maxSteps, childRunPolicy.maxSteps],
+      ["timeoutMs", input.timeoutMs, childRunPolicy.maxTimeoutMs],
+      ["outputLimitBytes", input.outputLimitBytes, childRunPolicy.maxOutputLimitBytes],
+    ] as const;
+    for (const [field, selected, maximum] of requestedLimits) {
+      if (selected !== undefined && (!Number.isSafeInteger(selected) || selected < 1 || selected > maximum)) {
+        throw new Error(`Runtime child run ${field} must be from 1 through the configured maximum of ${maximum}`);
+      }
+    }
+    if (this.#activeChildRuns >= childRunPolicy.maxConcurrent) {
+      throw new Error(`At most ${childRunPolicy.maxConcurrent} runtime child runs may execute concurrently`);
     }
     const parentSelection = this.#runtimeModelSelection(input.threadId, parentBranch);
     const provider = input.provider ?? parentSelection?.provider;
@@ -2338,12 +2372,12 @@ export class HarnessService {
       model,
       ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     };
-    const cwd = input.cwd === undefined
-      ? this.#sessions.get(input.threadId)?.cwd ?? this.#workspaceRoot
-      : await (this.#workspaceBoundary ?? await WorkspaceBoundary.create(this.#workspaceRoot)).readable(input.cwd);
     const persisted = input.session === "persisted";
     this.#activeChildRuns += 1;
     try {
+      const cwd = input.cwd === undefined
+        ? this.#sessions.get(input.threadId)?.cwd ?? this.#workspaceRoot
+        : await (this.#workspaceBoundary ?? await WorkspaceBoundary.create(this.#workspaceRoot)).readable(input.cwd);
       const activeRun = this.#manager.active(input.threadId)
         ? this.#options.store.listRuns(input.threadId).findLast((run) =>
             run.branch === parentBranch && !["completed", "failed", "cancelled"].includes(run.state))
@@ -2377,9 +2411,9 @@ export class HarnessService {
       const artifactIdsBeforeRun = new Set(
         this.#options.store.listArtifacts(child.threadId).map((artifact) => artifact.artifactId),
       );
-      const timeout = AbortSignal.timeout(input.timeoutMs ?? DEFAULT_RUNTIME_CHILD_TIMEOUT_MS);
+      const timeout = AbortSignal.timeout(input.timeoutMs ?? childRunPolicy.defaultTimeoutMs);
       const signal = input.signal === undefined ? timeout : AbortSignal.any([input.signal, timeout]);
-      const outputLimitBytes = input.outputLimitBytes ?? DEFAULT_RUNTIME_CHILD_OUTPUT_BYTES;
+      const outputLimitBytes = input.outputLimitBytes ?? childRunPolicy.defaultOutputLimitBytes;
       let outcome: RuntimeChildRunResult;
       this.#childRunDepth.set(child.threadId, parentDepth + 1);
       try {
@@ -2392,12 +2426,12 @@ export class HarnessService {
           signal,
           cwd,
           allowedTools: [...input.tools],
-          maxSteps: input.maxSteps ?? 32,
+          maxSteps: input.maxSteps ?? childRunPolicy.defaultMaxSteps,
           toolBackend: childBackend ?? null,
           ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
           ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
           additionalInstructions: {
-            source: "runtime child run",
+            source: RUNTIME_CHILD_INSTRUCTION_SOURCE,
             text: "This is a bounded in-process child session. Complete only the delegated task. Do not start or delegate another child run.",
           },
           ...(input.onEvent === undefined ? {} : {
@@ -2509,6 +2543,15 @@ export class HarnessService {
     } finally {
       this.#activeChildRuns -= 1;
     }
+  }
+
+  #isRuntimeChildThread(threadId: string): boolean {
+    if (this.#childRunDepth.has(threadId)) return true;
+    const thread = this.#options.store.bindThreadWorkspace(threadId, this.#workspaceRoot);
+    if (thread.parentThreadId === undefined) return false;
+    return thread.branches.some((branch) => this.#options.store.listEvents(threadId, branch.name).some((entry) =>
+      entry.event.type === "run_started" && entry.event.promptComposition?.sources.some((source) =>
+        source.kind === "additional_instructions" && source.source === RUNTIME_CHILD_INSTRUCTION_SOURCE) === true));
   }
 
   async #publishExtensionSessionEvent(publication: ExtensionSessionPublication): Promise<void> {

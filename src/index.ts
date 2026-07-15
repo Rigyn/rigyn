@@ -89,6 +89,7 @@ export {
 export { extensionGalleryInstallSource, parseExtensionGalleryIndex } from "./extensions/gallery.js";
 
 export type { AgentRunResult, QueuedRunMessage, QueueMode } from "./core/agent.js";
+export type { ChildRunPolicy } from "./core/child-runs.js";
 export type {
   CreateHarnessRuntimeOptions,
   HarnessRunHandle,

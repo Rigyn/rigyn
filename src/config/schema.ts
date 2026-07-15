@@ -2,6 +2,10 @@ import type { RuntimeProviderConfig } from "../service/provider-factory.js";
 import type { JsonObject } from "./jsonc.js";
 import type { OAuthRegistrationConfig } from "../auth/index.js";
 import type { QueueMode } from "../core/agent.js";
+import {
+  normalizeChildRunPolicy,
+  type ChildRunPolicy,
+} from "../core/child-runs.js";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "../core/retry.js";
 import type { OutboundImagePolicy } from "../core/types.js";
 import type { NetworkProxyOptions } from "../net/index.js";
@@ -50,6 +54,7 @@ export interface HarnessConfig {
   compactionRetainRecentTurns: number;
   compactionToolResultBytes: number;
   maxSteps?: number;
+  childRuns: ChildRunPolicy;
   providers: Record<string, RuntimeProviderConfig>;
   models: ConfiguredModel[];
   oauthRegistrations: Record<string, OAuthRegistrationConfig>;
@@ -86,6 +91,24 @@ function optionalInteger(value: unknown, label: string, minimum = 1): number | u
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < minimum) throw new Error(`${label} must be an integer >= ${minimum}`);
   return value as number;
+}
+
+function parseChildRuns(value: unknown): ChildRunPolicy {
+  if (value === undefined) return normalizeChildRunPolicy(undefined);
+  const input = object(value, "childRuns");
+  const fields = [
+    "maxConcurrent",
+    "defaultMaxSteps",
+    "maxSteps",
+    "defaultTimeoutMs",
+    "maxTimeoutMs",
+    "defaultOutputLimitBytes",
+    "maxOutputLimitBytes",
+  ] as const satisfies readonly (keyof ChildRunPolicy)[];
+  assertAllowed(input, [...fields], "childRuns");
+  return normalizeChildRunPolicy(Object.fromEntries(
+    fields.flatMap((field) => input[field] === undefined ? [] : [[field, input[field]]]),
+  ));
 }
 
 function stringArray(value: unknown, label: string): string[] {
@@ -602,7 +625,7 @@ function parseOAuthRegistrations(value: unknown): Record<string, OAuthRegistrati
 export function parseHarnessConfig(value: JsonObject): HarnessConfig {
   assertAllowed(value, [
     "defaultProvider", "defaultModel", "theme", "thinking", "steeringMode", "followUpMode", "outboundImages", "scopedModels", "packageResources", "databasePath", "shellPath", "npmCommand", "gitCommand", "executionBackend", "httpTransport", "providerRetry",
-    "contextTokenBudget", "summaryTokenBudget", "autoCompaction", "compactionRetainRecentTurns", "compactionToolResultBytes", "maxSteps", "providers", "models", "oauthRegistrations", "skillRoots", "extensionRoots", "doubleEscapeAction", "defaultProjectTrust",
+    "contextTokenBudget", "summaryTokenBudget", "autoCompaction", "compactionRetainRecentTurns", "compactionToolResultBytes", "maxSteps", "childRuns", "providers", "models", "oauthRegistrations", "skillRoots", "extensionRoots", "doubleEscapeAction", "defaultProjectTrust",
   ], "configuration");
   const providersInput = value.providers === undefined ? {} : object(value.providers, "providers");
   const providers = Object.fromEntries(Object.entries(providersInput).map(([name, entry]) => [name, parseProvider(entry, name)]));
@@ -679,6 +702,7 @@ export function parseHarnessConfig(value: JsonObject): HarnessConfig {
     compactionRetainRecentTurns,
     compactionToolResultBytes,
     ...(value.maxSteps === undefined ? {} : { maxSteps: optionalInteger(value.maxSteps, "maxSteps")! }),
+    childRuns: parseChildRuns(value.childRuns),
     providers,
     models: parseConfiguredModels(value.models),
     oauthRegistrations: parseOAuthRegistrations(value.oauthRegistrations),

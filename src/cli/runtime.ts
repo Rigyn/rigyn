@@ -552,6 +552,7 @@ function serviceResources(generation: RuntimeResourceGeneration): HarnessRuntime
     compactionRetainRecentTurns: generation.config.compactionRetainRecentTurns,
     compactionToolResultBytes: generation.config.compactionToolResultBytes,
     retry: generation.config.providerRetry,
+    childRuns: generation.config.childRuns,
     resourceCatalog: {
       extensions: generation.extensions,
       packages: generation.installedPackages,

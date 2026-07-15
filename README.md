@@ -14,10 +14,10 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.1.4 GitHub release:
+From the v0.1.5 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.4/rigyn-0.1.4.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.5/rigyn-0.1.5.tgz -- rigyn self-install
 rigyn
 ```
 
@@ -210,8 +210,11 @@ For an agent-built package, enter `/build-extension <request>`. The bundled prom
 Global configuration is JSONC:
 
 ```text
-$XDG_CONFIG_HOME/rigyn/config.jsonc
+~/.rigyn/config/rigyn/config.jsonc        self-contained installation
+$XDG_CONFIG_HOME/rigyn/config.jsonc       direct development run
 ```
+
+A first installation creates a complete commented configuration reference without writing credentials. Every public key is represented with a default, allowed values, or a valid conditional override example. Uncomment or change only the values you want to override; the remaining entries continue to follow Rigyn's defaults. Existing configuration is never overwritten. `rigyn config show --effective` prints the merged, validated public configuration with stable config-level defaults for the current workspace; provider-internal and environment-derived state stays outside that output.
 
 Project configuration is read only after trust is granted. Interactive startup can remember trust or distrust for an exact workspace, or apply either choice only to that launch. The global-only `defaultProjectTrust` setting accepts `ask`, `always`, or `never`; `/settings` changes its next-launch value. `--approve` and `--no-approve` remain invocation-only overrides:
 
@@ -232,6 +235,15 @@ Example:
   ],
   "autoCompaction": true,
   "compactionRetainRecentTurns": 2,
+  "childRuns": {
+    "maxConcurrent": 4,
+    "defaultMaxSteps": 32,
+    "maxSteps": 64,
+    "defaultTimeoutMs": 600000,
+    "maxTimeoutMs": 600000,
+    "defaultOutputLimitBytes": 65536,
+    "maxOutputLimitBytes": 1048576
+  },
   "providers": {
     "openai": {
       "kind": "openai",

@@ -24,6 +24,7 @@ import {
   type ExtensionStateEvent,
 } from "../core/extension-entries.js";
 import { createId } from "../core/ids.js";
+import { ABSOLUTE_CHILD_RUN_LIMITS } from "../core/child-runs.js";
 import { isJsonValue, type JsonValue } from "../core/json.js";
 import type {
   AdapterError,
@@ -128,7 +129,7 @@ const MAX_RUNTIME_DISCOVERED_RESOURCE_PATHS = 256;
 const MAX_RUNTIME_RESOURCE_PATH_BYTES = 4_096;
 const MAX_RUNTIME_CHILD_TOOLS = 64;
 const MAX_RUNTIME_CHILD_PROMPT_BYTES = 256 * 1024;
-const MAX_RUNTIME_CHILD_OUTPUT_BYTES = 1024 * 1024;
+const MAX_RUNTIME_CHILD_OUTPUT_BYTES = ABSOLUTE_CHILD_RUN_LIMITS.maxOutputLimitBytes;
 const MAX_RUNTIME_AUTOCOMPLETE_PROVIDERS = 128;
 const MAX_RUNTIME_EDITOR_MIDDLEWARE = 128;
 const MAX_RUNTIME_USER_SHELL_COMMAND_BYTES = 128 * 1024;
@@ -3960,9 +3961,9 @@ export class RuntimeExtensionHost {
     if (typeof record.reasoningEffort === "string") bounded(record.reasoningEffort, "Runtime child run reasoningEffort", 128);
     if (typeof record.cwd === "string") bounded(record.cwd, "Runtime child run cwd", 16 * 1024);
     const numericBounds = {
-      maxSteps: 64,
+      maxSteps: ABSOLUTE_CHILD_RUN_LIMITS.maxSteps,
       maxOutputTokens: 1_000_000,
-      timeoutMs: 600_000,
+      timeoutMs: ABSOLUTE_CHILD_RUN_LIMITS.maxTimeoutMs,
       outputLimitBytes: MAX_RUNTIME_CHILD_OUTPUT_BYTES,
     } as const;
     for (const [field, maximum] of Object.entries(numericBounds)) {

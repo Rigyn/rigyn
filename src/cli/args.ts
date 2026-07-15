@@ -3,6 +3,7 @@ const BOOLEAN_FLAGS = new Set([
   "continue", "resume", "all-tools", "no-tools", "no-builtin-tools", "no-session", "local",
   "no-extensions", "no-context-files",
   "approve", "no-approve", "allow-scripts", "offline", "verbose", "no-skills", "no-prompt-templates", "no-themes",
+  "effective",
 ]);
 
 const OPTIONAL_STRING_FLAGS = new Set(["list-models"]);

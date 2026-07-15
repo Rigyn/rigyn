@@ -257,6 +257,45 @@ test("agent step limit overrides remain strictly positive when configured", () =
   assert.throws(() => parseHarnessConfig({ maxSteps: 0 }), /integer >= 1/u);
 });
 
+test("child-run policy has compatible defaults and configurable bounded maxima", () => {
+  assert.deepEqual(parseHarnessConfig({}).childRuns, {
+    maxConcurrent: 4,
+    defaultMaxSteps: 32,
+    maxSteps: 64,
+    defaultTimeoutMs: 600_000,
+    maxTimeoutMs: 600_000,
+    defaultOutputLimitBytes: 64 * 1_024,
+    maxOutputLimitBytes: 1_024 * 1_024,
+  });
+  assert.deepEqual(parseHarnessConfig({
+    childRuns: {
+      maxConcurrent: 8,
+      defaultMaxSteps: 48,
+      maxSteps: 128,
+      defaultTimeoutMs: 900_000,
+      maxTimeoutMs: 1_800_000,
+      defaultOutputLimitBytes: 128 * 1_024,
+      maxOutputLimitBytes: 2 * 1_024 * 1_024,
+    },
+  }).childRuns, {
+    maxConcurrent: 8,
+    defaultMaxSteps: 48,
+    maxSteps: 128,
+    defaultTimeoutMs: 900_000,
+    maxTimeoutMs: 1_800_000,
+    defaultOutputLimitBytes: 128 * 1_024,
+    maxOutputLimitBytes: 2 * 1_024 * 1_024,
+  });
+  assert.throws(() => parseHarnessConfig({ childRuns: { maxConcurrent: 17 } }), /maxConcurrent.*1 through 16/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { maxSteps: 257 } }), /maxSteps.*1 through 256/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { maxTimeoutMs: 3_600_001 } }), /maxTimeoutMs.*1 through 3600000/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { maxOutputLimitBytes: 8 * 1_024 * 1_024 + 1 } }), /maxOutputLimitBytes.*1 through 8388608/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { defaultMaxSteps: 65 } }), /defaultMaxSteps.*must not exceed.*maxSteps/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { defaultTimeoutMs: 600_001 } }), /defaultTimeoutMs.*must not exceed.*maxTimeoutMs/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { defaultOutputLimitBytes: 1_024 * 1_024 + 1 } }), /defaultOutputLimitBytes.*must not exceed.*maxOutputLimitBytes/u);
+  assert.throws(() => parseHarnessConfig({ childRuns: { recursive: true } }), /childRuns contains unknown keys: recursive/u);
+});
+
 test("queue drain modes default to one-at-a-time and accept all", () => {
   const defaults = parseHarnessConfig({});
   assert.equal(defaults.steeringMode, "one-at-a-time");

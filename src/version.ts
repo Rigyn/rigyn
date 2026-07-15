@@ -1,1 +1,1 @@
-export const RIGYN_VERSION = "0.1.4";
+export const RIGYN_VERSION = "0.1.5";

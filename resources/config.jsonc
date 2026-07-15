@@ -1,0 +1,269 @@
+{
+  // Rigyn global configuration.
+  // Uncomment only the settings you want to override. Rigyn validates every
+  // uncommented key and keeps credentials in its encrypted credential store.
+
+  // Provider and model selection
+  // "defaultProvider": "openai", // Default: "openai".
+  // "defaultModel": "gpt-5", // Default: no fixed model; select one with /model.
+  // "thinking": "off", // off | minimal | low | medium | high | xhigh | max
+  // "scopedModels": ["openai/*", "anthropic/*:high"], // Default: [].
+
+  // Agent and input behavior
+  // "maxSteps": 64, // Maximum model invocations in one main-agent run.
+  // "steeringMode": "one-at-a-time", // one-at-a-time | all
+  // "followUpMode": "one-at-a-time", // one-at-a-time | all
+  // "outboundImages": "allow", // allow | block
+
+  // Context and compaction
+  // "contextTokenBudget": 200000, // Default: selected model metadata.
+  // "summaryTokenBudget": 32000, // Default: derived from the context budget.
+  // "autoCompaction": true,
+  // "compactionRetainRecentTurns": 2,
+  // "compactionToolResultBytes": 4096,
+
+  // Child agents. Children cannot start other child agents.
+  // Requests from extensions may choose lower per-run values but cannot exceed
+  // these configured maxima or Rigyn's compiled safety ceilings.
+  // "childRuns": {
+  //   "maxConcurrent": 4, // Configurable maximum: 16.
+  //   "defaultMaxSteps": 32,
+  //   "maxSteps": 64, // Configurable maximum: 256.
+  //   "defaultTimeoutMs": 600000,
+  //   "maxTimeoutMs": 600000, // Configurable maximum: 3600000.
+  //   "defaultOutputLimitBytes": 65536,
+  //   "maxOutputLimitBytes": 1048576 // Configurable maximum: 8388608.
+  // },
+
+  // Terminal and project trust
+  // "theme": "dark", // dark | light | mono | an installed custom theme
+  // "doubleEscapeAction": "tree", // tree | fork | none
+  // "defaultProjectTrust": "ask", // ask | always | never; global config only
+
+  // Storage, shell, and package commands
+  // "databasePath": "/absolute/path/to/sessions.sqlite", // Default: Rigyn state directory.
+  // "shellPath": "/bin/bash", // Default: the platform command shell.
+  // "npmCommand": ["npm"], // Executable plus a fixed argv prefix; never a shell string.
+  // "gitCommand": ["git"],
+
+  // Additional resource roots. Project roots are used only for trusted projects.
+  // "skillRoots": ["~/my-rigyn-skills"],
+  // "extensionRoots": ["~/my-rigyn-extensions"],
+
+  // Resource filters managed by `rigyn config`. Each array contains disabled
+  // resource keys for that installed package.
+  // "packageResources": {
+  //   "example-package": ["skill:example", "prompt:example"]
+  // },
+
+  // Bounded provider retry policy
+  // "providerRetry": {
+  //   "maxAttempts": 3, // 1 through 10
+  //   "baseDelayMs": 500,
+  //   "maxDelayMs": 30000,
+  //   "jitter": 0.2 // 0 through 1
+  // },
+
+  // Network transport. Standard proxy environment variables also work.
+  // "httpTransport": {
+  //   "proxy": {
+  //     "http": "http://proxy.example:8080", // URL or false
+  //     "https": "http://proxy.example:8080", // URL or false
+  //     "all": false, // URL or false
+  //     "noProxy": "localhost,127.0.0.1,.internal.example" // string or false
+  //   },
+  //   "connectTimeoutMs": 10000, // Maximum: 600000.
+  //   "headersTimeoutMs": 300000, // Maximum: 600000.
+  //   "bodyTimeoutMs": 300000 // Maximum: 600000.
+  // },
+
+  // Optional fail-closed executor for the named model tools. This does not
+  // sandbox extension code or api.exec calls.
+  // "executionBackend": {
+  //   "id": "workspace-vm",
+  //   "argv": ["/absolute/path/to/tool-worker"],
+  //   "cwd": "/var/empty",
+  //   "workspace": "/workspace",
+  //   "tools": {
+  //     "read": "read",
+  //     "grep": "read",
+  //     "find": "read",
+  //     "ls": "read",
+  //     "write": "write",
+  //     "edit": "write",
+  //     "bash": "write"
+  //   },
+  //   "timeoutMs": 600000, // Maximum: 3600000.
+  //   "outputLimitBytes": 2097152 // Maximum: 16777216.
+  // },
+
+  // Provider protocol override examples. These are valid complete examples,
+  // not a dump of conditional adapter internals. Provider credentials do not
+  // belong here; connect them with /login.
+  // "providers": {
+  //   "openai": {
+  //     "kind": "openai",
+  //     "baseUrl": "https://api.openai.com/v1",
+  //     "organization": "org-id",
+  //     "project": "project-id",
+  //     "store": false,
+  //     "promptCacheOptions": { "ttl": "30m" },
+  //     "promptCacheRetention": "in-memory", // in-memory | 24h
+  //     "serviceTier": "auto", // auto | default | flex | priority
+  //     "deferredToolLoading": true // Official-endpoint default; false disables it.
+  //   },
+  //   "openai-codex": {
+  //     "kind": "openai-codex",
+  //     "baseUrl": "https://chatgpt.com/backend-api/codex",
+  //     "transport": "auto", // sse | websocket | websocket-cached | auto
+  //     "webSocketConnectTimeoutMs": 15000,
+  //     "webSocketIdleTimeoutMs": 300000
+  //   },
+  //   "anthropic": {
+  //     "kind": "anthropic",
+  //     "baseUrl": "https://api.anthropic.com/v1",
+  //     "beta": [],
+  //     "promptCache": "5m", // off | 5m | 1h
+  //     "deferredToolLoading": true, // Official-endpoint default; false disables it.
+  //     "thinking": {
+  //       "budgets": {
+  //         "minimal": 1024,
+  //         "low": 2048,
+  //         "medium": 8192,
+  //         "high": 16384,
+  //         "xhigh": 32768,
+  //         "max": 65536
+  //       },
+  //       "models": {
+  //         "model-id": {
+  //           "mode": "enabled", // adaptive | enabled
+  //           "off": "omit", // omit | disabled | always-on
+  //           "interleaved": "off", // automatic | beta | off
+  //           "allowEmptySignature": false
+  //         }
+  //       }
+  //     }
+  //   },
+  //   "github-copilot": {
+  //     "kind": "github-copilot",
+  //     "host": "github.com"
+  //   },
+  //   "gemini": {
+  //     "kind": "gemini",
+  //     "protocol": "interactions", // interactions | generate-content
+  //     "baseUrl": "https://generativelanguage.googleapis.com/v1",
+  //     "store": false,
+  //     "userProject": "google-cloud-project"
+  //   },
+  //   "vertex": {
+  //     "kind": "vertex",
+  //     "project": "google-cloud-project",
+  //     "location": "global",
+  //     "baseUrl": "https://aiplatform.googleapis.com/v1",
+  //     "userProject": "quota-project"
+  //   },
+  //   "bedrock": {
+  //     "kind": "bedrock",
+  //     "region": "us-east-1",
+  //     "runtimeEndpoint": "https://bedrock-runtime.example.com",
+  //     "controlEndpoint": "https://bedrock.example.com",
+  //     "promptCache": "off" // off | 5m | 1h
+  //   },
+  //   "azure-openai": {
+  //     "kind": "azure-openai",
+  //     "endpoint": "https://resource.openai.azure.com",
+  //     "store": false
+  //   },
+  //   "openrouter": {
+  //     "kind": "openrouter",
+  //     "baseUrl": "https://openrouter.ai/api/v1",
+  //     "appName": "Rigyn",
+  //     "siteUrl": "https://example.com",
+  //     "promptCache": "off" // off | 5m | 1h
+  //   },
+  //   "mistral": {
+  //     "kind": "mistral",
+  //     "protocol": "conversations", // Default: chat-completions.
+  //     "baseUrl": "https://api.mistral.ai/v1",
+  //     "store": true, // conversations only; default true.
+  //     "promptCache": "off", // conversations requires off; chat accepts off | session.
+  //     "reasoningMode": "effort" // effort | prompt; conversations requires effort
+  //   },
+  //   "ollama": {
+  //     "kind": "ollama",
+  //     "host": "http://127.0.0.1:11434"
+  //   },
+  //   "company": {
+  //     "kind": "openai-compatible",
+  //     "baseUrl": "https://models.example.com/v1",
+  //     "credentialProvider": "company",
+  //     "profile": "default" // default | vercel-ai-gateway | zai | kimi-coding | minimax
+  //   }
+  // },
+
+  // Explicit model metadata for endpoints without model discovery.
+  // "models": [
+  //   {
+  //     "provider": "company",
+  //     "id": "code-model",
+  //     "displayName": "Company Code Model",
+  //     "description": "Internal coding model",
+  //     "contextTokens": 131072,
+  //     "maxOutputTokens": 16384,
+  //     "tools": true,
+  //     "reasoning": true,
+  //     "images": false,
+  //     "reasoningEfforts": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  //     "metadataSource": "maintained", // Optional bundled-fallback provenance marker.
+  //     "pricing": {
+  //       "input": 1.25,
+  //       "output": 10,
+  //       "cacheRead": 0.125,
+  //       "cacheWrite": 1.5625,
+  //       "cacheWrite5m": 1.5625,
+  //       "cacheWrite1h": 2.5,
+  //       "validUntil": "2027-01-01T00:00:00.000Z",
+  //       "tiers": [
+  //         {
+  //           "name": "long-context",
+  //           "minimumInputTokens": 200001,
+  //           "maximumInputTokens": 1000000,
+  //           "input": 2.5,
+  //           "output": 15,
+  //           "cacheRead": 0.25,
+  //           "cacheWrite": 3,
+  //           "cacheWrite5m": 3,
+  //           "cacheWrite1h": 4
+  //         }
+  //       ]
+  //     }
+  //   }
+  // ],
+
+  // Public OAuth client registrations. Client secrets are never supported in
+  // configuration; OAuth tokens are stored by /login.
+  // "oauthRegistrations": {
+  //   "company-pkce": {
+  //     "provider": "company",
+  //     "flow": "pkce",
+  //     "label": "Company account",
+  //     "clientId": "public-client-id",
+  //     "authorizationEndpoint": "https://identity.example.com/authorize",
+  //     "tokenEndpoint": "https://identity.example.com/token",
+  //     "revocationEndpoint": "https://identity.example.com/revoke",
+  //     "scopes": ["models.read"],
+  //     "callbackPath": "/oauth/company",
+  //     "authorizationParameters": { "audience": "models" }
+  //   },
+  //   "company-device": {
+  //     "provider": "company",
+  //     "flow": "device",
+  //     "label": "Company device login",
+  //     "clientId": "public-device-client-id",
+  //     "deviceEndpoint": "https://identity.example.com/device",
+  //     "tokenEndpoint": "https://identity.example.com/token",
+  //     "revocationEndpoint": "https://identity.example.com/revoke",
+  //     "scopes": ["models.read"]
+  //   }
+  // }
+}

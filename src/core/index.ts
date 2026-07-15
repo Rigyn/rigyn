@@ -1,5 +1,6 @@
 export * from "./agent.js";
 export * from "./cache-diagnostics.js";
+export * from "./child-runs.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./ids.js";
