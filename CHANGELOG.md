@@ -4,6 +4,14 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.4] - 2026-07-15
+
+### Fixed
+
+- Large, tool-heavy sessions resume and switch without quadratic transcript folding; retained transcript bytes are tracked incrementally and the terminal redraws the rebuilt session once.
+- Runtime reloads preserve the active transcript while rebinding extension presentation, and extension package-lock waits now honor cancellation instead of blocking reload behind the full lock deadline.
+- Accessibility-mode session replacement preserves visible history even when later durable events do not render transcript output.
+
 ## [0.1.3] - 2026-07-14
 
 ### Fixed
