@@ -4,6 +4,13 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.3] - 2026-07-14
+
+### Fixed
+
+- Managed extension packages treat a compatible `rigyn` peer as supplied by the active host, preserve optional peer metadata for other packages, and reject an incompatible host range before invoking npm. This prevents a nested Rigyn installation from exhausting the bounded dependency-tree staging limit.
+- OpenAI Responses reasoning summaries retain their provider output-item boundaries even when each item restarts at summary index zero, so separate progress summaries render as separate terminal rows instead of growing horizontally.
+
 ## [0.1.2] - 2026-07-14
 
 ### Added

@@ -170,6 +170,8 @@ export class ResponsesAdapter implements ProviderAdapter {
       let responseModel = request.model;
       const outputItems = new Map<number, JsonValue>();
       const tools = new Map<string, ToolAccumulator>();
+      const reasoningParts = new Map<string, number>();
+      let nextReasoningPart = 0;
       let sawToolCall = false;
       let sawRefusal = false;
 
@@ -225,11 +227,25 @@ export class ResponsesAdapter implements ProviderAdapter {
           const text = asString(event.delta) ?? "";
           if (text !== "") {
             partial = true;
+            const visibility = type.includes("summary") ? "summary" : "provider_trace";
+            const index = asNumber(event.summary_index) ?? asNumber(event.content_index) ?? 0;
+            const itemId = asString(event.item_id);
+            const outputIndex = asNumber(event.output_index);
+            const scope = itemId === undefined
+              ? outputIndex === undefined ? "unscoped" : `output:${outputIndex}`
+              : `item:${itemId}`;
+            const key = `${visibility}:${scope}:${index}`;
+            let part = reasoningParts.get(key);
+            if (part === undefined) {
+              part = nextReasoningPart;
+              nextReasoningPart += 1;
+              reasoningParts.set(key, part);
+            }
             yield {
               type: "reasoning_delta",
-              part: asNumber(event.summary_index) ?? asNumber(event.content_index) ?? 0,
+              part,
               text,
-              visibility: type.includes("summary") ? "summary" : "provider_trace",
+              visibility,
             };
           }
           continue;

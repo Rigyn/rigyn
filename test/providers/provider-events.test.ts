@@ -101,6 +101,51 @@ test("OpenAI Responses maps text, fragmented tools, usage, and opaque output sta
   });
 });
 
+test("OpenAI Responses keeps reasoning summaries from separate output items distinct", async () => {
+  const body = sse(
+    { type: "response.created", response: { id: "resp-reasoning", model: "gpt-test" } },
+    {
+      type: "response.reasoning_summary_text.delta",
+      item_id: "reasoning-1",
+      output_index: 0,
+      summary_index: 0,
+      delta: "Planning ",
+    },
+    {
+      type: "response.reasoning_summary_text.delta",
+      item_id: "reasoning-1",
+      output_index: 0,
+      summary_index: 0,
+      delta: "the change",
+    },
+    {
+      type: "response.reasoning_summary_text.delta",
+      item_id: "reasoning-2",
+      output_index: 1,
+      summary_index: 0,
+      delta: "Implementing the fix",
+    },
+    {
+      type: "response.reasoning_summary_text.delta",
+      output_index: 2,
+      summary_index: 0,
+      delta: "Reviewing the result",
+    },
+    { type: "response.completed", response: { id: "resp-reasoning", model: "gpt-test" } },
+  );
+  const adapter = new OpenAIResponsesAdapter({
+    apiKey: "secret",
+    baseUrl: "https://responses.example/v1",
+    fetch: fakeFetch(() => streamResponse(byteChunks(body))),
+  });
+
+  const events = await collect(adapter.stream(request("openai"), new AbortController().signal));
+  assert.deepEqual(
+    events.flatMap((event) => event.type === "reasoning_delta" ? [[event.part, event.text]] : []),
+    [[0, "Planning "], [0, "the change"], [1, "Implementing the fix"], [2, "Reviewing the result"]],
+  );
+});
+
 test("Azure Responses uses the GA v1 path and api-key authentication", async () => {
   let url = "";
   let apiKey = "";
@@ -248,7 +293,7 @@ test("Anthropic subscription credentials use bearer OAuth compatibility headers"
   assert.match(headers?.get("anthropic-beta") ?? "", /claude-code-20250219/u);
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "rigyn/0.1.2");
+  assert.equal(headers?.get("user-agent"), "rigyn/0.1.3");
   assert.equal(posted?.system, undefined);
   assert.deepEqual((posted?.tools as Array<{ name: string }>).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");

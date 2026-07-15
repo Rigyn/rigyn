@@ -114,6 +114,7 @@ const manifest = JSON.parse(await import("node:fs/promises").then(({ readFile })
 await appendFile(capturePath, JSON.stringify({
   args,
   cwd: process.cwd(),
+  manifest,
   environment: {
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
@@ -136,7 +137,12 @@ const secure = args.includes("--ignore-scripts=true") && args.includes("--omit=d
 const lifecycleEnabled = args.includes("--ignore-scripts=false") && args.includes("--bin-links=true") &&
   process.env.npm_config_ignore_scripts === "false" && process.env.npm_config_bin_links === "true";
 if (!secure) await writeFile(markerPath, "lifecycle-ran");
-const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies };
+const optionalPeers = new Set(Object.entries(manifest.peerDependenciesMeta ?? {})
+  .filter(([, metadata]) => metadata?.optional === true)
+  .map(([name]) => name));
+const requiredPeers = Object.fromEntries(Object.entries(manifest.peerDependencies ?? {})
+  .filter(([name]) => !optionalPeers.has(name)));
+const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies, ...requiredPeers };
 if (lifecycleEnabled) {
   await mkdir(join(process.cwd(), "node_modules", ".bin"), { recursive: true });
   await writeFile(join(process.cwd(), "node_modules", ".bin", "fixture-bin"), "staging only");
@@ -203,6 +209,149 @@ function fakeManager(
     { npm: { command: process.execPath, prefix: [fakeNpm, capture, marker] } },
   );
 }
+
+async function writePeerFixture(root: string, version: string, hostRange: string): Promise<void> {
+  await mkdir(join(root, "runtime"), { recursive: true });
+  await writeFile(join(root, "extension.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    id: "peer-reference",
+    name: "Peer reference",
+    version,
+    contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+  }, null, 2)}\n`);
+  await writeFile(join(root, "package.json"), `${JSON.stringify({
+    name: "rigyn-peer-reference",
+    version,
+    type: "module",
+    dependencies: { "fixture-dependency": version },
+    peerDependencies: {
+      rigyn: hostRange,
+      "optional-peer": "^3.0.0",
+    },
+    peerDependenciesMeta: {
+      "optional-peer": { optional: true },
+    },
+  }, null, 2)}\n`);
+  await writeFile(join(root, "runtime", "index.mjs"), [
+    'import { value } from "fixture-dependency";',
+    "export default () => { globalThis.__peerReferenceActivation = value; };",
+    "",
+  ].join("\n"));
+}
+
+test("the compatible Rigyn peer is host-satisfied while optional peer metadata survives dependency staging", async (t) => {
+  const root = await temporary(t);
+  const source = join(root, "source");
+  const capture = join(root, "npm-calls.jsonl");
+  const marker = join(root, "lifecycle-ran");
+  await mkdir(source);
+  await writePeerFixture(source, "1.0.0", ">=0.1.0 <0.2.0");
+  const fakeNpm = await writeFakeNpm(root);
+  const manager = fakeManager(root, fakeNpm, capture, marker);
+
+  const installed = await manager.install(source);
+  assert.equal(installed.version, "1.0.0");
+  await assert.rejects(access(join(installed.packageRoot, "node_modules", "rigyn")), /ENOENT/u);
+  await assert.rejects(access(join(installed.packageRoot, "node_modules", "optional-peer")), /ENOENT/u);
+  const installedManifest = JSON.parse(await readFile(join(installed.packageRoot, "package.json"), "utf8")) as {
+    peerDependencies: Record<string, string>;
+    peerDependenciesMeta: Record<string, { optional: boolean }>;
+  };
+  assert.deepEqual(installedManifest.peerDependencies, {
+    rigyn: ">=0.1.0 <0.2.0",
+    "optional-peer": "^3.0.0",
+  });
+  assert.deepEqual(installedManifest.peerDependenciesMeta, { "optional-peer": { optional: true } });
+  const firstCall = JSON.parse((await readFile(capture, "utf8")).trim()) as { manifest: {
+    peerDependencies?: Record<string, string>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  } };
+  assert.deepEqual(firstCall.manifest.peerDependencies, { "optional-peer": "^3.0.0" });
+  assert.deepEqual(firstCall.manifest.peerDependenciesMeta, { "optional-peer": { optional: true } });
+
+  let catalog = await discoverExtensions(manager.sources(true));
+  let host = await loadRuntimeExtensions(catalog.bundle().runtime, { workspace: root });
+  assert.equal((globalThis as Record<string, unknown>).__peerReferenceActivation, "fixture-dependency@1.0.0");
+  await host.close();
+
+  await writePeerFixture(source, "2.0.0", ">=0.1.0 <0.2.0");
+  const updated = await manager.update("peer-reference");
+  assert.equal(updated.version, "2.0.0");
+  catalog = await discoverExtensions(manager.sources(true));
+  host = await loadRuntimeExtensions(catalog.bundle().runtime, { workspace: root });
+  assert.equal((globalThis as Record<string, unknown>).__peerReferenceActivation, "fixture-dependency@2.0.0");
+  await host.close();
+
+  assert.equal((await manager.remove("peer-reference")).version, "2.0.0");
+  assert.deepEqual(await manager.list(), []);
+  delete (globalThis as Record<string, unknown>).__peerReferenceActivation;
+});
+
+test("a package with only a compatible Rigyn peer installs without invoking npm", async (t) => {
+  const root = await temporary(t);
+  const source = join(root, "source");
+  const capture = join(root, "npm-calls.jsonl");
+  await mkdir(join(source, "runtime"), { recursive: true });
+  await writeFile(join(source, "extension.json"), JSON.stringify({
+    schemaVersion: 1,
+    id: "host-only-peer",
+    name: "Host-only peer",
+    contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+  }));
+  await writeFile(join(source, "package.json"), JSON.stringify({
+    name: "rigyn-host-only-peer",
+    version: "1.0.0",
+    type: "module",
+    peerDependencies: { rigyn: ">=0.1.0 <0.2.0" },
+  }));
+  await writeFile(join(source, "runtime", "index.mjs"), "export default () => {};\n");
+  const manager = fakeManager(root, await writeFakeNpm(root), capture, join(root, "marker"));
+
+  const installed = await manager.install(source);
+  assert.equal(installed.id, "host-only-peer");
+  await assert.rejects(access(capture), /ENOENT/u);
+  await assert.rejects(access(join(installed.packageRoot, "node_modules")), /ENOENT/u);
+});
+
+test("an optional non-host peer may produce no private dependency tree", async (t) => {
+  const root = await temporary(t);
+  const source = join(root, "source");
+  const capture = join(root, "npm-calls.jsonl");
+  await mkdir(join(source, "runtime"), { recursive: true });
+  await writeFile(join(source, "extension.json"), JSON.stringify({
+    schemaVersion: 1,
+    id: "optional-only-peer",
+    name: "Optional-only peer",
+    contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+  }));
+  await writeFile(join(source, "package.json"), JSON.stringify({
+    name: "rigyn-optional-only-peer",
+    version: "1.0.0",
+    type: "module",
+    peerDependencies: { "optional-peer": "^3.0.0" },
+    peerDependenciesMeta: { "optional-peer": { optional: true } },
+  }));
+  await writeFile(join(source, "runtime", "index.mjs"), "export default () => {};\n");
+  const manager = fakeManager(root, await writeFakeNpm(root), capture, join(root, "marker"));
+
+  const installed = await manager.install(source);
+  assert.equal(installed.id, "optional-only-peer");
+  assert.equal((await readFile(capture, "utf8")).trim().split("\n").length, 1);
+  await assert.rejects(access(join(installed.packageRoot, "node_modules")), /ENOENT/u);
+});
+
+test("an incompatible Rigyn peer fails before npm starts and leaves no installed package", async (t) => {
+  const root = await temporary(t);
+  const source = join(root, "source");
+  const capture = join(root, "npm-calls.jsonl");
+  await mkdir(source);
+  await writePeerFixture(source, "1.0.0", ">=9.0.0 <10.0.0");
+  const manager = fakeManager(root, await writeFakeNpm(root), capture, join(root, "marker"));
+
+  await assert.rejects(manager.install(source), /requires Rigyn >=9\.0\.0 <10\.0\.0; current version is/u);
+  await assert.rejects(access(capture), /ENOENT/u);
+  assert.deepEqual(await manager.list(), []);
+});
 
 test("production dependencies install with a sanitized npm invocation and resolve from the activated runtime", async (t) => {
   const root = await temporary(t);

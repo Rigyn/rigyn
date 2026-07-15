@@ -19,12 +19,13 @@ import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { minimatch } from "minimatch";
-import { valid as validSemver } from "semver";
+import { satisfies, valid as validSemver } from "semver";
 
 import { trackActiveProcessGroup } from "../process/active-groups.js";
 import { normalizeCommandArgv } from "../process/command.js";
 import { sha256 } from "../tools/hash.js";
 import { parseThemeDefinition } from "../tui/theme.js";
+import { RIGYN_VERSION } from "../version.js";
 import { discoverExtensions } from "./loader.js";
 import { parseExtensionManifest, type ParsedExtensionManifest } from "./manifest.js";
 import type { ExtensionSource } from "./types.js";
@@ -133,11 +134,17 @@ interface CopyBudget {
 }
 
 type ProductionDependencyField = "dependencies" | "optionalDependencies" | "peerDependencies";
+const PRODUCTION_DEPENDENCY_FIELDS: readonly ProductionDependencyField[] = [
+  "dependencies",
+  "optionalDependencies",
+  "peerDependencies",
+];
 
 interface ProductionDependencies {
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>;
 }
 
 interface ParsedProductionDependencies {
@@ -1431,9 +1438,8 @@ async function productionDependencies(packageRoot: string, limits: PackageLimits
   }
   const packageJson = object(parsed, "Package package.json");
   const fields: ProductionDependencies = {};
-  const names: readonly ProductionDependencyField[] = ["dependencies", "optionalDependencies", "peerDependencies"];
   let count = 0;
-  for (const field of names) {
+  for (const field of PRODUCTION_DEPENDENCY_FIELDS) {
     const raw = packageJson[field];
     if (raw === undefined) continue;
     const input = object(raw, `Package package.json ${field}`);
@@ -1448,6 +1454,41 @@ async function productionDependencies(packageRoot: string, limits: PackageLimits
     }
     fields[field] = selected;
   }
+  const rawPeerMetadata = packageJson.peerDependenciesMeta;
+  if (rawPeerMetadata !== undefined) {
+    const input = object(rawPeerMetadata, "Package package.json peerDependenciesMeta");
+    const entries = Object.entries(input);
+    count += entries.length;
+    if (count > limits.maxEntries) throw new Error(`Package production dependencies exceed ${limits.maxEntries} entries`);
+    const selected: Record<string, { optional?: boolean }> = Object.create(null) as Record<string, { optional?: boolean }>;
+    for (const [name, rawMetadata] of entries) {
+      npmPackageName(name, "Package package.json peerDependenciesMeta name");
+      if (fields.peerDependencies?.[name] === undefined) {
+        throw new Error(`Package package.json peerDependenciesMeta.${name} does not name a peer dependency`);
+      }
+      const metadata = object(rawMetadata, `Package package.json peerDependenciesMeta.${name}`);
+      const unknown = Object.keys(metadata).filter((key) => key !== "optional");
+      if (unknown.length > 0 || (metadata.optional !== undefined && typeof metadata.optional !== "boolean")) {
+        throw new Error(`Package package.json peerDependenciesMeta.${name} must contain only an optional boolean`);
+      }
+      selected[name] = metadata.optional === undefined ? {} : { optional: metadata.optional };
+    }
+    if (entries.length > 0) fields.peerDependenciesMeta = selected;
+  }
+
+  const hostRange = fields.peerDependencies?.rigyn;
+  if (hostRange !== undefined) {
+    if (!satisfies(RIGYN_VERSION, hostRange, { includePrerelease: true })) {
+      throw new Error(`Package requires Rigyn ${hostRange}; current version is ${RIGYN_VERSION}`);
+    }
+    delete fields.peerDependencies!.rigyn;
+    if (Object.keys(fields.peerDependencies!).length === 0) delete fields.peerDependencies;
+    if (fields.peerDependenciesMeta !== undefined) {
+      delete fields.peerDependenciesMeta.rigyn;
+      if (Object.keys(fields.peerDependenciesMeta).length === 0) delete fields.peerDependenciesMeta;
+    }
+  }
+
   if (count === 0) return undefined;
   return { fields, packageJsonSha256: sha256(packageJsonBytes) };
 }
@@ -1471,6 +1512,8 @@ async function installProductionDependencies(
   } catch (error) {
     if (errno(error) !== "ENOENT") throw error;
   }
+  if (!PRODUCTION_DEPENDENCY_FIELDS
+    .some((field) => Object.keys(dependencies.fields[field] ?? {}).length > 0)) return;
 
   const dependencyContainer = join(container, ".dependencies");
   const home = join(dependencyContainer, "home");
@@ -1514,7 +1557,13 @@ async function installProductionDependencies(
     } catch (error) {
       if (errno(error) !== "ENOENT") throw error;
       const required = Object.keys(dependencies.fields.dependencies ?? {}).length > 0 ||
-        Object.keys(dependencies.fields.peerDependencies ?? {}).length > 0;
+        Object.keys(dependencies.fields.peerDependencies ?? {}).some((name) =>
+          dependencies.fields.peerDependenciesMeta?.[name]?.optional !== true
+        );
+      const currentPackageJson = await readRegularFile(join(packageRoot, "package.json"), MANIFEST_MAX_BYTES, "Staged package.json");
+      if (sha256(currentPackageJson) !== dependencies.packageJsonSha256) {
+        throw new Error("Package package.json changed during production dependency installation");
+      }
       if (required) throw new Error("npm production dependency install produced no node_modules tree");
       return;
     }

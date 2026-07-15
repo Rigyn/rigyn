@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 
 import {
@@ -13,6 +14,7 @@ import {
   smokeExtensionPackage,
   validateExtensionPackage,
 } from "../../src/cli/extension-author.js";
+import { discoverExtensions, loadRuntimeExtensions, LocalExtensionPackageManager } from "../../src/extensions/index.js";
 
 async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
   const root = await mkdtemp(join(tmpdir(), "rigyn-author-test-"));
@@ -24,6 +26,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     description: "Author tooling fixture",
     type: "module",
     files: ["extension.json", "runtime"],
+    peerDependencies: { rigyn: ">=0.1.0 <0.2.0" },
   }));
   await writeFile(join(root, "extension.json"), JSON.stringify({
     schemaVersion: 1,
@@ -123,6 +126,27 @@ test("extension author pack emits one reviewed artifact and report aggregates ev
     ["smoke", "success"],
     ["reload", "success"],
   ]);
+});
+
+test("an authored archive with a host-satisfied Rigyn peer installs, reloads, and removes", async (t) => {
+  const { root } = await fixture(t);
+  const packed = await packExtensionPackage(root, join(root, "artifacts"));
+  const managed = join(root, "managed");
+  const manager = new LocalExtensionPackageManager({ user: managed });
+  const installed = await manager.install(`npm:${pathToFileURL(packed.artifact).href}`);
+  assert.equal(installed.id, "author-tool-fixture");
+  await assert.rejects(access(join(installed.packageRoot, "node_modules", "rigyn")), /ENOENT/u);
+
+  const activate = async (): Promise<void> => {
+    const catalog = await discoverExtensions(manager.sources(true));
+    const host = await loadRuntimeExtensions(catalog.bundle().runtime, { workspace: root });
+    assert.deepEqual(host.commands().map((command) => command.name), ["author-probe"]);
+    await host.close();
+  };
+  await activate();
+  await activate();
+  assert.equal((await manager.remove(installed.id)).id, installed.id);
+  assert.deepEqual(await manager.list(), []);
 });
 
 test("extension author report retains actionable failures without activating invalid code", async (t) => {
