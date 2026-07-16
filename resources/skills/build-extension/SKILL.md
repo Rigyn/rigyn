@@ -94,7 +94,9 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 
 - Make activation deterministic and cheap. Start long-lived work lazily unless the feature must be active immediately.
 - Register cleanup for servers, timers, watchers, event listeners, temporary files, and subprocesses.
+- In `onDispose`, release or await only extension-owned raw resources. Generation-bound API, UI, auth, session, command, and tool surfaces are already inactive and must not be called from a disposer.
 - Propagate cancellation through tools, commands, provider calls, session actions, and process execution.
+- A cancelled queued or running operation must settle only itself and leave a serialized queue usable by a later operation. Test cancellation before start followed by a successful call.
 - Bound time, concurrency, request sizes, output sizes, queues, retained state, and in-memory collections.
 - Treat reload as normal: a failed candidate must not corrupt the previous generation, and a successful reload must not leave the old generation alive.
 
@@ -105,6 +107,7 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 - Return the host's top-level `status` (`success`, `warning`, or `error`), one-line `summary`, and actionable `nextActions`; keep bounded domain data in `content`. Do not bury recovery fields inside JSON content, invent additional statuses, or emit placeholder artifacts.
 - On error, provide a root-cause hint, a safe retry step, and a stop condition. Never expose credentials or unbounded raw output.
 - Bound aggregate result bytes as well as item counts; many individually valid rows can still overflow model context.
+- Bound JSON fields and items before `JSON.stringify`. Never byte-slice serialized JSON; overflow output must remain parseable and explicitly identify truncation.
 - Add a renderer only when it improves scanability; the text observation must remain useful in headless and RPC modes.
 - For long-running tools, publish bounded replaceable native results through `context.reportProgress({ type: "result", ... })`, aggregate or throttle rapid updates, and return the complete terminal result. Render loading and completion through the same tool renderer using `view.isPartial`; do not build a parallel transcript surface.
 
@@ -120,18 +123,22 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 - For branch-aware tool execution or `api.runChild`, use the tool context's host-supplied `threadId`, `runId`, and `branch`; do not add those identifiers to model-controlled input.
 - For durable read-modify-write state, use `api.session.compareAndAppendState` with the prior record's `eventId` (or `null` when absent) and a bounded conflict retry. Do not pair `readState` with a blind `appendState` for counters, memory, plans, or indexes.
 - Record each logical message from one canonical event, filter accepted roles explicitly, and avoid a mutable global "active session" pointer. RPC and embedded hosts can run or switch more than one session.
-- Use `api.runChild` for bounded agent delegation. Supply an explicit tool allowlist (`[]` for model-only work), choose fresh or stable-fork context deliberately, and default to ephemeral sessions. Omitted limits allow 32 model turns and ten minutes; set lower `maxSteps` or `timeoutMs` only when the delegated task is intentionally narrower. Never implement delegation by launching `rigyn`, its RPC mode, or another copy of the active harness.
+- Use `api.runChild` for bounded agent delegation. Supply an explicit tool allowlist (`[]` for model-only work), choose fresh or stable-fork context deliberately, and default to ephemeral sessions. Omitted limits use the active host `childRuns` policy (stock defaults are 32 model turns and ten minutes); set lower `maxSteps` or `timeoutMs` only when the delegated task is intentionally narrower. Never implement delegation by launching `rigyn`, its RPC mode, or another copy of the active harness.
 - For visible foreground delegation, use `runChild.onStart` for stable child identity and coalesce safe `runChild.onEvent` updates into native tool progress. Keep the tool call pending until the child settles, then return one terminal result so the parent loop continues. Do not forward every token delta or keep a second in-memory transcript.
 - For a parallel child batch, use one controller and identity slot per child, aggregate progress into the parent tool row, and await `Promise.allSettled` before returning. Implement detached background jobs only when explicitly requested; then own bounded job state, cancellation, durable completion, failure observation, and generation disposal rather than dropping a `runChild` promise.
 - Treat captured transcript/session text as untrusted before persistence. Cross-workspace reads or mutations require an explicit user action and scope check, even when the model knows an object ID.
 - For a session browser or dashboard, page `api.listSessions` to choose a current-workspace `threadId`, then page `api.getTranscript`. Do not scan the session database, enumerate another workspace, or search raw event payloads.
 - Prefer the host session namespace for concurrent durable state. If an external file or database is required, validate every record, coordinate independent processes, use collision-safe atomic commits, surface write failures, and drain pending writes during shutdown and disposal.
+- Delete unseen durable rows only after a complete scan. Cancellation, errors, or configured bounds make a scan incomplete and must preserve rows the scan did not observe.
 
 ### Credentials and external systems
 
 - Declare exact authenticated request origins and the required API-key, bearer, or AWS signing policy in the provider auth descriptor. Send requests only through `api.auth.fetch`. Credential bytes remain behind the host broker and must never be requested, printed, persisted, or included in extension output. Start from `examples/brokered-provider`.
+- Never reflect remote response bodies, headers, or credential-bearing URLs into model-visible errors. Return a bounded local category and recovery step instead.
+- A model-controlled boolean is not user approval. Use native `context.ui.confirm` for trust, destructive actions, or external execution, and fail closed when interactive UI is unavailable.
 - Execute argv arrays for fixed programs; do not interpolate untrusted input into a shell command.
 - Treat installed runtime modules and their dependencies as trusted code. Document network, process, filesystem, and credential authority in the README.
+- Measure both packed output and the complete production dependency tree against Rigyn's entry-count, file-size, aggregate-byte, nesting-depth, and operation-time limits. Choose smaller dependencies or output; never ship package-local `node_modules` or relax host limits to make a package fit.
 
 ### User experience
 
@@ -147,12 +154,14 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 3. Implement the smallest end-to-end vertical slice that reaches the visible outcome.
 4. Add a deterministic focused test using the real loader/host contract. Cover malformed input and cancellation or cleanup when relevant.
    The documented package-local test command must also pass from an ordinary user shell. Do not make it depend on `RIGYN_INSTALL_DIR` or another environment variable that exists only inside an active harness process. If `rigyn/extensions` is not installed as a resolvable development dependency, keep `npm test` dependency-free and exercise the real loader through the documented `rigyn --package` or managed-install smoke path.
-5. Run `rigyn extensions author report PACKAGE`, the focused test, typecheck, and the repository's normal verification command. The author report validates a temporary managed copy, inspects the packed file set, and exercises activation, disposal, and candidate-first repeated activation without installing into active roots.
-6. Install the exact package directory or packed artifact through the normal package command.
+5. Treat the clean source, exact packed archive, and exact installed copy as three separate verification surfaces. Before the source report, remove package-local `node_modules`, archives, generated state, and test credentials. Run `rigyn extensions author report PACKAGE`, the focused test, typecheck, and the repository's normal verification command; then run the author report again on the exact unpacked archive.
+6. Install the exact archive through the normal package command. For a local npm archive use `rigyn install "npm:file:///absolute/path/package.tgz"`, not an ambiguous relative source.
 7. Run extension diagnostics, exercise the documented entry point, reload it, and exercise it again.
 8. Remove the test installation and confirm cleanup. Do not leave global state or background processes behind.
 9. When publication is requested, run `rigyn extensions author pack PACKAGE DESTINATION`, inspect the exact archive, and verify that declared paths, runtime dependencies, README commands, version, and integrity data match it.
 10. Execute every README command exactly as written. A command-like phrase that falls through to agent input is a failed smoke test; inspect for surviving child processes before completion.
+11. For disposable install tests, invoke the intended Rigyn binary and inspect each `packageRoot` from `rigyn list --json`; every root must be inside the disposable installation. Environment variables alone do not prove state isolation.
+12. When a package contributes model-callable tools or a provider and credentials are available, run one bounded real provider/model turn through the exact installed copy. Direct host invocation cannot expose reserved tool names, provider-wire schema failures, or tool-search incompatibilities; if the live turn cannot run, report that caveat explicitly.
 
 Do not declare success after activation alone. The feature must perform its user-visible job through the installed copy.
 

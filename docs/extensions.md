@@ -114,7 +114,7 @@ export default function activate(api) {
 }
 ```
 
-Activation is transactional: staged registrations become visible only after the module finishes successfully. Reload activates a candidate generation before disposing the old generation; a failed candidate leaves the previous runtime usable. Import plus activation is bounded to 30 seconds so one unresolved extension cannot freeze startup or reload. `api.signal` aborts when activation fails, a reload replaces the generation, or the host closes; use it for initialization work and retain `onDispose` for cleanup.
+Activation is transactional: staged registrations become visible only after the module finishes successfully. Reload activates a candidate generation before disposing the old generation; a failed candidate leaves the previous runtime usable. Import plus activation is bounded to 30 seconds so one unresolved extension cannot freeze startup or reload. `api.signal` aborts when activation fails, a reload replaces the generation, or the host closes; use it for initialization work and retain `onDispose` for cleanup. The generation-bound API, UI, auth, session, command, and tool surfaces are inactive before disposers run, so an `onDispose` callback may only release or await raw resources that the extension already owns.
 
 ### Typed tool authoring
 

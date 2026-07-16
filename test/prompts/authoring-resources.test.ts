@@ -54,6 +54,21 @@ test("bundled authoring resources are discoverable and progressively loaded", as
   assert.match(dashboardBody, /api\.getTranscript/iu);
   assert.match(dashboardBody, /never read the session database or expose raw event envelopes/iu);
   assert.match(loaded.instructions, /extension\.json/u);
+  assert.match(loaded.instructions, /onDispose.*owned raw resources.*generation-bound.*inactive/isu);
+  assert.match(loaded.instructions, /cancelled.*queue.*later operation/isu);
+  assert.match(loaded.instructions, /omitted limits use the active host `childRuns` policy/isu);
+  assert.match(loaded.instructions, /never byte-slice serialized JSON.*parseable/isu);
+  assert.match(loaded.instructions, /complete scan.*preserve rows.*did not observe/isu);
+  assert.match(loaded.instructions, /never reflect remote response bodies, headers.*credential-bearing URLs/isu);
+  assert.match(loaded.instructions, /model-controlled boolean is not user approval.*context\.ui\.confirm/isu);
+  assert.match(loaded.instructions, /production dependency tree.*entry-count.*aggregate-byte.*nesting-depth/isu);
+  assert.match(loaded.instructions, /clean source, exact packed archive, and exact installed copy/isu);
+  assert.match(loaded.instructions, /real provider\/model turn.*reserved tool names.*schema failures/isu);
+  assert.match(loaded.instructions, /packageRoot.*rigyn list --json.*disposable installation/isu);
+  assert.match(loaded.instructions, /npm:file:\/\/\/absolute\/path\/package\.tgz/u);
+
+  const packageDocs = await readFile(resolve(resources.documentationRoot, "packages.md"), "utf8");
+  assert.match(packageDocs, /rigyn install .*npm:file:\/\/\/absolute\/path\/my-package-1\.2\.3\.tgz/u);
 
   const prompts = await loadPromptTemplates([resources.promptRoot]);
   const prompt = prompts.find((entry) => entry.id === "build-extension");

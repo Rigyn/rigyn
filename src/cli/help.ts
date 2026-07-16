@@ -149,7 +149,7 @@ Usage:
   list: `${header}
 
 Usage:
-  rigyn list [-l]
+  rigyn list [-l] [--json]
 `,
   packages: `${header}
 

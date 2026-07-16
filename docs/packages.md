@@ -45,6 +45,7 @@ Managed installs accept local directories, registry packages, local npm archives
 
 ```sh
 rigyn install ./my-package
+rigyn install "npm:file:///absolute/path/my-package-1.2.3.tgz"
 rigyn install npm:@example/harness-tools@1.2.3
 rigyn install git:https://github.com/example/harness-tools.git#v1
 rigyn install ssh://git@github.com/example/harness-tools.git#v1
@@ -222,11 +223,12 @@ Project runtime code remains blocked until the workspace is trusted. User and ex
 
 ## Release checklist
 
-1. Validate a clean copy with `rigyn install ./path/to/package`, `rigyn list`, `rigyn extensions show PACKAGE_ID`, and `rigyn extensions doctor`.
+1. Remove package-local `node_modules`, archives, generated state, and test credentials, then validate the clean source with `rigyn extensions author report ./path/to/package`.
 2. Test activation, reload, cancellation, malformed input, duplicate registration, session restart, and uninstall where applicable.
 3. Update the package version, compatibility statement, and integrity digests together.
-4. Pack only required files and inspect the archive before publishing or tagging it.
-5. Install that exact archive or tag once, run its documented smoke test, then publish it immutably.
+4. Pack only required files and inspect both the archive and complete production dependency tree against the package entry, byte, depth, and operation limits.
+5. Run the author report on the exact unpacked archive, install that archive in disposable state, and inspect `packageRoot` with `rigyn list --json` to prove it is not using a source or global installation.
+6. Run `rigyn extensions doctor`, exercise the documented entry point, reload, exercise it again, remove the package, and confirm cleanup before publishing immutably.
 
 The developer CLI automates the repeatable parts without installing into user or project package roots:
 
