@@ -14,14 +14,14 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.1.5 GitHub release:
+From the v0.1.6 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.5/rigyn-0.1.5.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.6/rigyn-0.1.6.tgz -- rigyn self-install
 rigyn
 ```
 
-This uses npm's one-shot package executor; it does not create a global npm installation. After the package is also published to npm, `npm exec --yes --package=rigyn@latest -- rigyn self-install` installs the latest registry release.
+This uses npm's one-shot package executor; it does not create a global npm installation. `npm exec --yes --package=rigyn@latest -- rigyn self-install` installs the latest registry release instead of the version-pinned GitHub archive.
 
 From the public source checkout today:
 
@@ -36,14 +36,14 @@ The installer creates a self-contained installation under `$HOME/.rigyn`. It cop
 
 Installing does not require `npm install` in the master checkout. For development only, run `npm install`, `npm run check`, and `npm run dev --` from the checkout.
 
-Update Rigyn after it is published to npm, or remove any self-contained installation, from any directory:
+Update or remove any self-contained installation from any directory:
 
 ```sh
 rigyn self-update
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest` from npm. Until that package exists, rerun the versioned GitHub release command above, or update the source checkout and rerun `node scripts/install-user.mjs`; the installer replaces only its marker-owned application files.
+`self-update` installs `rigyn@latest` from npm. The installer replaces only its marker-owned application files.
 
 Uninstall is marker-verified and removes the installed application, configuration, OAuth/API-key profiles, sessions, cache, and its managed command. It never deletes the source checkout or unrelated files.
 

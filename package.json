@@ -1,6 +1,6 @@
 {
   "name": "rigyn",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
   "license": "MIT",

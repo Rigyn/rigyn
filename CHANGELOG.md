@@ -4,6 +4,14 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.6] - 2026-07-16
+
+### Changed
+
+- Updated the exact-pinned official OpenAI SDK transport to 6.47.0 after focused provider, resilience, live streaming, full-suite, and packed-artifact validation.
+- Strengthened bundled extension-authoring guidance and package release checks for generation disposal, cancellation-safe queues, bounded parseable output, explicit user approval, complete durable scans, dependency-tree limits, archive isolation, and live installed-package smoke tests.
+- Updated installation guidance for the active npm distribution while retaining version-pinned GitHub archive and checksum verification paths.
+
 ## [0.1.5] - 2026-07-15
 
 ### Added

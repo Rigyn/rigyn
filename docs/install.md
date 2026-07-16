@@ -11,14 +11,14 @@ node --version
 npm --version
 ```
 
-Install the private per-user copy from the v0.1.5 GitHub release:
+Install the private per-user copy from the v0.1.6 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.5/rigyn-0.1.5.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.6/rigyn-0.1.6.tgz -- rigyn self-install
 rigyn --version
 ```
 
-This uses npm's one-shot package executor and does not create a global npm installation. After the package is also published to npm, the equivalent latest-release command is:
+This uses npm's one-shot package executor and does not create a global npm installation. The equivalent latest-registry-release command is:
 
 ```sh
 npm exec --yes --package=rigyn@latest -- rigyn self-install
@@ -35,10 +35,10 @@ rigyn --version
 
 The application, dependencies, configuration, sessions, credentials, cache, and temporary files live under `~/.rigyn` by default. Set `RIGYN_INSTALL_DIR` only when a different self-contained root is required. The source checkout and npm's global package directory are not used at runtime.
 
-To verify before installation, download `rigyn-0.1.5.tgz` and `SHA256SUMS` from the same release, then run `sha256sum --check SHA256SUMS` (or `shasum -a 256 -c SHA256SUMS` on macOS). A verified local archive must be passed as an explicit package so npm does not mistake the archive path for a command:
+To verify before installation, download `rigyn-0.1.6.tgz` and `SHA256SUMS` from the same release, then run `sha256sum --check SHA256SUMS` (or `shasum -a 256 -c SHA256SUMS` on macOS). A verified local archive must be passed as an explicit package so npm does not mistake the archive path for a command:
 
 ```sh
-npm exec --yes --package=./rigyn-0.1.5.tgz -- rigyn self-install
+npm exec --yes --package=./rigyn-0.1.6.tgz -- rigyn self-install
 ```
 
 ## Linux

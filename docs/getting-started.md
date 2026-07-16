@@ -25,14 +25,14 @@ node --version
 npm --version
 ```
 
-Install a private per-user copy from the v0.1.5 GitHub release:
+Install a private per-user copy from the v0.1.6 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.5/rigyn-0.1.5.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.6/rigyn-0.1.6.tgz -- rigyn self-install
 rigyn --version
 ```
 
-This uses npm's one-shot package executor rather than a global npm installation. After the package is also published to npm, replace the URL with `rigyn@latest`.
+This uses npm's one-shot package executor rather than a global npm installation. Replace the URL with `rigyn@latest` to install the latest registry release.
 
 To install from the public source checkout instead:
 
@@ -179,7 +179,7 @@ Direct development runs use the normal XDG locations instead:
 
 ## 8. Update, diagnose, or remove
 
-After the npm package is published, update from any directory. Every installation can run the remaining diagnostic and removal commands:
+Update from any directory. Every installation can run the remaining diagnostic and removal commands:
 
 ```sh
 rigyn self-update
@@ -188,7 +188,7 @@ rigyn extensions doctor
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest`; before that package exists, rerun the versioned GitHub release command above, or update the source checkout and rerun `node scripts/install-user.mjs`. Close other running Rigyn processes before update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration, credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
+`self-update` installs `rigyn@latest`. Close other running Rigyn processes before update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration, credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
 
 For common failures, see [Troubleshooting](troubleshooting.md), [Platform notes](platforms.md), and [Local diagnostics](diagnostics.md).
 

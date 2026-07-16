@@ -50,7 +50,7 @@ async function runNode(args, options = {}) {
 
 test("release metadata policy matches the published package contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.1.5");
+  assert.equal(result.version, "0.1.6");
   assert.equal(result.subpathCount, 19);
   assert.equal(result.targetCount, 6);
   assert.ok(result.actionCount >= 6);
