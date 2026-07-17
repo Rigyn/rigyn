@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { parseJsoncObject, TrustStore } from "../../src/config/index.js";
 import { SessionStore } from "../../src/storage/store.js";
@@ -212,7 +213,7 @@ test("startup reports version, context, and the loaded keybindings", {
     }));
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   await waitForOutput(session.read, "Ctrl+X interrupt · Ctrl+C clear/exit twice · Ctrl+D exit");
   await waitForOutput(session.read, "commands · ! bash");
   assert.doesNotMatch(session.read(), /Alt\+T help/u);
@@ -229,7 +230,7 @@ test("a full-screen action picker returns to chat instead of exiting the process
 }, async (t) => {
   const session = await startChat(["--offline"], undefined, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   const credentialKey = join(session.config, "rigyn", "credentials.key");
   assert.equal(await pathExists(credentialKey), false);
   session.child.stdin.write("/model\r");
@@ -256,7 +257,7 @@ test("a lone idle Escape does not exit full-screen chat", {
 }, async (t) => {
   const session = await startChat(["--offline", "--no-session"], undefined, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("\u001b");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 100));
   assert.equal(session.child.exitCode, null, session.read());
@@ -273,7 +274,7 @@ test("an extension overlay closes on the first Escape and chat remains usable", 
     "--offline", "--no-session", "--no-extensions", "--extension", resolve("examples/custom-overlay.mjs"),
   ], undefined, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/overlay-demo\r");
   await waitForOutput(session.read, "Custom overlay");
   session.child.stdin.write("\u001b");
@@ -353,7 +354,7 @@ test("a bare prompt starts interactive chat and submits the prompt after startup
     "--no-session",
   ], "accessible", {}, false);
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   await waitForOutput(session.read, "received:@\"context file.md\"");
   await waitForOutput(session.read, "fixture context");
   await waitForOutput(session.read, "received:verify it");
@@ -581,7 +582,7 @@ test("extension-only durable sessions survive Ctrl+D and resume by exact ID or l
     await rm(first.root, { recursive: true, force: true });
   });
 
-  await waitForOutput(first.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(first.read, "Rigyn v0.1.7 · Ready");
   first.child.stdin.write("\u001b[200~/remember-extension-only\u001b[201~\r");
   await waitForOutput(first.read, "EXTENSION STATE 1");
   first.child.stdin.write("\u0004");
@@ -594,7 +595,7 @@ test("extension-only durable sessions survive Ctrl+D and resume by exact ID or l
     config: first.config,
     state: first.state,
   }, ["--offline", "--session", sessionId], "full");
-  await waitForOutput(second.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(second.read, "Rigyn v0.1.7 · Ready");
   second.child.stdin.write("\u001b[200~/inspect-extension-only\u001b[201~\r");
   await waitForOutput(second.read, "EXTENSION STATE 1");
   second.child.stdin.write("\u0004");
@@ -606,7 +607,7 @@ test("extension-only durable sessions survive Ctrl+D and resume by exact ID or l
     config: first.config,
     state: first.state,
   }, ["--offline", "--continue"], "full");
-  await waitForOutput(third.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(third.read, "Rigyn v0.1.7 · Ready");
   third.child.stdin.write("\u001b[200~/inspect-extension-only\u001b[201~\r");
   await waitForOutput(third.read, "EXTENSION STATE 1");
   third.child.stdin.write("\u0004");
@@ -662,7 +663,7 @@ else process.stdout.write(Buffer.from(${JSON.stringify(source.toString("base64")
 `);
   }, "full", clipboardEnvironment);
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write(Buffer.from([22]));
   await waitForOutput(session.read, "Attached clipboard image 1x1 via wayland (1/8)");
   session.child.stdin.write("\u001b[200~inspect image\u001b[201~\r");
@@ -724,7 +725,7 @@ test("commands submitted during a response defer in order and never become provi
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
   const submit = (value: string) => session.child.stdin.write(`\u001b[200~${value}\u001b[201~\r`);
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   assert.doesNotMatch(session.read(), /no-model/u);
   submit("begin route");
   await waitForOutput(session.read, "route-streaming");
@@ -786,7 +787,7 @@ test("model command resolves canonical thinking shorthand and rejects ambiguous 
     `);
   });
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/model model-shorthand/beta:high\n");
   await waitForOutput(session.read, "Model model-shorthand/beta · thinking high");
   session.child.stdin.write("verify shorthand\n");
@@ -855,7 +856,7 @@ test("interactive model selection and cycling scope survive a process restart", 
     await rm(first.root, { recursive: true, force: true });
   });
 
-  await waitForOutput(first.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(first.read, "Rigyn v0.1.7 · Ready");
   first.child.stdin.write("first turn\r");
   await waitForOutput(first.read, "restart model alpha:off:first turn");
   first.child.stdin.write("\u001b[200~/model selection-restart/beta:high\u001b[201~\r");
@@ -899,7 +900,7 @@ test("interactive model selection and cycling scope survive a process restart", 
     config: first.config,
     state: first.state,
   }, ["--thread", threadId], "full");
-  await waitForOutput(second.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(second.read, "Rigyn v0.1.7 · Ready");
   second.child.stdin.write("second turn\r");
   await waitForOutput(second.read, "restart model alpha:low:second turn");
   assert.deepEqual((await readFile(providerLog, "utf8")).trim().split("\n"), [
@@ -990,7 +991,7 @@ test("same-workspace resume restores each session's model thinking level", {
   }, "accessible");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
 
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("first\n");
   await waitForOutput(session.read, "thinking high");
   session.child.stdin.write("/resume thinking-low\n");
@@ -1028,7 +1029,7 @@ test("--fork clones the complete saved path before chat startup and -n names the
   }, "accessible");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
 
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/exit\n");
   assert.equal(await finishChat(session), 0, session.read());
 
@@ -1097,7 +1098,7 @@ test("a gated input reducer hands late steering to the normal dispatcher without
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
   const submit = (value: string) => session.child.stdin.write(`\u001b[200~${value}\u001b[201~\r`);
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   submit("begin race");
   await waitForOutput(session.read, "race-streaming");
   submit("late steering");
@@ -1129,7 +1130,7 @@ test("exact name and import commands prompt instead of falling through to the mo
     }
   });
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/name\n");
   await waitForOutput(session.read, "Session name");
   session.child.stdin.write("Prompted name\n");
@@ -1197,7 +1198,7 @@ test("an empty model picker explains /login and cancellation returns to chat", {
 }, async (t) => {
   const session = await startChat([], undefined, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write(Buffer.from([12]));
   await waitForOutput(session.read, "No available models. Use /login to connect a provider.");
   assert.doesNotMatch(session.read(), /Only showing models from configured providers/u);
@@ -1236,7 +1237,7 @@ test("built-in ChatGPT subscription login is visible before authentication and o
 }, async (t) => {
   const session = await startChat();
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/login\n");
   await waitForOutput(session.read, "Use a subscription");
   assert.doesNotMatch(session.read(), /ChatGPT, Claude, Copilot/u);
@@ -1257,7 +1258,7 @@ test("session command renders a human report instead of raw storage JSON", {
   skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
 }, async () => {
   const session = await startChat();
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("/session\n");
   await waitForOutput(session.read, "Messages: 0 user · 0 assistant · 0 tool");
   await waitForOutput(session.read, "Runs: 0 total · 0 completed");
@@ -1277,7 +1278,7 @@ test("scoped-model selector preserves the current scope when no catalog is avail
     }));
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("\u001b[200~/scoped-models\u001b[201~\r");
   await waitForOutput(session.read, "No model catalog is available");
   session.child.stdin.write("\u001b[200~/exit\u001b[201~\r");
@@ -1320,7 +1321,7 @@ test("a provider failure is rendered once and the next command remains usable", 
     });\n`);
   }, "accessible");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   const failureOffset = session.read().length;
   session.child.stdin.write("fail once\n");
   await waitForOutputAfter(session.read, failureOffset, "fixture network unavailable");
@@ -1476,7 +1477,7 @@ test("runtime commands can own a bounded interactive component", {
     };\n`);
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("\u001b[200~/component-command\u001b[201~\r");
   await waitForOutput(session.read, "Passive extension overlay");
   await waitForOutput(session.read, "Interactive extension component");
@@ -1518,7 +1519,7 @@ test("runtime command diagnostics are visible and Escape cancels hung commands a
     };\n`);
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
 
   session.child.stdin.write("\u001b[200~/broken-action\u001b[201~\r");
   await waitForOutput(session.read, "Runtime command handler failed");
@@ -1602,7 +1603,7 @@ test("Escape cancels awaited runtime event observers for agent runs and user she
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
 
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("start run\r");
   await waitForOutput(session.read, "run event observer waiting");
   session.child.stdin.write("\u001b");
@@ -1678,7 +1679,7 @@ test("an extension-requested shutdown cancels an awaited run observer and exits"
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
 
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("request shutdown\r");
   await waitForOutput(session.read, "shutdown observer waiting");
   await waitForFileOutput(shutdownLog, "observer waiting");
@@ -1960,6 +1961,58 @@ test("full reload replaces extension commands and providers without replacing th
   ]);
 });
 
+test("reload defers session preview queries until the session picker is opened", async (t) => {
+  const instrumentation = await mkdtemp(join(tmpdir(), "rigyn-reload-preview-"));
+  const preloadLog = join(instrumentation, "preload.log");
+  const previewLog = join(instrumentation, "preview.log");
+  const preload = join(instrumentation, "preload.mjs");
+  await writeFile(preload, `
+    import { appendFileSync, writeFileSync } from "node:fs";
+    import { SessionStore } from ${JSON.stringify(pathToFileURL(resolve("src/storage/store.js")).href)};
+    writeFileSync(process.env.RIGYN_PRELOAD_LOG, "loaded");
+    const original = SessionStore.prototype.getThreadPreview;
+    SessionStore.prototype.getThreadPreview = function (...args) {
+      appendFileSync(process.env.RIGYN_PREVIEW_LOG, "preview\\n");
+      return original.apply(this, args);
+    };
+  `);
+  t.after(async () => await rm(instrumentation, { recursive: true, force: true }));
+  const session = await startChat(["--thread", "reload-lazy-session"], async ({ state, workspace }) => {
+    const stateDirectory = join(state, "rigyn");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const store = new SessionStore(join(stateDirectory, "sessions.sqlite"));
+    store.createThread({ threadId: "reload-lazy-session", workspaceRoot: workspace });
+    store.createThread({ threadId: "preview-only-session", workspaceRoot: workspace });
+    store.appendEvent({
+      threadId: "preview-only-session",
+      event: {
+        type: "message_appended",
+        message: {
+          id: "preview-only-message",
+          role: "user",
+          content: [{ type: "text", text: "valid during startup" }],
+          createdAt: "2026-07-16T00:00:00.000Z",
+        },
+      },
+    });
+    store.close();
+  }, "accessible", {
+    NODE_OPTIONS: `--import tsx --import ${preload}`,
+    RIGYN_PRELOAD_LOG: preloadLog,
+    RIGYN_PREVIEW_LOG: previewLog,
+  });
+  t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
+  await waitForOutput(session.read, "Ready");
+  assert.equal(await readFile(preloadLog, "utf8"), "loaded");
+  assert.equal(await pathExists(previewLog), false);
+
+  session.child.stdin.write("/reload\r");
+  await waitForOutput(session.read, "Reloaded keybindings, extensions, skills, prompts, themes");
+  assert.equal(await pathExists(previewLog), false);
+  session.child.stdin.write("/exit\r");
+  assert.equal(await finishChat(session), 0, session.read());
+});
+
 test("scoped-model selector persists exact models and settings cancellation preserves them", {
   skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
 }, async (t) => {
@@ -1990,7 +2043,7 @@ test("scoped-model selector persists exact models and settings cancellation pres
     };\n`);
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   const closeOverlay = async (): Promise<void> => {
     const offset = session.read().length;
     session.child.stdin.write("\u001b[27u");
@@ -2108,7 +2161,7 @@ test("settings apply auto-compaction and outbound-image choices immediately and 
     `);
   }, "full");
   t.after(() => { if (first.child.exitCode === null) first.child.kill("SIGKILL"); });
-  await waitForOutput(first.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(first.read, "Rigyn v0.1.7 · Ready");
 
   first.child.stdin.write("\u001b[200~/settings\u001b[201~\r");
   await waitForOutput(first.read, "Auto-compact");
@@ -2151,7 +2204,7 @@ test("settings apply auto-compaction and outbound-image choices immediately and 
     state: first.state,
   }, argumentsValue, "full");
   t.after(() => { if (second.child.exitCode === null) second.child.kill("SIGKILL"); });
-  await waitForOutput(second.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(second.read, "Rigyn v0.1.7 · Ready");
   const restartOffset = second.read().length;
   second.child.stdin.write("\u001b[200~overflow after restart\u001b[201~\r");
   await waitForOutputAfter(second.read, restartOffset, "automatic compaction is disabled");
@@ -2193,7 +2246,7 @@ test("scoped-model reorder persists cycle order and drives forward and backward 
     };\n`);
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("\u001b[200~/scoped-models\u001b[201~\r");
   await waitForOutput(session.read, "Alt+↑/Alt+↓ reorder");
   session.child.stdin.write("beta");
@@ -2485,7 +2538,7 @@ test("full-TUI tree navigation can attach an offline abandoned-branch summary", 
   }, "full");
   t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
   await waitForOutput(session.read, "offline-model");
-  await waitForOutput(session.read, "Rigyn v0.1.6 · Ready");
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
   session.child.stdin.write("\u001b[200~/tree\u001b[201~\r");
   await waitForOutput(session.read, "Session Tree · default · All paths");
   session.child.stdin.write("\u001b[1;5C");
@@ -2836,6 +2889,46 @@ test("typed resume accepts a unique partial name and rejects ambiguous matches i
   const inspection = new SessionStore(database);
   assert.equal(inspection.listThreads().length, 4);
   inspection.close();
+  session.child.stdin.write("/exit\n");
+  assert.equal(await finishChat(session), 0, session.read());
+});
+
+test("cross-workspace resume replays the selected transcript once after switching bindings", {
+  skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
+}, async (t) => {
+  let targetReference = "";
+  const session = await startChat(["--thread", "current-workspace"], async ({ root, workspace, config, state }) => {
+    const otherWorkspace = join(root, "other-workspace");
+    await mkdir(otherWorkspace);
+    const stateDirectory = join(state, "rigyn");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const database = join(stateDirectory, "sessions.sqlite");
+    const store = new SessionStore(database);
+    store.createThread({ threadId: "current-workspace", workspaceRoot: workspace });
+    store.appendEvent({
+      threadId: "current-workspace",
+      event: { type: "warning", code: "current", message: "current transcript marker" },
+    });
+    store.createThread({ threadId: "target-workspace", workspaceRoot: otherWorkspace });
+    store.appendEvent({
+      threadId: "target-workspace",
+      event: { type: "warning", code: "target", message: "target transcript replay marker" },
+    });
+    store.close();
+    const trust = new TrustStore(join(config, "rigyn", "trusted-workspaces.json"));
+    await trust.trust(workspace);
+    await trust.trust(otherWorkspace);
+    targetReference = `${database}#target-workspace`;
+  }, "accessible");
+  t.after(() => { if (session.child.exitCode === null) session.child.kill("SIGKILL"); });
+  await waitForOutput(session.read, "Rigyn v0.1.7 · Ready");
+
+  const resumeOffset = session.read().length;
+  session.child.stdin.write(`/resume --all ${targetReference}\n`);
+  await waitForOutputAfter(session.read, resumeOffset, "Resumed target-workspace in");
+  const resumedOutput = session.read().slice(resumeOffset);
+  assert.equal(resumedOutput.match(/target transcript replay marker/gu)?.length, 1);
+
   session.child.stdin.write("/exit\n");
   assert.equal(await finishChat(session), 0, session.read());
 });

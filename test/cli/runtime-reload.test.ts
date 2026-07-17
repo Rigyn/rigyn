@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { defaultSecretRedactor } from "../../src/auth/redaction.js";
 import { loadRuntime } from "../../src/cli/runtime.js";
-import { EXTENSION_PACKAGE_LOCK } from "../../src/extensions/index.js";
+import { keyedSqliteLeasePath } from "../../src/process/sqlite-lease.js";
 
 async function httpFixture(
   handler: (request: IncomingMessage, response: ServerResponse) => void,
@@ -195,6 +196,14 @@ async function writeConfiguredModel(configHome: string, version: string): Promis
   }));
 }
 
+async function waitForCondition(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 5));
+  }
+}
+
 function commandContext() {
   return {
     args: "value",
@@ -303,6 +312,254 @@ test("runtime reload swaps resources in place and preserves stable session owner
       "start:v2:reload",
       "dispose:v2",
     ]);
+  });
+});
+
+test("runtime reload rejects overlap before constructing a second candidate generation", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "single-flight-reload");
+    const runtimePath = join(directory, "runtime", "index.mjs");
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "single-flight-reload",
+      name: "Single-flight reload",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(runtimePath, `export default (api) => api.registerCommand({ name: "single-flight", execute() { return "v1"; } });\n`);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    const stateKey = "__rigynReloadSingleFlight";
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const state = { activations: 0, gate };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    let reloadDeadlines = 0;
+    Object.defineProperty(AbortSignal, "timeout", {
+      ...timeoutDescriptor,
+      value(milliseconds: number) {
+        if (milliseconds === 60_000) reloadDeadlines += 1;
+        return originalTimeout(milliseconds);
+      },
+    });
+    try {
+      await writeFile(runtimePath, `export default async (api) => {
+        const state = globalThis[${JSON.stringify(stateKey)}];
+        state.activations += 1;
+        await state.gate;
+        api.registerCommand({ name: "single-flight", execute() { return "v2"; } });
+      };\n`);
+      let firstCommits = 0;
+      let secondCommits = 0;
+      const first = runtime.reload({ onCommit() { firstCommits += 1; } });
+      await waitForCondition(() => state.activations === 1, "first reload candidate did not begin activation");
+      const second = runtime.reload({ onCommit() { secondCommits += 1; } });
+      await assert.rejects(second, /reload is already in progress/u);
+      assert.equal(reloadDeadlines, 1);
+      assert.equal(state.activations, 1);
+      release();
+      assert.deepEqual(await first, { warnings: [] });
+      assert.equal(state.activations, 1);
+      assert.equal(firstCommits, 1);
+      assert.equal(secondCommits, 0);
+      assert.equal((await runtime.runtimeExtensions.runCommand("single-flight", commandContext())).prompt, "v2");
+    } finally {
+      release();
+      if (timeoutDescriptor === undefined) delete (AbortSignal as unknown as Record<string, unknown>).timeout;
+      else Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime reload rejects a reentrant reload from its commit callback without deadlocking", async () => {
+  await withRuntimeEnvironment(async ({ workspace }) => {
+    const runtime = await loadRuntime({ workspace, extensions: false, extensionRuntime: false });
+    try {
+      let nestedRejected = false;
+      const result = await runtime.reload({
+        async onCommit() {
+          await assert.rejects(runtime.reload(), /reload is already in progress/u);
+          nestedRejected = true;
+        },
+      });
+      assert.equal(nestedRejected, true);
+      assert.deepEqual(result, { warnings: [] });
+    } finally {
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime reload applies an internal deadline without a caller signal", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "deadline-reload");
+    const runtimePath = join(directory, "runtime", "index.mjs");
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "deadline-reload",
+      name: "Deadline reload",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(runtimePath, `export default (api) => api.registerCommand({ name: "deadline-reload", execute() { return "stable"; } });\n`);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    const stableHost = runtime.runtimeExtensions;
+    const stateKey = "__rigynReloadDeadline";
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const state = { activations: 0, gate };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    const deadline = new AbortController();
+    const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    Object.defineProperty(AbortSignal, "timeout", {
+      ...timeoutDescriptor,
+      value(milliseconds: number) {
+        return milliseconds === 60_000 ? deadline.signal : originalTimeout(milliseconds);
+      },
+    });
+    try {
+      await writeFile(runtimePath, `export default async () => {
+        const state = globalThis[${JSON.stringify(stateKey)}];
+        state.activations += 1;
+        await state.gate;
+      };\n`);
+      const reloading = runtime.reload();
+      await waitForCondition(() => state.activations === 1, "deadline reload candidate did not begin activation");
+      deadline.abort(new Error("internal reload deadline elapsed"));
+      await assert.rejects(reloading, /internal reload deadline elapsed/u);
+      assert.equal(runtime.runtimeExtensions, stableHost);
+      assert.equal((await stableHost.runCommand("deadline-reload", commandContext())).prompt, "stable");
+    } finally {
+      release();
+      if (timeoutDescriptor === undefined) delete (AbortSignal as unknown as Record<string, unknown>).timeout;
+      else Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime reload bounds a commit callback that never settles", async () => {
+  await withRuntimeEnvironment(async ({ workspace }) => {
+    const runtime = await loadRuntime({ workspace, extensions: false, extensionRuntime: false });
+    const deadline = new AbortController();
+    const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    let commitDeadlineUsed = false;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    Object.defineProperty(AbortSignal, "timeout", {
+      ...timeoutDescriptor,
+      value(milliseconds: number) {
+        if (milliseconds === 5_000 && !commitDeadlineUsed) {
+          commitDeadlineUsed = true;
+          return deadline.signal;
+        }
+        return originalTimeout(milliseconds);
+      },
+    });
+    try {
+      const reloading = runtime.reload({
+        onCommit() {
+          started();
+          return new Promise<void>(() => {});
+        },
+      });
+      await ready;
+      deadline.abort(new Error("commit deadline elapsed"));
+      const result = await reloading;
+      assert.equal(commitDeadlineUsed, true);
+      assert.match(result.warnings.join("\n"), /Runtime reload commit callback timed out after 5000ms/u);
+    } finally {
+      deadline.abort(new Error("test complete"));
+      if (timeoutDescriptor === undefined) delete (AbortSignal as unknown as Record<string, unknown>).timeout;
+      else Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime reload restarts the previous extension session with a fresh signal after cancellation", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "rollback-signal");
+    const runtimePath = join(directory, "runtime", "index.mjs");
+    const stateKey = "__rigynReloadRollbackSignal";
+    const state = { starts: [] as string[], ends: 0, abort: () => {} };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "rollback-signal",
+      name: "Rollback signal",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    const source = (version: string) => `export default (api) => {
+      const state = globalThis[${JSON.stringify(stateKey)}];
+      const version = ${JSON.stringify(version)};
+      api.registerCommand({ name: "rollback-signal", execute() { return version; } });
+      api.on("session_end", (event) => {
+        if (version === "v1" && event.reason === "reload") {
+          state.ends += 1;
+          state.abort();
+        }
+      });
+      api.on("session_start", (event) => state.starts.push(version + ":" + event.reason));
+    };\n`;
+    await writeFile(runtimePath, source("v1"));
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    const controller = new AbortController();
+    state.abort = () => controller.abort(new Error("cancel reload after session end"));
+    try {
+      await writeFile(runtimePath, source("v2"));
+      await assert.rejects(runtime.reload({
+        session: { threadId: "rollback-thread" },
+        signal: controller.signal,
+      }), /cancel reload after session end/u);
+      assert.equal(state.ends, 1);
+      assert.deepEqual(state.starts, ["v1:reload_rollback"]);
+      assert.equal((await runtime.runtimeExtensions.runCommand("rollback-signal", commandContext())).prompt, "v1");
+    } finally {
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
+  });
+});
+
+test("runtime close aborts and settles an in-flight reload before tearing down the live generation", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "close-reload");
+    const runtimePath = join(directory, "runtime", "index.mjs");
+    const stateKey = "__rigynCloseReload";
+    const state = { activations: 0 };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "close-reload",
+      name: "Close reload",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(runtimePath, "export default () => {};\n");
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    try {
+      await writeFile(runtimePath, `export default async (api) => {
+        globalThis[${JSON.stringify(stateKey)}].activations += 1;
+        await new Promise((resolve) => api.signal.addEventListener("abort", resolve, { once: true }));
+      };\n`);
+      const reloading = runtime.reload();
+      const rejected = assert.rejects(reloading, /Runtime closed while reload was in progress/u);
+      await waitForCondition(() => state.activations === 1, "reload activation did not begin");
+      await runtime.close();
+      await rejected;
+      assert.equal(state.activations, 1);
+    } finally {
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
   });
 });
 
@@ -549,6 +806,123 @@ test("session-start registrations reach the live runtime and are removed on clos
   });
 });
 
+test("extension provider adapters are disposed exactly once across reload and close", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "provider-disposal");
+    const runtimePath = join(directory, "runtime", "index.mjs");
+    const stateKey = "__rigynProviderDisposal";
+    const state = { generation: 0, disposed: [] as number[] };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "provider-disposal",
+      name: "Provider disposal",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(runtimePath, `export default (api) => {
+      const state = globalThis[${JSON.stringify(stateKey)}];
+      const generation = ++state.generation;
+      for (const [id, offset] of [["disposable-provider", 0], ["openai", 100]]) {
+        api.registerProvider({
+          id,
+          async *stream() {},
+          async listModels() { return []; },
+          dispose() { state.disposed.push(generation + offset); },
+        });
+      }
+    };\n`);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    try {
+      await runtime.reload();
+      assert.deepEqual(state.disposed.sort((left, right) => left - right), [1, 101]);
+      await runtime.close();
+      assert.deepEqual(state.disposed.sort((left, right) => left - right), [1, 2, 101, 102]);
+      await runtime.close();
+      assert.deepEqual(state.disposed.sort((left, right) => left - right), [1, 2, 101, 102]);
+    } finally {
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
+  });
+});
+
+test("extension provider disposal aggregates failures without skipping adapters", async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "provider-disposal-failures");
+    const stateKey = "__rigynProviderDisposalFailures";
+    const state = { disposed: [] as string[] };
+    (globalThis as Record<string, unknown>)[stateKey] = state;
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "provider-disposal-failures",
+      name: "Provider disposal failures",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(join(directory, "runtime", "index.mjs"), `export default (api) => {
+      const state = globalThis[${JSON.stringify(stateKey)}];
+      for (const id of ["first", "second", "third"]) {
+        api.registerProvider({
+          id: "disposal-" + id,
+          async *stream() {},
+          async listModels() { return []; },
+          dispose() {
+            state.disposed.push(id);
+            if (id !== "third") throw new Error(id + " provider disposal failed");
+          },
+        });
+      }
+    };\n`);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    try {
+      await assert.rejects(runtime.close(), (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(
+          error.errors.map((entry) => entry instanceof Error ? entry.message : String(entry)).sort(),
+          ["first provider disposal failed", "second provider disposal failed"],
+        );
+        return true;
+      });
+      assert.deepEqual(state.disposed.sort(), ["first", "second", "third"]);
+      await runtime.close();
+      assert.deepEqual(state.disposed.sort(), ["first", "second", "third"]);
+    } finally {
+      delete (globalThis as Record<string, unknown>)[stateKey];
+      await runtime.close();
+    }
+  });
+});
+
+test("extension provider disposal cannot hold runtime shutdown open indefinitely", { timeout: 5_000 }, async () => {
+  await withRuntimeEnvironment(async ({ workspace, configHome }) => {
+    const directory = join(configHome, "rigyn", "extensions", "provider-disposal-timeout");
+    await mkdir(join(directory, "runtime"), { recursive: true });
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "provider-disposal-timeout",
+      name: "Provider disposal timeout",
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+    await writeFile(join(directory, "runtime", "index.mjs"), `export default (api) => {
+      api.registerProvider({
+        id: "hung-provider",
+        async *stream() {},
+        async listModels() { return []; },
+        dispose() { return new Promise(() => {}); },
+      });
+    };\n`);
+    const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
+    const startedAt = Date.now();
+    try {
+      await assert.rejects(runtime.close(), /Provider hung-provider disposal timed out after 1000ms/u);
+      assert.ok(Date.now() - startedAt < 3_000, "provider disposal exceeded its runtime shutdown bound");
+    } finally {
+      await runtime.close();
+    }
+  });
+});
+
 test("runtime provider auth cannot reuse another provider's credential binding", async () => {
   await withRuntimeEnvironment(async ({ workspace, configHome }) => {
     const directory = join(configHome, "rigyn", "extensions", "credential-alias");
@@ -676,18 +1050,20 @@ test("a pre-commit reload failure leaves the previous generation operational", a
 test("runtime reload can be cancelled while extension package listing waits for a lock", async () => {
   await withRuntimeEnvironment(async ({ workspace }) => {
     const runtime = await loadRuntime({ workspace, extensions: true, extensionRuntime: true });
-    const lock = join(runtime.paths.userExtensions, EXTENSION_PACKAGE_LOCK);
     const controller = new AbortController();
     await mkdir(runtime.paths.userExtensions, { recursive: true });
-    await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "held", createdAt: Date.now() })}\n`);
+    const leaseRoot = join(runtime.paths.stateDirectory, "package-leases");
+    await mkdir(leaseRoot, { recursive: true, mode: 0o700 });
+    const lock = await keyedSqliteLeasePath(leaseRoot, "extension-packages", runtime.paths.userExtensions);
+    const held = new DatabaseSync(lock);
+    held.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
     const cancel = setTimeout(() => controller.abort(new Error("cancel runtime reload")), 25);
-    const release = setTimeout(() => { void rm(lock, { force: true }); }, 150);
     try {
       await assert.rejects(runtime.reload({ signal: controller.signal }), /cancel runtime reload/u);
     } finally {
       clearTimeout(cancel);
-      clearTimeout(release);
-      await rm(lock, { force: true });
+      held.exec("ROLLBACK");
+      held.close();
       await runtime.close();
     }
   });

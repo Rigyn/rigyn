@@ -464,6 +464,58 @@ test("runtime activation is time-bounded, aborts its generation, and rolls back 
   delete (globalThis as Record<string, unknown>).__runtimeTimeoutDisposed;
 });
 
+test("runtime extension loading has one aggregate deadline across entries", { timeout: 2_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-load-timeout-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const hanging = `export default async (api) => {
+    globalThis.__runtimeLoadStarts = (globalThis.__runtimeLoadStarts ?? 0) + 1;
+    await new Promise((resolve) => api.signal.addEventListener("abort", resolve, { once: true }));
+  };\n`;
+  const final = `export default () => { globalThis.__runtimeLoadFinalActivated = true; };\n`;
+  const entries = [];
+  for (const [index, source] of [hanging, hanging, final].entries()) {
+    const sourcePath = join(root, `extension-${index}.mjs`);
+    await writeFile(sourcePath, source);
+    entries.push({ extensionId: `extension-${index}`, sourcePath, sha256: sha256(source) });
+  }
+
+  const host = await loadRuntimeExtensions(entries, {
+    workspace: root,
+    activationTimeoutMs: 40,
+    loadTimeoutMs: 65,
+    shutdownTimeoutMs: 10,
+  });
+
+  assert.equal((globalThis as Record<string, unknown>).__runtimeLoadStarts, 2);
+  assert.equal((globalThis as Record<string, unknown>).__runtimeLoadFinalActivated, undefined);
+  assert.match(host.diagnostics()[0]?.message ?? "", /activation timed out after 40ms/u);
+  assert.match(host.diagnostics()[1]?.message ?? "", /load timed out after 65ms/u);
+  await host.close();
+  delete (globalThis as Record<string, unknown>).__runtimeLoadStarts;
+  delete (globalThis as Record<string, unknown>).__runtimeLoadFinalActivated;
+});
+
+test("failed activation reports bounded disposer cleanup failures", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-activation-cleanup-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "activation-cleanup.mjs");
+  const source = `export default (api) => {
+    api.onDispose(() => new Promise(() => {}));
+    throw new Error("activation cleanup fixture");
+  };\n`;
+  await writeFile(sourcePath, source);
+
+  const host = await loadRuntimeExtensions([{
+    extensionId: "activation-cleanup",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root, shutdownTimeoutMs: 15 });
+
+  assert.match(host.diagnostics()[0]?.message ?? "", /activation cleanup fixture/u);
+  assert.match(host.diagnostics()[1]?.message ?? "", /activation disposer cleanup timed out after 15ms/u);
+  await host.close();
+});
+
 test("runtime tool prompt metadata rejects invalid guidance transactionally", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-tool-prompt-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));

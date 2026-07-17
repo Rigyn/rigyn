@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { setTimeout as wait } from "node:timers/promises";
 
-import { CURRENT_SCHEMA_VERSION, migrateDatabase } from "../../src/storage/index.js";
+import { configureDatabase, CURRENT_SCHEMA_VERSION, migrateDatabase } from "../../src/storage/index.js";
 
 const timestamp = "2026-01-01T00:00:00.000Z";
 const legacyTables = ["approvals", "checkpoints", "background_jobs", "memories", "todos"] as const;
@@ -22,6 +27,11 @@ function migrationVersions(database: DatabaseSync): number[] {
 
 function createVersion13Fixture(database: DatabaseSync): void {
   migrateDatabase(database);
+  database.exec(`
+    DROP TABLE runtime_queue_owners;
+    DROP TABLE runtime_run_owners;
+    DROP TABLE runtime_owners;
+  `);
   database.exec("PRAGMA ignore_check_constraints = ON");
   try {
     database.prepare(`
@@ -99,14 +109,136 @@ function createVersion13Fixture(database: DatabaseSync): void {
   `);
 }
 
-test("the retained v13 fixture upgrades to v14 with ordered history and preserved event identity", () => {
+function createVersion14Fixture(database: DatabaseSync): void {
+  migrateDatabase(database);
+  database.exec(`
+    DROP TABLE runtime_queue_owners;
+    DROP TABLE runtime_run_owners;
+    DROP TABLE runtime_owners;
+    DELETE FROM schema_migrations WHERE version = 15;
+    INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, '${timestamp}');
+    PRAGMA user_version = 14;
+  `);
+}
+
+function migrationChild(path: string, gatePath?: string, openStore = false): {
+  ready: Promise<void>;
+  completed: Promise<void>;
+  kill(): void;
+} {
+  const source = `
+    import { DatabaseSync } from "node:sqlite";
+    import { existsSync } from "node:fs";
+    import { setTimeout as wait } from "node:timers/promises";
+    import { migrateDatabase } from "./src/storage/migrations.ts";
+    import { SessionStore } from "./src/storage/store.ts";
+    ${gatePath === undefined ? "" : `
+      process.stdout.write("ready\\n");
+      while (!existsSync(${JSON.stringify(gatePath)})) await wait(2);
+    `}
+    ${openStore
+      ? `const store = new SessionStore(${JSON.stringify(path)}, { busyTimeoutMs: 10_000 });
+         store.close();`
+      : `const database = new DatabaseSync(${JSON.stringify(path)}, { timeout: 10_000 });
+         ${gatePath === undefined ? "process.stdout.write(\"ready\\n\");" : ""}
+         migrateDatabase(database, 10_000);
+         database.close();`}
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  let readyResolved = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+    if (!readyResolved && stdout.includes("ready\n")) {
+      readyResolved = true;
+      resolveReady();
+    }
+  });
+  child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+  const completed = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (!readyResolved) rejectReady(new Error(`migration child exited before ready: ${stderr}`));
+      if (code === 0) resolve();
+      else reject(new Error(`migration child exited ${String(code)}: ${stderr}`));
+    });
+  });
+  return { ready, completed, kill: () => child.kill("SIGKILL") };
+}
+
+async function assertUntouchedConcurrentMigration(path: string, processCount = 6): Promise<void> {
+  const gatePath = `${path}.gate`;
+  const children = Array.from({ length: processCount }, () => migrationChild(path, gatePath, true));
+  try {
+    await Promise.all(children.map(async (child) => await child.ready));
+    writeFileSync(gatePath, "go", { mode: 0o600 });
+    await Promise.all(children.map(async (child) => await child.completed));
+  } catch (error) {
+    for (const child of children) child.kill();
+    throw error;
+  }
+
+  const inspection = new DatabaseSync(path);
+  try {
+    assert.equal(userVersion(inspection), CURRENT_SCHEMA_VERSION);
+    assert.equal(migrationVersions(inspection).at(-1), CURRENT_SCHEMA_VERSION);
+    assert.deepEqual(inspection.prepare("PRAGMA quick_check").all().map((row) => Object.values(row)), [["ok"]]);
+  } finally {
+    inspection.close();
+  }
+}
+
+async function assertConcurrentMigration(path: string, prepare?: (database: DatabaseSync) => void): Promise<void> {
+  const locker = new DatabaseSync(path, { timeout: 10_000 });
+  let children: ReturnType<typeof migrationChild>[] = [];
+  try {
+    prepare?.(locker);
+    configureDatabase(locker, 10_000);
+    locker.exec("BEGIN IMMEDIATE");
+    children = [migrationChild(path), migrationChild(path)];
+    await Promise.all(children.map(async (child) => await child.ready));
+    await wait(150);
+    locker.exec("COMMIT");
+    await Promise.all(children.map(async (child) => await child.completed));
+  } catch (error) {
+    try { locker.exec("ROLLBACK"); } catch { /* The lock may already be committed. */ }
+    for (const child of children) child.kill();
+    throw error;
+  } finally {
+    locker.close();
+  }
+
+  const inspection = new DatabaseSync(path);
+  try {
+    assert.equal(userVersion(inspection), CURRENT_SCHEMA_VERSION);
+    assert.deepEqual(migrationVersions(inspection).at(-1), CURRENT_SCHEMA_VERSION);
+    assert.deepEqual(inspection.prepare("PRAGMA quick_check").all().map((row) => Object.values(row)), [["ok"]]);
+  } finally {
+    inspection.close();
+  }
+}
+
+test("the retained v13 fixture upgrades through v15 with ordered history and preserved event identity", () => {
   const database = new DatabaseSync(":memory:");
   createVersion13Fixture(database);
 
   migrateDatabase(database);
 
   assert.equal(userVersion(database), CURRENT_SCHEMA_VERSION);
-  assert.deepEqual(migrationVersions(database), [13, 14]);
+  assert.deepEqual(migrationVersions(database), [13, 14, 15]);
+  assert.equal(tableExists(database, "runtime_owners"), true);
+  assert.equal(tableExists(database, "runtime_run_owners"), true);
+  assert.equal(tableExists(database, "runtime_queue_owners"), true);
   assert.equal(database.prepare("SELECT state FROM runs WHERE run_id = 'run_v13'").get()?.state, "tool_planning");
   const memory = database.prepare("SELECT * FROM events WHERE event_id = 'event_v13_memory'").get() as {
     event_id: string;
@@ -177,6 +309,72 @@ test("a late v13 migration failure rolls back data, retired tables, history, and
   assert.equal(memory.message.purpose, "memory");
   for (const table of legacyTables) assert.equal(tableExists(database, table), true);
   database.close();
+});
+
+test("the v14 owner-fencing migration creates all tables atomically", () => {
+  const database = new DatabaseSync(":memory:");
+  createVersion14Fixture(database);
+
+  migrateDatabase(database);
+
+  assert.equal(userVersion(database), 15);
+  assert.deepEqual(migrationVersions(database), [14, 15]);
+  assert.equal(tableExists(database, "runtime_owners"), true);
+  assert.equal(tableExists(database, "runtime_run_owners"), true);
+  assert.equal(tableExists(database, "runtime_queue_owners"), true);
+  database.close();
+});
+
+test("a late v15 migration failure rolls back every owner-fencing table", () => {
+  const database = new DatabaseSync(":memory:");
+  createVersion14Fixture(database);
+  database.exec(`
+    CREATE TRIGGER reject_v15_history
+    BEFORE INSERT ON schema_migrations
+    WHEN NEW.version = 15
+    BEGIN
+      SELECT RAISE(ABORT, 'fixture v15 migration failure');
+    END;
+  `);
+
+  assert.throws(() => migrateDatabase(database), /fixture v15 migration failure/u);
+
+  assert.equal(userVersion(database), 14);
+  assert.deepEqual(migrationVersions(database), [14]);
+  assert.equal(tableExists(database, "runtime_owners"), false);
+  assert.equal(tableExists(database, "runtime_run_owners"), false);
+  assert.equal(tableExists(database, "runtime_queue_owners"), false);
+  database.close();
+});
+
+test("an untouched database tolerates simultaneous first opens before WAL exists", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rigyn-untouched-migration-race-"));
+  try {
+    await assertUntouchedConcurrentMigration(join(directory, "sessions.sqlite"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent processes serialize first-time schema creation before reading user_version", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rigyn-fresh-migration-race-"));
+  try {
+    await assertConcurrentMigration(join(directory, "sessions.sqlite"));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent processes serialize v14 upgrades before reading user_version", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rigyn-upgrade-migration-race-"));
+  try {
+    await assertConcurrentMigration(
+      join(directory, "sessions.sqlite"),
+      (database) => createVersion14Fixture(database),
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("fresh-schema failure rolls back migration metadata and leaves existing unversioned data untouched", () => {

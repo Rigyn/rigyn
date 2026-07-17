@@ -1663,6 +1663,19 @@ test("session picker exposes sort, named, path, and threaded controls", async ()
   controller.close();
 });
 
+test("opening the session picker from its shortcut requests one lazy catalog refresh", async () => {
+  const actions: TuiAction[] = [];
+  const { input, controller } = fullController({ actions });
+  controller.start();
+  controller.setPickerItems("session", []);
+
+  input.write("\u001bs");
+  await tick();
+
+  assert.deepEqual(actions, [{ type: "session_open" }]);
+  controller.close();
+});
+
 test("session picker switches live between current and all-workspace catalogs", async () => {
   const actions: TuiAction[] = [];
   const { input, output, controller } = fullController({ actions });
@@ -1757,6 +1770,9 @@ test("session picker renames, confirms deletion, and protects the active session
   ]);
 
   input.write("\u001bs");
+  await tick();
+  assert.deepEqual(actions, [{ type: "session_open" }]);
+  actions.length = 0;
   input.write(Buffer.from([18]));
   input.write(Buffer.from([21]));
   input.write("Renamed active\r");
@@ -2124,6 +2140,32 @@ test("accessibility transcript replacement does not lose visible history behind 
 
   assert.match(output.text, /retained visible history/u);
   assert.doesNotMatch(output.text, /\u001b/u);
+  controller.close();
+});
+
+test("classic transcript replacement writes only the retained bounded projection", () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const controller = new TuiController({
+    input,
+    output,
+    mode: "classic",
+    limits: { maxTranscriptEntries: 3 },
+    environment: { TERM: "dumb", RIGYN_ASCII: "1", NO_COLOR: "1" },
+    handleSignals: false,
+  });
+  controller.start();
+  output.chunks.length = 0;
+  const events = Array.from({ length: 5 }, (_, index) => envelope({
+    type: "warning",
+    code: `history-${index + 1}`,
+    message: `saved warning ${index + 1}`,
+  }, index + 1));
+
+  controller.replaceTranscript(events, "main");
+
+  assert.doesNotMatch(output.text, /saved warning [12]/u);
+  assert.equal(output.text.match(/saved warning [345]/gu)?.length, 3);
   controller.close();
 });
 

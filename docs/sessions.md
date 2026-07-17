@@ -35,6 +35,8 @@ The all-workspace catalog is a derived private index, not the source of session 
 
 Resuming a session and remembering across sessions are different contracts. `/resume`, `--continue`, and `--session` restore the exact durable thread, including its branch, model, thinking level, summaries, and recent history. A new session does not silently import facts from unrelated conversations. Cross-session recall is an opt-in extension concern: use the bounded `api.listSessions` plus `api.getTranscript` surface and store any derived index under the extension's owned data path. This keeps private history scoped and makes memory behavior visible and removable.
 
+Interactive resume rebuilds only a bounded recent transcript projection so a very large saved thread cannot freeze the terminal. Older events remain in the canonical session, continue to participate in provider-context reconstruction and exports, and are never deleted by this display limit.
+
 ## Event model
 
 The store records immutable, monotonically sequenced events. Branches point to event heads, runs record lifecycle state, and artifacts hold bounded binary outputs. A canonical message may contain text, images, tool calls, tool results, or provider-owned opaque state. Provider state is projected only back to its compatible adapter.
@@ -45,7 +47,7 @@ SQLite foreign keys prevent branches, runs, events, and artifacts from crossing 
 
 The session database has an integer SQLite schema version and an ordered `schema_migrations` history. A fresh database is created directly at the current schema. An existing supported database is upgraded through every retained intermediate migration in one `BEGIN IMMEDIATE` transaction; data changes, migration-history rows, and `PRAGMA user_version` commit together or all roll back. A database from a newer Rigyn build is refused before migration metadata is written.
 
-Rigyn is pre-1.0, so the supported upgrade floor is explicit rather than implied. This build uses schema 14 and supports a direct upgrade from schema 13. Schemas 1 through 12 predate the retained migration history and are refused without schema changes; use the corresponding older build to upgrade or export them before opening the result with this build. Keep a backup before crossing pre-release versions.
+Rigyn is pre-1.0, so the supported upgrade floor is explicit rather than implied. This build uses schema 15 and supports a direct upgrade from schema 13. Schemas 1 through 12 predate the retained migration history and are refused without schema changes; use the corresponding older build to upgrade or export them before opening the result with this build. Keep a backup before crossing pre-release versions.
 
 From schema 13 onward, schema changes must append an ordered migration instead of replacing an older step. Each step has a predecessor fixture and rollback coverage. Raising the upgrade floor before 1.0 requires an explicit release note and a documented export or intermediate-upgrade path.
 
@@ -58,6 +60,8 @@ Run `rigyn sessions doctor` with every Rigyn process closed when a session datab
 If doctor reports only rebuildable index damage, run `rigyn sessions repair --reindex --yes`. Repair creates a private, uniquely named pre-repair backup beside `sessions.sqlite`, rebuilds indexes inside a transaction, and commits only after the full integrity and foreign-key checks pass. A failed check rolls the repair back and retains the backup path shown in the error. The command never deletes data or attempts general page recovery; restore a verified backup for table/page damage or foreign-key violations.
 
 ## Crash recovery
+
+Each active runtime holds a UUID lease in SQLite. The process ID is stored only for diagnostics; ownership is fenced by the UUID and a monotonically increasing generation, with a renewable expiry. Active runs and in-flight queue items carry that ownership token. A second live runtime can read the same database but cannot recover or mutate another live runtime's work. Clean shutdown closes the lease. An expiry makes abandoned work eligible for recovery, but the same generation may renew late after a suspend or event-loop delay when no recovery won the SQLite write race. Recovery atomically closes an expired owner before claiming its work, so a stale generation cannot renew or write afterward.
 
 On startup, unfinished runs are inspected against their durable events:
 

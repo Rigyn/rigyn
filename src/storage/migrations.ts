@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 15;
 const EARLIEST_UPGRADABLE_SCHEMA_VERSION = 13;
 
 interface SchemaMigration {
@@ -120,6 +120,38 @@ const CURRENT_SCHEMA = `
     ON run_input_queue(thread_id, branch_name, queue_sequence);
   CREATE INDEX run_input_queue_state_idx
     ON run_input_queue(state, thread_id, branch_name, queue_sequence);
+
+  CREATE TABLE runtime_owners (
+    owner_id TEXT PRIMARY KEY CHECK (length(owner_id) = 36),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    pid INTEGER NOT NULL CHECK (pid >= 0),
+    state TEXT NOT NULL CHECK (state IN ('active', 'closed')),
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    closed_at TEXT
+  ) STRICT;
+
+  CREATE INDEX runtime_owners_expiry_idx
+    ON runtime_owners(state, expires_at);
+
+  CREATE TABLE runtime_run_owners (
+    run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL REFERENCES runtime_owners(owner_id) ON DELETE RESTRICT,
+    owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1)
+  ) STRICT;
+
+  CREATE INDEX runtime_run_owners_owner_idx
+    ON runtime_run_owners(owner_id, owner_generation);
+
+  CREATE TABLE runtime_queue_owners (
+    queue_id TEXT PRIMARY KEY REFERENCES run_input_queue(queue_id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL REFERENCES runtime_owners(owner_id) ON DELETE RESTRICT,
+    owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1)
+  ) STRICT;
+
+  CREATE INDEX runtime_queue_owners_owner_idx
+    ON runtime_queue_owners(owner_id, owner_generation);
 `;
 
 const PRE_RELEASE_V13_CLEANUP = `
@@ -146,8 +178,43 @@ const PRE_RELEASE_V13_CLEANUP = `
   DROP TABLE IF EXISTS todos;
 `;
 
+const RUNTIME_OWNER_FENCING = `
+  CREATE TABLE runtime_owners (
+    owner_id TEXT PRIMARY KEY CHECK (length(owner_id) = 36),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    pid INTEGER NOT NULL CHECK (pid >= 0),
+    state TEXT NOT NULL CHECK (state IN ('active', 'closed')),
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    closed_at TEXT
+  ) STRICT;
+
+  CREATE INDEX runtime_owners_expiry_idx
+    ON runtime_owners(state, expires_at);
+
+  CREATE TABLE runtime_run_owners (
+    run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL REFERENCES runtime_owners(owner_id) ON DELETE RESTRICT,
+    owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1)
+  ) STRICT;
+
+  CREATE INDEX runtime_run_owners_owner_idx
+    ON runtime_run_owners(owner_id, owner_generation);
+
+  CREATE TABLE runtime_queue_owners (
+    queue_id TEXT PRIMARY KEY REFERENCES run_input_queue(queue_id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL REFERENCES runtime_owners(owner_id) ON DELETE RESTRICT,
+    owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1)
+  ) STRICT;
+
+  CREATE INDEX runtime_queue_owners_owner_idx
+    ON runtime_queue_owners(owner_id, owner_generation);
+`;
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = Object.freeze([
   { version: 14, sql: PRE_RELEASE_V13_CLEANUP },
+  { version: 15, sql: RUNTIME_OWNER_FENCING },
 ]);
 
 function scalarNumber(value: unknown, label: string): number {
@@ -157,6 +224,40 @@ function scalarNumber(value: unknown, label: string): number {
   return value;
 }
 
+const SQLITE_RETRY_CELL = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+const MAX_JOURNAL_MODE_RETRY_MS = 30_000;
+
+function sqliteLockContention(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: unknown }).code;
+  const errcode = (error as Error & { errcode?: unknown }).errcode;
+  return code === "SQLITE_BUSY"
+    || code === "SQLITE_LOCKED"
+    || errcode === 5
+    || errcode === 6
+    || /\b(?:database|database table|schema) (?:is )?locked\b/iu.test(error.message);
+}
+
+function configureWal(database: DatabaseSync, busyTimeoutMs: number): void {
+  const deadline = Date.now() + Math.min(busyTimeoutMs, MAX_JOURNAL_MODE_RETRY_MS);
+  let delayMs = 1;
+  while (true) {
+    try {
+      const row = database.prepare("PRAGMA journal_mode").get() as Record<string, unknown> | undefined;
+      const current = row === undefined ? undefined : Object.values(row)[0];
+      if (typeof current === "string" && current.toLowerCase() === "wal") return;
+      database.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (error) {
+      const remainingMs = deadline - Date.now();
+      if (!sqliteLockContention(error) || remainingMs <= 0) throw error;
+      const pauseMs = Math.max(1, Math.min(delayMs, remainingMs, 50));
+      Atomics.wait(SQLITE_RETRY_CELL, 0, 0, pauseMs);
+      delayMs = Math.min(delayMs * 2, 50);
+    }
+  }
+}
+
 export function configureDatabase(database: DatabaseSync, busyTimeoutMs = 5_000): void {
   if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
     throw new RangeError("busyTimeoutMs must be a non-negative safe integer");
@@ -164,7 +265,7 @@ export function configureDatabase(database: DatabaseSync, busyTimeoutMs = 5_000)
   database.exec("PRAGMA foreign_keys = ON");
   database.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
   database.exec("PRAGMA synchronous = FULL");
-  database.exec("PRAGMA journal_mode = WAL");
+  configureWal(database, busyTimeoutMs);
 }
 
 function recordMigration(database: DatabaseSync, version: number): void {
@@ -174,58 +275,46 @@ function recordMigration(database: DatabaseSync, version: number): void {
   database.exec(`PRAGMA user_version = ${version}`);
 }
 
-function applyFreshSchema(database: DatabaseSync): void {
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    database.exec(MIGRATION_TABLE);
-    database.exec(CURRENT_SCHEMA);
-    recordMigration(database, CURRENT_SCHEMA_VERSION);
-    database.exec("COMMIT");
-  } catch (error) {
-    database.exec("ROLLBACK");
-    throw error;
-  }
+function applyFreshSchemaInTransaction(database: DatabaseSync): void {
+  database.exec(MIGRATION_TABLE);
+  database.exec(CURRENT_SCHEMA);
+  recordMigration(database, CURRENT_SCHEMA_VERSION);
 }
 
-function applyUpgradePath(database: DatabaseSync, currentVersion: number): void {
+function applyUpgradePathInTransaction(database: DatabaseSync, currentVersion: number): void {
   const migrations = new Map(SCHEMA_MIGRATIONS.map((migration) => [migration.version, migration]));
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    database.exec(MIGRATION_TABLE);
-    for (let version = currentVersion + 1; version <= CURRENT_SCHEMA_VERSION; version += 1) {
-      const migration = migrations.get(version);
-      if (migration === undefined) throw new Error(`Missing database migration from schema ${version - 1} to ${version}`);
-      database.exec(migration.sql);
-      recordMigration(database, version);
-    }
-    database.exec("COMMIT");
-  } catch (error) {
-    database.exec("ROLLBACK");
-    throw error;
+  database.exec(MIGRATION_TABLE);
+  for (let version = currentVersion + 1; version <= CURRENT_SCHEMA_VERSION; version += 1) {
+    const migration = migrations.get(version);
+    if (migration === undefined) throw new Error(`Missing database migration from schema ${version - 1} to ${version}`);
+    database.exec(migration.sql);
+    recordMigration(database, version);
   }
 }
 
 export function migrateDatabase(database: DatabaseSync, busyTimeoutMs = 5_000): void {
-  const versionRow = database.prepare("PRAGMA user_version").get() as
-    | { user_version?: unknown }
-    | undefined;
-  const currentVersion = scalarNumber(versionRow?.user_version, "user_version");
-  if (currentVersion > CURRENT_SCHEMA_VERSION) {
-    throw new Error(
-      `Database schema ${currentVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}`,
-    );
-  }
-  if (currentVersion !== 0 && currentVersion < EARLIEST_UPGRADABLE_SCHEMA_VERSION) {
-    throw new Error(
-      `Pre-release database schema ${currentVersion} is not directly upgradeable; the retained upgrade path starts at schema ${EARLIEST_UPGRADABLE_SCHEMA_VERSION}`,
-    );
-  }
-
   configureDatabase(database, busyTimeoutMs);
-  if (currentVersion === CURRENT_SCHEMA_VERSION) return;
-  if (currentVersion === 0) {
-    applyFreshSchema(database);
-    return;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const versionRow = database.prepare("PRAGMA user_version").get() as
+      | { user_version?: unknown }
+      | undefined;
+    const currentVersion = scalarNumber(versionRow?.user_version, "user_version");
+    if (currentVersion > CURRENT_SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema ${currentVersion} is newer than supported schema ${CURRENT_SCHEMA_VERSION}`,
+      );
+    }
+    if (currentVersion !== 0 && currentVersion < EARLIEST_UPGRADABLE_SCHEMA_VERSION) {
+      throw new Error(
+        `Pre-release database schema ${currentVersion} is not directly upgradeable; the retained upgrade path starts at schema ${EARLIEST_UPGRADABLE_SCHEMA_VERSION}`,
+      );
+    }
+    if (currentVersion === 0) applyFreshSchemaInTransaction(database);
+    else if (currentVersion !== CURRENT_SCHEMA_VERSION) applyUpgradePathInTransaction(database, currentVersion);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
   }
-  applyUpgradePath(database, currentVersion);
 }

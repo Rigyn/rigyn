@@ -136,7 +136,9 @@ const MAX_RUNTIME_USER_SHELL_COMMAND_BYTES = 128 * 1024;
 const MAX_RUNTIME_USER_SHELL_CWD_BYTES = 16 * 1024;
 const MAX_RUNTIME_USER_SHELL_RESULT_BYTES = 1024 * 1024;
 export const DEFAULT_RUNTIME_EXTENSION_ACTIVATION_TIMEOUT_MS = 30_000;
+export const DEFAULT_RUNTIME_EXTENSION_LOAD_TIMEOUT_MS = 30_000;
 export const DEFAULT_RUNTIME_EXTENSION_SHUTDOWN_TIMEOUT_MS = 5_000;
+export const DEFAULT_RUNTIME_RESOURCE_DISCOVERY_TIMEOUT_MS = 30_000;
 let runtimeImportGeneration = 0;
 
 export type RuntimeExtensionEvent =
@@ -2540,6 +2542,45 @@ async function withAbort<T>(value: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
+async function runRuntimeCleanupPhase(
+  cleanups: readonly (() => void | Promise<void>)[],
+  timeoutMs: number,
+  label: string,
+): Promise<Error[]> {
+  if (cleanups.length === 0) return [];
+  const signal = AbortSignal.timeout(timeoutMs);
+  const outcomes: Array<{ cause?: unknown } | undefined> = Array.from({ length: cleanups.length });
+  const pending = cleanups.map(async (cleanup, index) => {
+    try {
+      await Promise.resolve().then(cleanup);
+      outcomes[index] = {};
+    } catch (cause) {
+      outcomes[index] = { cause };
+    }
+  });
+  let timedOut = false;
+  try {
+    await withAbort(Promise.all(pending), signal);
+  } catch (cause) {
+    if (!signal.aborted) throw cause;
+    timedOut = true;
+  }
+  const failures = outcomes.flatMap((outcome) => outcome?.cause === undefined
+    ? []
+    : [new Error(
+        `${label} failed: ${defaultSecretRedactor.redact(error(outcome.cause).message).slice(0, 4096)}`,
+        { cause: outcome.cause },
+      )]);
+  if (timedOut) {
+    const remaining = outcomes.filter((outcome) => outcome === undefined).length;
+    failures.push(new Error(
+      `${label} timed out after ${timeoutMs}ms${remaining === 0 ? "" : ` with ${remaining} cleanup callback(s) still pending`}`,
+      { cause: abortError(signal) },
+    ));
+  }
+  return failures;
+}
+
 function validateResult(result: ToolResult): ToolResult {
   if (result === null || typeof result !== "object" || typeof result.content !== "string" || typeof result.isError !== "boolean") {
     throw new Error("Runtime tool returned an invalid result");
@@ -3042,7 +3083,10 @@ function activation(
 }
 
 export interface RuntimeExtensionHostOptions {
+  /** Per cleanup phase. Host close uses separate notification, disposer, registration, and module phases. */
   shutdownTimeoutMs?: number;
+  /** Aggregate bound for resources_discover when the caller does not supply a signal. */
+  resourceDiscoveryTimeoutMs?: number;
   /** Root for extension-owned durable data; callers embedding the loader may override it. */
   dataRoot?: string;
 }
@@ -3051,6 +3095,7 @@ export class RuntimeExtensionHost {
   readonly #workspace: string;
   readonly #dataRoot: string;
   readonly #shutdownTimeoutMs: number;
+  readonly #resourceDiscoveryTimeoutMs: number;
   readonly #tools = new Map<string, HarnessTool>();
   readonly #toolOwners = new WeakMap<HarnessTool, Extract<RuntimeCatalogOwner, { kind: "extension" }>>();
   readonly #commands: OwnedCommand[] = [];
@@ -3098,6 +3143,11 @@ export class RuntimeExtensionHost {
       throw new RangeError("Runtime extension shutdownTimeoutMs must be from 1 through 300000");
     }
     this.#shutdownTimeoutMs = shutdownTimeoutMs;
+    const resourceDiscoveryTimeoutMs = options.resourceDiscoveryTimeoutMs ?? DEFAULT_RUNTIME_RESOURCE_DISCOVERY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(resourceDiscoveryTimeoutMs) || resourceDiscoveryTimeoutMs < 1 || resourceDiscoveryTimeoutMs > 300_000) {
+      throw new RangeError("Runtime resourceDiscoveryTimeoutMs must be from 1 through 300000");
+    }
+    this.#resourceDiscoveryTimeoutMs = resourceDiscoveryTimeoutMs;
   }
 
   get workspace(): string {
@@ -3294,10 +3344,11 @@ export class RuntimeExtensionHost {
   ): Promise<RuntimeDiscoveredResources> {
     if (this.#closed) throw new Error("Runtime extension host is closed");
     if (reason !== "startup" && reason !== "reload") throw new Error("Runtime resource discovery reason is invalid");
+    const discoverySignal = signal ?? AbortSignal.timeout(this.#resourceDiscoveryTimeoutMs);
     const discovered: RuntimeDiscoveredResources = { skillPaths: [], promptPaths: [], themePaths: [] };
     let total = 0;
     for (const owned of this.#listeners.get("resources_discover") ?? []) {
-      signal?.throwIfAborted();
+      discoverySignal.throwIfAborted();
       const scope = owned.entry.scope ?? "project";
       const trusted = owned.entry.trusted ?? true;
       if (!trusted) {
@@ -3308,9 +3359,7 @@ export class RuntimeExtensionHost {
         });
         continue;
       }
-      const listenerSignal = signal === undefined
-        ? owned.generation.abortController.signal
-        : AbortSignal.any([signal, owned.generation.abortController.signal]);
+      const listenerSignal = AbortSignal.any([discoverySignal, owned.generation.abortController.signal]);
       try {
         this.#assertLive(owned.entry, owned.generation);
         listenerSignal.throwIfAborted();
@@ -3350,7 +3399,7 @@ export class RuntimeExtensionHost {
         this.#recordListenerFailure(owned, cause);
       }
     }
-    signal?.throwIfAborted();
+    discoverySignal.throwIfAborted();
     return discovered;
   }
 
@@ -5122,7 +5171,7 @@ export class RuntimeExtensionHost {
     const listeners = event === "event" && isRuntimeUserShellEvent(snapshot)
       ? [...(this.#listeners.get("event") ?? []), ...(this.#listeners.get("user_shell") ?? [])]
       : this.#listeners.get(event) ?? [];
-    for (const owned of listeners) {
+    const invoke = async (owned: OwnedListener): Promise<void> => {
       try {
         this.#assertLive(owned.entry, owned.generation);
         const listenerSignal = dispatchSignal === undefined
@@ -5141,7 +5190,9 @@ export class RuntimeExtensionHost {
         failures.push(cause);
         this.#recordListenerFailure(owned, cause);
       }
-    }
+    };
+    if (event === "session_shutdown") await Promise.all(listeners.map(invoke));
+    else for (const owned of listeners) await invoke(owned);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, `Runtime extension ${event} listeners failed`);
   }
@@ -5654,6 +5705,10 @@ export class RuntimeExtensionHost {
 
   async #close(): Promise<void> {
     if (this.#closed) return;
+    // Each category gets one fresh phase budget. This keeps a hung shutdown
+    // listener from starving disposers, or a hung live-registration cleanup
+    // from preventing module-loader cleanup. The asynchronous upper bound is
+    // four sequential shutdownTimeoutMs phases, independent of callback count.
     const shutdownSignal = AbortSignal.timeout(this.#shutdownTimeoutMs);
     await this.dispatch(
       "session_shutdown",
@@ -5667,31 +5722,21 @@ export class RuntimeExtensionHost {
     }
     this.#generations.length = 0;
     const failures: unknown[] = [];
-    for (const dispose of this.#disposers.reverse()) {
-      try {
-        await withAbort(Promise.resolve().then(dispose), shutdownSignal);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    this.#disposers.length = 0;
-    const hostCleanupSignal = AbortSignal.timeout(this.#shutdownTimeoutMs);
-    for (const cleanup of this.#registrationCleanups.reverse()) {
-      try {
-        await withAbort(Promise.resolve().then(cleanup), hostCleanupSignal);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    this.#registrationCleanups.length = 0;
-    for (const dispose of this.#moduleDisposers.reverse()) {
-      try {
-        await withAbort(Promise.resolve().then(dispose), hostCleanupSignal);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    this.#moduleDisposers.length = 0;
+    failures.push(...await runRuntimeCleanupPhase(
+      this.#disposers.splice(0).reverse(),
+      this.#shutdownTimeoutMs,
+      "Runtime extension disposer cleanup",
+    ));
+    failures.push(...await runRuntimeCleanupPhase(
+      this.#registrationCleanups.splice(0).reverse(),
+      this.#shutdownTimeoutMs,
+      "Runtime live registration cleanup",
+    ));
+    failures.push(...await runRuntimeCleanupPhase(
+      this.#moduleDisposers.splice(0).reverse(),
+      this.#shutdownTimeoutMs,
+      "Runtime module loader cleanup",
+    ));
     this.#tools.clear();
     this.#commands.length = 0;
     this.#autocompleteProviders.length = 0;
@@ -5747,7 +5792,12 @@ export async function loadRuntimeExtensions(
     workspace: string;
     dataRoot?: string;
     signal?: AbortSignal;
+    /** Per-entry activation bound. */
     activationTimeoutMs?: number;
+    /** Aggregate bound for loading and activating the complete entry list. */
+    loadTimeoutMs?: number;
+    /** Default resource discovery bound when discoverResources receives no signal. */
+    resourceDiscoveryTimeoutMs?: number;
     shutdownTimeoutMs?: number;
     activationFailure?: "diagnostic" | "throw";
   },
@@ -5755,6 +5805,10 @@ export async function loadRuntimeExtensions(
   const activationTimeoutMs = options.activationTimeoutMs ?? DEFAULT_RUNTIME_EXTENSION_ACTIVATION_TIMEOUT_MS;
   if (!Number.isSafeInteger(activationTimeoutMs) || activationTimeoutMs < 1 || activationTimeoutMs > 300_000) {
     throw new RangeError("Runtime extension activationTimeoutMs must be from 1 through 300000");
+  }
+  const loadTimeoutMs = options.loadTimeoutMs ?? DEFAULT_RUNTIME_EXTENSION_LOAD_TIMEOUT_MS;
+  if (!Number.isSafeInteger(loadTimeoutMs) || loadTimeoutMs < 1 || loadTimeoutMs > 300_000) {
+    throw new RangeError("Runtime extension loadTimeoutMs must be from 1 through 300000");
   }
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_RUNTIME_EXTENSION_SHUTDOWN_TIMEOUT_MS;
   if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1 || shutdownTimeoutMs > 300_000) {
@@ -5766,24 +5820,36 @@ export async function loadRuntimeExtensions(
   }
   const workspace = await realpath(resolve(options.workspace));
   const dataRoot = resolve(options.dataRoot ?? join(workspace, ".rigyn", "state", "extension-data"));
-  const host = new RuntimeExtensionHost(workspace, { shutdownTimeoutMs, dataRoot });
+  const host = new RuntimeExtensionHost(workspace, {
+    shutdownTimeoutMs,
+    dataRoot,
+    ...(options.resourceDiscoveryTimeoutMs === undefined
+      ? {}
+      : { resourceDiscoveryTimeoutMs: options.resourceDiscoveryTimeoutMs }),
+  });
+  const loadTimeoutSignal = AbortSignal.timeout(loadTimeoutMs);
   for (const entry of entries) {
     options.signal?.throwIfAborted();
     let staged: StagedActivation | undefined;
-    const timeoutSignal = AbortSignal.timeout(activationTimeoutMs);
+    const activationTimeoutSignal = AbortSignal.timeout(activationTimeoutMs);
+    const entrySignal = options.signal === undefined
+      ? AbortSignal.any([loadTimeoutSignal, activationTimeoutSignal])
+      : AbortSignal.any([options.signal, loadTimeoutSignal, activationTimeoutSignal]);
     try {
-      const bytes = await readFile(entry.sourcePath);
+      entrySignal.throwIfAborted();
+      const bytes = await withAbort(readFile(entry.sourcePath), entrySignal);
       if (sha256(bytes) !== entry.sha256) throw new Error("Runtime entry changed after extension discovery");
-      const dataPaths = await prepareExtensionDataPaths(extensionDataPaths(dataRoot, workspace, entry));
+      const dataPaths = await withAbort(
+        prepareExtensionDataPaths(extensionDataPaths(dataRoot, workspace, entry)),
+        entrySignal,
+      );
       const activationResult = activation(entry, workspace, dataPaths, host);
       staged = activationResult.staged;
-      const signal = options.signal === undefined
-        ? AbortSignal.any([staged.generation.abortController.signal, timeoutSignal])
-        : AbortSignal.any([staged.generation.abortController.signal, options.signal, timeoutSignal]);
+      const signal = AbortSignal.any([staged.generation.abortController.signal, entrySignal]);
       const importGeneration = String(++runtimeImportGeneration);
       const namespace = `rigyn-runtime-${importGeneration}`;
       let importPromise: Promise<unknown>;
-      if (await runtimeEntryUsesCommonJs(entry.sourcePath)) {
+      if (await withAbort(runtimeEntryUsesCommonJs(entry.sourcePath), signal)) {
         const loader = registerTsxCommonJsLoader({ namespace });
         staged.moduleDisposers.push(async () => loader.unregister());
         importPromise = Promise.resolve().then(() => loader.require(entry.sourcePath, import.meta.url));
@@ -5818,34 +5884,39 @@ export async function loadRuntimeExtensions(
       await withAbort(Promise.resolve(activate(activationResult.api)), signal);
       host.commit(activationResult.staged);
     } catch (cause) {
+      const cleanupFailures: Error[] = [];
       if (staged !== undefined) {
         staged.generation.active = false;
         staged.generation.abortController.abort(new Error("Runtime extension activation failed"));
-        const cleanupSignal = AbortSignal.timeout(shutdownTimeoutMs);
-        for (const dispose of staged.disposers.reverse()) {
-          try {
-            await withAbort(Promise.resolve().then(dispose), cleanupSignal);
-          } catch {}
-        }
-        const moduleCleanupSignal = AbortSignal.timeout(shutdownTimeoutMs);
-        for (const dispose of staged.moduleDisposers.reverse()) {
-          try {
-            await withAbort(Promise.resolve().then(dispose), moduleCleanupSignal);
-          } catch {}
-        }
+        cleanupFailures.push(...await runRuntimeCleanupPhase(
+          staged.disposers.splice(0).reverse(),
+          shutdownTimeoutMs,
+          "Runtime extension activation disposer cleanup",
+        ));
+        cleanupFailures.push(...await runRuntimeCleanupPhase(
+          staged.moduleDisposers.splice(0).reverse(),
+          shutdownTimeoutMs,
+          "Runtime extension activation module cleanup",
+        ));
       }
       if (options.signal?.aborted === true) {
         await host.close().catch(() => undefined);
         throw abortError(options.signal);
       }
-      const activationError = timeoutSignal.aborted
-        ? new Error(`Runtime extension activation timed out after ${activationTimeoutMs}ms`)
-        : error(cause);
+      const activationError = loadTimeoutSignal.aborted
+        ? new Error(`Runtime extension load timed out after ${loadTimeoutMs}ms`)
+        : activationTimeoutSignal.aborted
+          ? new Error(`Runtime extension activation timed out after ${activationTimeoutMs}ms`)
+          : error(cause);
       if (activationFailure === "throw") {
+        const failures: unknown[] = [activationError, ...cleanupFailures];
         try {
           await host.close();
         } catch (cleanupError) {
-          throw new AggregateError([activationError, cleanupError], "Runtime extension activation and cleanup failed");
+          failures.push(cleanupError);
+        }
+        if (failures.length > 1) {
+          throw new AggregateError(failures, "Runtime extension activation and cleanup failed");
         }
         throw activationError;
       }
@@ -5854,6 +5925,14 @@ export async function loadRuntimeExtensions(
         sourcePath: entry.sourcePath,
         message: activationError.message,
       });
+      for (const cleanupFailure of cleanupFailures) {
+        host.addDiagnostic({
+          extensionId: entry.extensionId,
+          sourcePath: entry.sourcePath,
+          message: cleanupFailure.message,
+        });
+      }
+      if (loadTimeoutSignal.aborted) break;
     }
   }
   return host;

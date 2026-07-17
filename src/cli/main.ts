@@ -1182,6 +1182,39 @@ export function indexedSessionPickerItems(
   return indexedSessionPickerItemsForRecords(index.list({ limit: 500 }), current);
 }
 
+export function markCurrentSessionPickerItems(
+  items: readonly PickerItem[],
+  currentReference: string,
+): PickerItem[] {
+  return items.map((item) => {
+    if (item.session === undefined) return item;
+    const current = item.value === currentReference;
+    return item.session.current === current
+      ? item
+      : { ...item, session: { ...item.session, current } };
+  });
+}
+
+export function resolveSessionPickerSelection(
+  items: readonly PickerItem[],
+  selected: PickerItem,
+): PickerItem | undefined {
+  if (typeof selected.value !== "string" || selected.session === undefined) return undefined;
+  return items.find((item) =>
+    item.id === selected.id
+    && item.value === selected.value
+    && item.session?.path === selected.session?.path);
+}
+
+export async function refreshSessionCatalogOnOpen(
+  state: { stale: boolean; scope: "current" | "all"; query: string },
+  refresh: () => Promise<void>,
+): Promise<boolean> {
+  if (!state.stale && state.scope === "current" && state.query === "") return false;
+  await refresh();
+  return true;
+}
+
 function indexedSessionPickerItemsForRecords(
   records: readonly IndexedSessionRecord[],
   current?: { workspaceRoot: string; databasePath: string; threadId: string },
@@ -2556,6 +2589,7 @@ async function chatCommandOperation(
       searchBytes: number;
     } = { scope: "current", query: "", hasMore: false, loaded: 0, searchBytes: 0 };
     let sessionCatalogItems: PickerItem[] = [];
+    let sessionCatalogStale = false;
     const publishSessionPage = (
       page: SessionPickerPage,
       input: { scope: "current" | "all"; query: string; append: boolean },
@@ -2604,15 +2638,14 @@ async function chatCommandOperation(
           : `${loaded} ${noun}${loaded === 1 ? "" : "s"} loaded · end of catalog`;
       terminal.setSessionPickerPagination(sessionCatalogState.hasMore, status);
     };
-    const refreshSessions = (): void => {
-      if (ephemeral) {
-        sessionCatalogState = { scope: "current", query: "", hasMore: false, loaded: 0, searchBytes: 0 };
-        sessionCatalogItems = [];
-        terminal.setPickerItems("session", []);
-        terminal.setSessionPickerPagination(false, "Session resume is unavailable in --no-session mode");
-        return;
-      }
-      publishSessionPage(sessionPickerPage(runtime!, threadId), { scope: "current", query: "", append: false });
+    const invalidateSessions = (): void => {
+      if (ephemeral) return;
+      sessionCatalogStale = true;
+      const currentReference = sessionCatalogState.scope === "current"
+        ? threadId
+        : indexedSessionReference({ databasePath: runtime!.databasePath, threadId });
+      sessionCatalogItems = markCurrentSessionPickerItems(sessionCatalogItems, currentReference);
+      terminal.setPickerItems("session", sessionCatalogItems);
     };
     const scheduleModelRefresh = (): void => {
       modelRefreshAbort?.abort(new Error("Superseded model catalog refresh"));
@@ -2713,7 +2746,16 @@ async function chatCommandOperation(
     };
     const replayTranscript = (): void => {
       const selectedBranch = branch ?? runtime!.store.getThread(threadId).defaultBranch;
-      terminal.replaceTranscript(runtime!.store.listEvents(threadId, selectedBranch), selectedBranch);
+      const replay = runtime!.store.listEventTail(threadId, selectedBranch);
+      terminal.replaceTranscript(replay.events, selectedBranch);
+      if (replay.truncated) {
+        terminal.notify(
+          replay.events.length === 0
+            ? "Saved transcript history exceeds the interactive replay limit; the complete history remains stored."
+            : `Showing the newest ${replay.events.length} saved transcript events; older history remains stored.`,
+          "warning",
+        );
+      }
     };
     const syncContext = (options: { announceRecovered?: boolean } = {}): void => {
       if (choice === undefined) terminal.clearModelContext();
@@ -3210,7 +3252,7 @@ async function chatCommandOperation(
         });
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         scheduleModelRefresh();
         if (!ephemeral) scheduleSessionIndexUpdate(runtime!, threadId);
         terminal.notify(`Switched to ${session.name ?? session.threadId}`);
@@ -3239,7 +3281,7 @@ async function chatCommandOperation(
           const nextKeybindingConflicts = nextKeybindings.conflicts();
           let reloadedArguments: ParsedArguments | undefined;
           const signal = input.signal === undefined
-            ? AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)])
+            ? controller.signal
             : AbortSignal.any([input.signal, controller.signal]);
           const result = await runtime!.reload({
             session: input.session ?? { threadId, ...(branch === undefined ? {} : { branch }) },
@@ -3291,7 +3333,7 @@ async function chatCommandOperation(
       for (const diagnostic of runtime!.runtimeExtensions.diagnostics()) {
         terminal.notify(`Extension ${diagnostic.extensionId}: ${diagnostic.message}`, "warning");
       }
-      refreshSessions();
+      invalidateSessions();
       scheduleFileRefresh();
       scheduleModelRefresh();
       syncContext();
@@ -3363,10 +3405,14 @@ async function chatCommandOperation(
           }, { query, ...(cursor === undefined ? {} : { cursor }) });
       }
       publishSessionPage(page, { scope, query, append });
+      if (!append) sessionCatalogStale = false;
     };
 
-    const resumeIndexedSession = async (record: IndexedSessionRecord): Promise<void> => {
-      const index = await requireAllWorkspaceIndex();
+    const resumeIndexedSession = async (
+      record: IndexedSessionRecord,
+      selectedIndex?: WorkspaceSessionIndex,
+    ): Promise<void> => {
+      const index = selectedIndex ?? await requireAllWorkspaceIndex();
       if (currentIndexedRuntime(runtime!, record)) {
         const verified = await index.verify(record, { isTrusted: async () => true });
         const resumed = runtime!.store.bindThreadWorkspace(verified.threadId, runtime!.workspace);
@@ -3383,7 +3429,7 @@ async function chatCommandOperation(
         restoreStoredSelection(nextChoice);
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         scheduleModelRefresh();
         terminal.notify(`Resumed ${threadId}`);
         return;
@@ -3443,7 +3489,6 @@ async function chatCommandOperation(
       modelCatalog.clear();
       modelRefreshAbort?.abort(new Error("Workspace session switched"));
       fileRefreshAbort?.abort(new Error("Workspace session switched"));
-      replayTranscript();
       try {
         await bindRuntimePresentation();
         await runtime.service.activateWorkspaceRuntime();
@@ -3518,12 +3563,10 @@ async function chatCommandOperation(
       }
       replayTranscript();
       syncContext();
-      refreshSessions();
       terminal.notify(`Resumed ${threadId} in ${runtime.workspace}`);
     };
 
     syncContext({ announceRecovered: false });
-    refreshSessions();
     replayTranscript();
     syncContext();
     const presentation = await bindRuntimePresentation();
@@ -3689,6 +3732,18 @@ async function chatCommandOperation(
         await copyText(action.text, action.label);
         return;
       }
+      if (action.type === "session_open") {
+        if (ephemeral) {
+          terminal.setSessionPickerPagination(false, "Session resume is unavailable in --no-session mode");
+          return;
+        }
+        await refreshSessionCatalogOnOpen({
+          stale: sessionCatalogStale,
+          scope: sessionCatalogState.scope,
+          query: sessionCatalogState.query,
+        }, async () => await loadSessionCatalog("current", "", false));
+        return;
+      }
       if (action.type === "session_scope") {
         if (ephemeral) {
           terminal.setSessionPickerScope("current", "Session resume is unavailable in --no-session mode");
@@ -3723,9 +3778,7 @@ async function chatCommandOperation(
           terminal.setPickerStatus("session", "Session results changed; select the session again");
           return;
         }
-        const selectedById = sessionCatalogItems.find((item) =>
-          typeof action.item.value === "string" && item.value === action.item.value);
-        const selectedItem = selectedById;
+        const selectedItem = resolveSessionPickerSelection(sessionCatalogItems, action.item);
         if (selectedItem === undefined || typeof selectedItem.value !== "string" || selectedItem.value === "") {
           terminal.setPickerStatus("session", "Session results changed; select the session again");
           return;
@@ -3792,17 +3845,21 @@ async function chatCommandOperation(
         return;
       }
       await sessionIndexTail;
-      if (typeof action.item.value !== "string") return;
-      if (action.item.session?.path === action.item.value) {
-        const index = await requireAllWorkspaceIndex();
-        await resumeIndexedSession(resolveIndexedSessionReference(index, action.item.value));
+      const selectedItem = resolveSessionPickerSelection(sessionCatalogItems, action.item);
+      if (selectedItem === undefined || typeof selectedItem.value !== "string") {
+        terminal.notify("Session results changed; open the session picker and select it again.", "warning");
+        return;
+      }
+      if (selectedItem.session?.path === selectedItem.value) {
+        const index = sessionIndex ?? await requireAllWorkspaceIndex();
+        await resumeIndexedSession(resolveIndexedSessionReference(index, selectedItem.value), index);
         return;
       }
       if (ephemeral) {
         terminal.notify("Session resume is disabled by --no-session.", "warning");
         return;
       }
-      const nextThreadId = action.item.value;
+      const nextThreadId = selectedItem.value;
       runtime!.store.bindThreadWorkspace(nextThreadId, runtime!.workspace);
       const nextChoice = configuredSelection(runtime!, argumentsValue, nextThreadId);
       const previousThreadId = threadId;
@@ -3817,7 +3874,7 @@ async function chatCommandOperation(
       restoreStoredSelection(nextChoice);
       replayTranscript();
       syncContext();
-      refreshSessions();
+      invalidateSessions();
       scheduleModelRefresh();
       terminal.notify(`Resumed ${threadId}`);
     };
@@ -4020,7 +4077,7 @@ async function chatCommandOperation(
         branch = undefined;
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         terminal.notify(`Session ${threadId}`);
         continue;
       }
@@ -4049,7 +4106,7 @@ async function chatCommandOperation(
           const record = reference === ""
             ? await pickIndexedThread(index, runtime, terminal, threadId)
             : resolveIndexedSessionReference(index, reference);
-          await resumeIndexedSession(record);
+          await resumeIndexedSession(record, index);
           continue;
         }
         if (argumentsText.startsWith("--")) throw new Error(`Unknown resume option: ${argumentsText.split(/\s/u, 1)[0]}`);
@@ -4078,7 +4135,7 @@ async function chatCommandOperation(
         restoreStoredSelection(nextChoice);
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         scheduleModelRefresh();
         terminal.notify(`Resumed ${threadId}`);
         continue;
@@ -4102,7 +4159,7 @@ async function chatCommandOperation(
         replayTranscript();
         syncContext();
         terminal.setEditorText(selected.restoreText ?? "");
-        refreshSessions();
+        invalidateSessions();
         terminal.notify(`Forked a new session before ${selected.eventId}; the selected prompt is ready to edit.`);
         continue;
       }
@@ -4122,7 +4179,7 @@ async function chatCommandOperation(
         restoreStoredSelection(configuredSelection(runtime, argumentsValue, threadId));
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         terminal.notify(`Cloned session ${cloned.thread.threadId}`);
         continue;
       }
@@ -4300,7 +4357,7 @@ async function chatCommandOperation(
         });
         await upsertIndexedThread(sessionIndex, runtime, threadId);
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         terminal.notify(`Named session ${renamed.name ?? renamed.threadId}`);
         continue;
       }
@@ -4388,7 +4445,7 @@ async function chatCommandOperation(
           let reloadedArguments: ParsedArguments | undefined;
           const result = await runtime.reload({
             session: { threadId, ...(branch === undefined ? {} : { branch }) },
-            signal: AbortSignal.any([catalogAbort.signal, runtime.generationSignal, controller.signal, AbortSignal.timeout(60_000)]),
+            signal: AbortSignal.any([catalogAbort.signal, controller.signal]),
             prepareExtensions: (extensions) => {
               reloadedArguments = applyRuntimeExtensionFlags(argumentsValue, extensions);
             },
@@ -4480,7 +4537,7 @@ async function chatCommandOperation(
         restoreStoredSelection(nextChoice);
         replayTranscript();
         syncContext();
-        refreshSessions();
+        invalidateSessions();
         scheduleModelRefresh();
         terminal.notify(`Imported ${imported.events} events into session ${threadId}`);
         continue;
@@ -4914,7 +4971,7 @@ async function chatCommandOperation(
           scheduleSessionIndexUpdate(runtime, threadId);
         }
         syncContext();
-        refreshSessions();
+        invalidateSessions();
       }
       } catch (error) {
         active = false;

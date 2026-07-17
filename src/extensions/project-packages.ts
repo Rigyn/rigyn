@@ -16,6 +16,11 @@ import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { sha256 } from "../tools/hash.js";
 import { WorkspaceBoundary } from "../tools/paths.js";
 import {
+  defaultSqliteLeaseRoot,
+  keyedSqliteLeasePath,
+  withSqliteProcessLease,
+} from "../process/sqlite-lease.js";
+import {
   EXTENSION_PACKAGE_LOCK,
   EXTENSION_PACKAGE_PROVENANCE,
   LocalExtensionPackageManager,
@@ -29,7 +34,6 @@ export const PROJECT_PACKAGE_DECLARATION = ".rigyn/packages.json";
 export const PROJECT_PACKAGE_LOCK = ".rigyn/packages.lock.json";
 export const PROJECT_PACKAGE_INSTALL_ROOT = ".rigyn/packages";
 
-const PROJECT_PACKAGE_OPERATION_LOCK = ".rigyn/.packages-operation.lock";
 const PROJECT_PACKAGE_STAGE_ROOT = ".rigyn/.packages-stage";
 const PROJECT_PACKAGE_BACKUP_ROOT = ".rigyn/.packages-backup";
 const PROJECT_PACKAGE_TRANSACTION = ".rigyn/.packages-transaction.json";
@@ -40,7 +44,6 @@ const MAX_RESOURCE_FILTERS = 512;
 const MAX_CONTENT_FILES = 4096;
 const MAX_CONTENT_BYTES = 64 * 1024 * 1024;
 const LOCK_TIMEOUT_MS = 150_000;
-const INVALID_LOCK_MAX_AGE_MS = 15 * 60_000;
 const IDENTIFIER = /^[a-z][a-z0-9._-]{0,62}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_REVISION = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -130,12 +133,7 @@ export interface ProjectPackageManagerOptions {
   workspace: string;
   projectTrusted: boolean;
   commands?: ExtensionPackageCommands;
-}
-
-interface PackageOperationOwner {
-  pid: number;
-  token: string;
-  createdAt: number;
+  operationLeaseRoot?: string;
 }
 
 interface ProjectPackageState {
@@ -449,35 +447,6 @@ function lockSha256(lock: ProjectPackageLock): string {
   return sha256(serializeLock(lock));
 }
 
-function operationOwner(value: unknown): PackageOperationOwner | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const input = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(input.pid) || (input.pid as number) < 1 || typeof input.token !== "string" || input.token === ""
-    || !Number.isSafeInteger(input.createdAt) || (input.createdAt as number) < 0) return undefined;
-  return { pid: input.pid as number, token: input.token, createdAt: input.createdAt as number };
-}
-
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
-  }
-}
-
-async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  await new Promise<void>((resolveWait, reject) => {
-    const timer = setTimeout(resolveWait, milliseconds);
-    const abort = (): void => {
-      clearTimeout(timer);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("Project package operation cancelled"));
-    };
-    if (signal?.aborted === true) abort();
-    else signal?.addEventListener("abort", abort, { once: true });
-  });
-}
-
 async function atomicWrite(path: string, data: Buffer): Promise<void> {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
   let handle;
@@ -513,6 +482,7 @@ export class ProjectPackageManager {
   readonly #workspace: string;
   readonly #trusted: boolean;
   readonly #commands: ExtensionPackageCommands;
+  readonly #operationLeaseRoot: string;
   #operations: Promise<void> = Promise.resolve();
 
   constructor(options: ProjectPackageManagerOptions) {
@@ -522,6 +492,7 @@ export class ProjectPackageManager {
       ...(options.commands?.npm === undefined ? {} : { npm: { command: options.commands.npm.command, prefix: [...(options.commands.npm.prefix ?? [])] } }),
       ...(options.commands?.git === undefined ? {} : { git: { command: options.commands.git.command, prefix: [...(options.commands.git.prefix ?? [])] } }),
     };
+    this.#operationLeaseRoot = resolve(options.operationLeaseRoot ?? defaultSqliteLeaseRoot());
   }
 
   async check(): Promise<ProjectPackageCheckResult> {
@@ -670,7 +641,12 @@ export class ProjectPackageManager {
     const resolutionRoot = join(this.#workspace, PROJECT_PACKAGE_RESOLUTION_ROOT, declaration.id);
     const installedRoot = join(resolutionRoot, "packages");
     await mkdir(resolutionRoot, { recursive: true, mode: 0o700 });
-    const manager = new LocalExtensionPackageManager({ user: join(resolutionRoot, "user"), project: installedRoot }, {}, this.#commands);
+    const manager = new LocalExtensionPackageManager(
+      { user: join(resolutionRoot, "user"), project: installedRoot },
+      {},
+      this.#commands,
+      { operationLeaseRoot: this.#operationLeaseRoot },
+    );
     const localPath = declaration.source.kind === "local" ? await this.#localSource(declaration.source.path) : undefined;
     const installed = await manager.install(
       sourceSpecifier(declaration, localPath),
@@ -712,7 +688,12 @@ export class ProjectPackageManager {
     const stageRoot = join(this.#workspace, PROJECT_PACKAGE_STAGE_ROOT);
     await rm(stageRoot, { recursive: true, force: true });
     await mkdir(stageRoot, { recursive: true, mode: 0o700 });
-    const manager = new LocalExtensionPackageManager({ user: join(stageRoot, ".user"), project: stageRoot }, {}, this.#commands);
+    const manager = new LocalExtensionPackageManager(
+      { user: join(stageRoot, ".user"), project: stageRoot },
+      {},
+      this.#commands,
+      { operationLeaseRoot: this.#operationLeaseRoot },
+    );
     try {
       for (const entry of lock.packages) {
         signal?.throwIfAborted();
@@ -755,7 +736,12 @@ export class ProjectPackageManager {
   }
 
   async #installed(lock: ProjectPackageLock): Promise<InstalledExtensionPackage[]> {
-    const manager = new LocalExtensionPackageManager({ user: join(this.#workspace, ".rigyn", ".unused"), project: join(this.#workspace, PROJECT_PACKAGE_INSTALL_ROOT) });
+    const manager = new LocalExtensionPackageManager(
+      { user: join(this.#workspace, ".rigyn", ".unused"), project: join(this.#workspace, PROJECT_PACKAGE_INSTALL_ROOT) },
+      {},
+      {},
+      { operationLeaseRoot: this.#operationLeaseRoot },
+    );
     const installed = await manager.list("project");
     for (const entry of lock.packages) {
       const selected = installed.find((value) => value.id === entry.id);
@@ -860,48 +846,12 @@ export class ProjectPackageManager {
 
   async #withOperationLock<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     await this.#prepareHarnessDirectory();
-    const lockPath = join(this.#workspace, PROJECT_PACKAGE_OPERATION_LOCK);
-    const owner: PackageOperationOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), createdAt: Date.now() };
-    const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    while (true) {
-      signal?.throwIfAborted();
-      try {
-        const handle = await open(lockPath, "wx", 0o600);
-        try {
-          await handle.writeFile(`${JSON.stringify(owner)}\n`);
-        } finally {
-          await handle.close();
-        }
-        break;
-      } catch (error) {
-        if (!missing(error) && !(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
-        let stale = false;
-        try {
-          const raw = await readFile(lockPath, "utf8");
-          let existing: PackageOperationOwner | undefined;
-          try { existing = operationOwner(JSON.parse(raw) as unknown); } catch {}
-          stale = existing === undefined
-            ? Date.now() - (await lstat(lockPath)).mtimeMs > INVALID_LOCK_MAX_AGE_MS
-            : !processExists(existing.pid);
-          if (stale) await rm(lockPath, { force: true });
-        } catch (readError) {
-          if (!missing(readError)) throw readError;
-        }
-        if (stale) continue;
-        if (Date.now() >= deadline) throw new Error("Timed out waiting for the project package operation lock");
-        await wait(50, signal);
-      }
-    }
-    try {
-      return await operation();
-    } finally {
-      try {
-        const current = operationOwner(JSON.parse(await readFile(lockPath, "utf8")) as unknown);
-        if (current?.token === owner.token) await rm(lockPath, { force: true });
-      } catch (error) {
-        if (!missing(error)) throw error;
-      }
-    }
+    const lockPath = await keyedSqliteLeasePath(this.#operationLeaseRoot, "project-packages", this.#workspace);
+    return await withSqliteProcessLease(lockPath, operation, {
+      timeoutMs: LOCK_TIMEOUT_MS,
+      retryMs: 50,
+      label: "project package operation lock",
+    }, signal);
   }
 
   #serialized<T>(operation: () => Promise<T>): Promise<T> {

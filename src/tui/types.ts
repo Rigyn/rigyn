@@ -180,6 +180,7 @@ export type TuiAction =
   | { type: "copy" }
   | { type: "copy_text"; text: string; label: string }
   | { type: "suspend" }
+  | { type: "session_open" }
   | { type: "session_scope"; scope: "current" | "all" }
   | { type: "session_search"; scope: "current" | "all"; query: string }
   | { type: "session_more"; scope: "current" | "all"; query: string }

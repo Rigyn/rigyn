@@ -14,10 +14,10 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.1.6 GitHub release:
+From the v0.1.7 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.6/rigyn-0.1.6.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.7/rigyn-0.1.7.tgz -- rigyn self-install
 rigyn
 ```
 

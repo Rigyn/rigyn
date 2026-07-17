@@ -126,7 +126,12 @@ async function withManagedPackage<T>(source: string, operation: (input: {
 }) => Promise<T>): Promise<T> {
   const temporary = await mkdtemp(join(tmpdir(), "rigyn-author-"));
   const managed = join(temporary, "managed");
-  const manager = new LocalExtensionPackageManager({ user: managed });
+  const manager = new LocalExtensionPackageManager(
+    { user: managed },
+    {},
+    {},
+    { operationLeaseRoot: join(temporary, "leases") },
+  );
   try {
     const installed = await manager.install(source);
     const catalog = await discoverExtensions(manager.sources(false));

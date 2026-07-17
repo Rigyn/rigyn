@@ -253,6 +253,7 @@ export type {
 } from "./manifest.js";
 export type {
   ExtensionPackageLimits,
+  ExtensionPackageManagerOptions,
   ExtensionPackageCommands,
   ExtensionPackageProvenance,
   ExtensionPackageRoots,

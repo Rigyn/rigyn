@@ -6,11 +6,11 @@ import {
   readFile,
   rm,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 
 import { discoverSkills, loadSkill } from "../../src/context/index.js";
@@ -23,6 +23,7 @@ import {
   renderExtensionPrompt,
 } from "../../src/extensions/index.js";
 import { TuiController } from "../../src/tui/index.js";
+import { keyedSqliteLeasePath } from "../../src/process/sqlite-lease.js";
 import { FakeInput, FakeOutput } from "../tui/helpers.js";
 
 async function temporary(t: TestContext): Promise<string> {
@@ -188,49 +189,41 @@ test("manual extensions are preserved and managed provenance is strict", async (
   assert.deepEqual(await packages.list(), []);
 });
 
-test("package managers coordinate through a recoverable cross-process lock", async (t) => {
+test("package managers coordinate through a crash-safe SQLite process lease", async (t) => {
   const root = await temporary(t);
   const user = join(root, "user-extensions");
+  const leaseRoot = join(root, "leases");
   await mkdir(user, { recursive: true });
-  const lock = join(user, EXTENSION_PACKAGE_LOCK);
-  const first = new LocalExtensionPackageManager({ user });
-  const second = new LocalExtensionPackageManager({ user });
-
-  await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "held", createdAt: Date.now() })}\n`);
-  const release = setTimeout(() => { void rm(lock, { force: true }); }, 100);
+  await mkdir(leaseRoot, { recursive: true, mode: 0o700 });
+  const lock = await keyedSqliteLeasePath(leaseRoot, "extension-packages", user);
+  const second = new LocalExtensionPackageManager({ user }, {}, {}, { operationLeaseRoot: leaseRoot });
+  const held = new DatabaseSync(lock);
+  held.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+  const release = setTimeout(() => {
+    held.exec("ROLLBACK");
+    held.close();
+  }, 100);
   const started = Date.now();
   assert.deepEqual(await second.list("user"), []);
   clearTimeout(release);
   assert.ok(Date.now() - started >= 75, "a second manager must wait for the active lock");
-
-  await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "old-but-active", createdAt: 0 })}\n`);
-  const releaseOld = setTimeout(() => { void rm(lock, { force: true }); }, 100);
-  const oldStarted = Date.now();
-  assert.deepEqual(await first.list("user"), []);
-  clearTimeout(releaseOld);
-  assert.ok(Date.now() - oldStarted >= 75, "lock age must not override a live owner PID");
-
-  await writeFile(lock, `${JSON.stringify({ pid: 2_147_483_647, token: "dead", createdAt: Date.now() })}\n`);
-  assert.deepEqual(await first.list("user"), []);
-  await assert.rejects(access(lock), /ENOENT/u);
-
-  await writeFile(lock, "invalid\n");
-  await utimes(lock, new Date(0), new Date(0));
-  assert.deepEqual(await first.list("user"), []);
-  await assert.rejects(access(lock), /ENOENT/u);
+  await access(lock);
+  await assert.rejects(access(join(user, EXTENSION_PACKAGE_LOCK)), /ENOENT/u);
 });
 
 test("package listing can be cancelled while waiting for an active lock", async (t) => {
   const root = await temporary(t);
   const user = join(root, "user-extensions");
+  const leaseRoot = join(root, "leases");
   await mkdir(user, { recursive: true });
-  const lock = join(user, EXTENSION_PACKAGE_LOCK);
-  const packages = new LocalExtensionPackageManager({ user });
+  await mkdir(leaseRoot, { recursive: true, mode: 0o700 });
+  const lock = await keyedSqliteLeasePath(leaseRoot, "extension-packages", user);
+  const packages = new LocalExtensionPackageManager({ user }, {}, {}, { operationLeaseRoot: leaseRoot });
   const controller = new AbortController();
 
-  await writeFile(lock, `${JSON.stringify({ pid: process.pid, token: "held", createdAt: Date.now() })}\n`);
+  const held = new DatabaseSync(lock);
+  held.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
   const cancel = setTimeout(() => controller.abort(new Error("cancel package listing")), 25);
-  const release = setTimeout(() => { void rm(lock, { force: true }); }, 150);
   try {
     await assert.rejects(
       packages.list("user", { signal: controller.signal }),
@@ -238,7 +231,7 @@ test("package listing can be cancelled while waiting for an active lock", async 
     );
   } finally {
     clearTimeout(cancel);
-    clearTimeout(release);
-    await rm(lock, { force: true });
+    held.exec("ROLLBACK");
+    held.close();
   }
 });

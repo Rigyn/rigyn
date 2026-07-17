@@ -1,6 +1,5 @@
 import { constants } from "node:fs";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -23,6 +22,11 @@ import { satisfies, valid as validSemver } from "semver";
 
 import { trackActiveProcessGroup } from "../process/active-groups.js";
 import { normalizeCommandArgv } from "../process/command.js";
+import {
+  defaultSqliteLeaseRoot,
+  keyedSqliteLeasePath,
+  withSqliteProcessLease,
+} from "../process/sqlite-lease.js";
 import { sha256 } from "../tools/hash.js";
 import { parseThemeDefinition } from "../tui/theme.js";
 import { RIGYN_VERSION } from "../version.js";
@@ -47,8 +51,6 @@ const IDENTIFIER = /^[a-z][a-z0-9._-]{0,62}$/u;
 const NPM_PART = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const GIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/u;
 const GIT_REVISION = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
-const UNPARSEABLE_PACKAGE_LOCK_MAX_AGE_MS = 15 * 60_000;
-const PACKAGE_LOCK_BYTES = 4096;
 const PACKAGE_STAGE_PREFIX = ".rigyn-package-stage-";
 const PACKAGE_BACKUP_PREFIX = ".rigyn-package-backup-";
 const PACKAGE_REMOVE_PREFIX = ".rigyn-package-remove-";
@@ -75,6 +77,10 @@ export interface ExtensionPackageLimits {
 export interface ExtensionPackageCommands {
   npm?: { command: string; prefix?: readonly string[] };
   git?: { command: string; prefix?: readonly string[] };
+}
+
+export interface ExtensionPackageManagerOptions {
+  operationLeaseRoot?: string;
 }
 
 export interface ExtensionPackageTransactionOptions {
@@ -1630,23 +1636,9 @@ function cloneInstalled(value: InstalledExtensionPackage): InstalledExtensionPac
   return { ...value, provenance: cloneProvenance(value.provenance) };
 }
 
-interface PackageLockOwner {
-  pid: number;
-  token: string;
-  createdAt: number;
-}
-
 interface PackageTransaction {
   schemaVersion: 1;
   id: string;
-}
-
-function lockOwner(value: unknown): PackageLockOwner | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const input = value as Record<string, unknown>;
-  if (!Number.isSafeInteger(input.pid) || (input.pid as number) < 1 || typeof input.token !== "string" || input.token === ""
-    || !Number.isSafeInteger(input.createdAt) || (input.createdAt as number) < 0) return undefined;
-  return { pid: input.pid as number, token: input.token, createdAt: input.createdAt as number };
 }
 
 function packageTransaction(value: unknown): PackageTransaction {
@@ -1667,32 +1659,6 @@ function retargetInstalled(value: InstalledExtensionPackage, packageRoot: string
   };
 }
 
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-async function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  await new Promise<void>((resolveWait, reject) => {
-    let timer: NodeJS.Timeout;
-    const abort = (): void => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      reject(signal?.reason instanceof Error ? signal.reason : new Error("Package transaction cancelled"));
-    };
-    timer = setTimeout(() => {
-      signal?.removeEventListener("abort", abort);
-      resolveWait();
-    }, milliseconds);
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted === true) abort();
-  });
-}
-
 export function extensionPackageSources(roots: ExtensionPackageRoots, projectTrusted: boolean): ExtensionSource[] {
   const user = path(roots.user, "User package root");
   const result: ExtensionSource[] = [{ path: user, scope: "user", trusted: true, optional: true }];
@@ -1709,9 +1675,15 @@ export class LocalExtensionPackageManager {
   readonly #roots: ExtensionPackageRoots;
   readonly #limits: PackageLimits;
   readonly #commands: ExtensionPackageCommands;
+  readonly #operationLeaseRoot: string;
   #operations: Promise<void> = Promise.resolve();
 
-  constructor(roots: ExtensionPackageRoots, limits: ExtensionPackageLimits = {}, commands: ExtensionPackageCommands = {}) {
+  constructor(
+    roots: ExtensionPackageRoots,
+    limits: ExtensionPackageLimits = {},
+    commands: ExtensionPackageCommands = {},
+    options: ExtensionPackageManagerOptions = {},
+  ) {
     this.#roots = {
       user: path(roots.user, "User package root"),
       ...(roots.project === undefined ? {} : { project: path(roots.project, "Project package root") }),
@@ -1721,6 +1693,7 @@ export class LocalExtensionPackageManager {
       ...(commands.npm === undefined ? {} : { npm: { command: commands.npm.command, prefix: [...(commands.npm.prefix ?? [])] } }),
       ...(commands.git === undefined ? {} : { git: { command: commands.git.command, prefix: [...(commands.git.prefix ?? [])] } }),
     };
+    this.#operationLeaseRoot = resolve(options.operationLeaseRoot ?? defaultSqliteLeaseRoot());
   }
 
   sources(projectTrusted: boolean): ExtensionSource[] {
@@ -2080,71 +2053,15 @@ export class LocalExtensionPackageManager {
   }
 
   async #withPackageLock<T>(root: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const lockPath = join(root, EXTENSION_PACKAGE_LOCK);
-    const owner: PackageLockOwner = {
-      pid: process.pid,
-      token: randomBytes(16).toString("hex"),
-      createdAt: Date.now(),
-    };
-    const deadline = Date.now() + Math.max(30_000, this.#limits.sourceTimeoutMs + 10_000);
-    while (true) {
-      signal?.throwIfAborted();
-      try {
-        const handle = await open(lockPath, "wx", 0o600);
-        try {
-          await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
-        } finally {
-          await handle.close();
-        }
-        break;
-      } catch (error) {
-        if (errno(error) !== "EEXIST") throw error;
-        let raw: Buffer | undefined;
-        let existing: PackageLockOwner | undefined;
-        let stale = false;
-        try {
-          raw = await readRegularFile(lockPath, PACKAGE_LOCK_BYTES, "Package lock");
-          try {
-            existing = lockOwner(JSON.parse(decodeUtf8(raw, "Package lock")) as unknown);
-          } catch {}
-          if (existing !== undefined) stale = !processExists(existing.pid);
-          else stale = Date.now() - (await lstat(lockPath)).mtimeMs > UNPARSEABLE_PACKAGE_LOCK_MAX_AGE_MS;
-        } catch (readError) {
-          if (errno(readError) === "ENOENT") continue;
-        }
-        if (stale && raw !== undefined) {
-          try {
-            const current = await readRegularFile(lockPath, PACKAGE_LOCK_BYTES, "Package lock");
-            let currentOwner: PackageLockOwner | undefined;
-            try {
-              currentOwner = lockOwner(JSON.parse(decodeUtf8(current, "Package lock")) as unknown);
-            } catch {}
-            if (current.equals(raw) && (currentOwner === undefined || !processExists(currentOwner.pid))) {
-              await rm(lockPath, { force: true });
-            }
-            continue;
-          } catch (readError) {
-            if (errno(readError) === "ENOENT") continue;
-          }
-        }
-        if (Date.now() >= deadline) throw new Error(`Timed out waiting for package lock: ${lockPath}`);
-        await wait(50, signal);
-      }
-    }
-    try {
+    const lockPath = await keyedSqliteLeasePath(this.#operationLeaseRoot, "extension-packages", root);
+    return await withSqliteProcessLease(lockPath, async () => {
       await this.#recoverTransactions(root);
       return await operation();
-    } finally {
-      try {
-        const current = lockOwner(JSON.parse(decodeUtf8(
-          await readRegularFile(lockPath, PACKAGE_LOCK_BYTES, "Package lock"),
-          "Package lock",
-        )) as unknown);
-        if (current?.token === owner.token) await rm(lockPath, { force: true });
-      } catch (error) {
-        if (errno(error) !== "ENOENT") throw error;
-      }
-    }
+    }, {
+      timeoutMs: Math.max(30_000, this.#limits.sourceTimeoutMs + 10_000),
+      retryMs: 50,
+      label: "extension package lock",
+    }, signal);
   }
 
   #serialized<T>(operation: () => Promise<T>): Promise<T> {

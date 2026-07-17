@@ -194,7 +194,10 @@ test("explicit runtime extensions are repeatable, ordered after managed entries,
     });
     try {
       assert.deepEqual(laterInvocation.runtimeExtensions.commands(), []);
-      assert.deepEqual(await readdir(join(configHome, "rigyn", "extensions")), ["managed"]);
+      assert.deepEqual(
+        (await readdir(join(configHome, "rigyn", "extensions"))).sort(),
+        ["managed"],
+      );
       const resources = await laterInvocation.service.resourceCatalog();
       assert.equal(resources.skills.some((entry) => entry.name === "first-invocation-skill"), false);
       assert.equal(resources.commands.runtimeExtensions.some((entry) => entry.baseName === "first-command"), false);

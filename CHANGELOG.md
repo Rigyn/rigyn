@@ -4,6 +4,20 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.1.7] - 2026-07-17
+
+### Fixed
+
+- Made runtime reload atomic, cancellable, and deadline-bounded across extension lifecycle handlers, UI commits, provider disposal, network shutdown, and old-generation cleanup, so a stalled extension cannot freeze the active session or overlapping reloads.
+- Made session catalogs and previews lazy and bounded interactive transcript replay to recent presentation data, keeping startup, workspace switching, and resume responsive without deleting durable history or reducing provider context and exports.
+- Added fenced runtime ownership and race-safe abandoned-work recovery to the session database, preventing stale or crashed processes from renewing ownership or mutating work after another runtime has recovered it.
+- Moved extension-package operation leases out of repositories and into private per-user state, with canonical path identity, cancellation, crash recovery, and file-identity validation.
+- Bounded graceful termination and provider-network cleanup so uncooperative subprocesses, dispatchers, and extension providers cannot indefinitely delay shutdown.
+
+### Security
+
+- Hardened SQLite migrations, runtime leases, artifact writes, and package-mutation locks against concurrent-process races, unsafe shared directories, symlink substitution, and stale file-descriptor replacement.
+
 ## [0.1.6] - 2026-07-16
 
 ### Changed

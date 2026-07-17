@@ -872,7 +872,11 @@ export class TuiController {
     this.#syncActivityTimer();
     this.#transcriptOffset = 0;
     if (this.mode === "full") this.#scheduleRender();
-    else for (const envelope of envelopes) this.#renderClassic(envelope);
+    else {
+      const entries = this.#model.entries.filter((entry) => entry.kind !== "startup");
+      const rendered = renderTranscriptFrame(entries, terminalSize(this.output, this.capabilities).columns, this.#theme);
+      if (rendered.text !== "") this.#write(`${rendered.text}\n`);
+    }
   }
 
   notify(message: string, kind: "status" | "warning" | "error" = "status"): void {
@@ -3527,6 +3531,7 @@ export class TuiController {
     }
     if (this.#keybindings.matches("app.session.resume", event)) {
       this.openPicker("session", "Sessions");
+      this.#emit({ type: "session_open" });
       return;
     }
     if (this.#keybindings.matches("app.session.new", event)) {

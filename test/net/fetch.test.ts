@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import test from "node:test";
 import { brotliCompressSync } from "node:zlib";
+import { Agent } from "undici";
 
 import { SecretRedactor } from "../../src/auth/redaction.js";
 import { createNetworkTransport } from "../../src/net/fetch.js";
@@ -80,6 +81,52 @@ test("network transport decodes compressed JSON with its matching dispatcher imp
   const response = await transport.fetch(`http://127.0.0.1:${port}/compressed`);
   assert.equal(response.headers.get("content-type"), "application/json");
   assert.deepEqual(await response.json(), { ok: true });
+});
+
+test("network transport force-closes responses that outlive the graceful shutdown deadline", async (t) => {
+  let heldResponse: ServerResponse | undefined;
+  const server = createServer((_request, response) => {
+    heldResponse = response;
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("still-open");
+  });
+  const port = await listen(server);
+  t.after(async () => {
+    heldResponse?.destroy();
+    server.closeAllConnections();
+    await close(server);
+  });
+  const transport = createNetworkTransport({ environment: {}, closeTimeoutMs: 25 });
+  const response = await transport.fetch(`http://127.0.0.1:${port}/stream`);
+  assert.equal(response.status, 200);
+
+  const startedAt = Date.now();
+  await transport.close();
+  assert.ok(Date.now() - startedAt < 1_000, "network transport close exceeded its bounded deadline");
+});
+
+test("network transport destroys its dispatcher when graceful close rejects", async () => {
+  const prototype = Agent.prototype as unknown as {
+    close(): Promise<void>;
+    destroy(error?: Error): Promise<void>;
+  };
+  const closeDescriptor = Object.getOwnPropertyDescriptor(prototype, "close");
+  const destroyDescriptor = Object.getOwnPropertyDescriptor(prototype, "destroy");
+  let destroys = 0;
+  prototype.close = async () => { throw new Error("graceful dispatcher close failed"); };
+  prototype.destroy = async function (): Promise<void> {
+    destroys += 1;
+  };
+  try {
+    const transport = createNetworkTransport({ environment: {} });
+    await assert.rejects(transport.close(), /graceful dispatcher close failed/u);
+    assert.equal(destroys, 1);
+  } finally {
+    if (closeDescriptor === undefined) delete (prototype as unknown as Record<string, unknown>).close;
+    else Object.defineProperty(prototype, "close", closeDescriptor);
+    if (destroyDescriptor === undefined) delete (prototype as unknown as Record<string, unknown>).destroy;
+    else Object.defineProperty(prototype, "destroy", destroyDescriptor);
+  }
 });
 
 test("network transport resolves lowercase variables first, supports ALL_PROXY, and accepts explicit opt-out", async () => {

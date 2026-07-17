@@ -358,6 +358,37 @@ test("resource discovery honors caller cancellation and rejects untrusted projec
   }
 });
 
+test("resource discovery has a default host deadline when callers omit a signal", { timeout: 1_000 }, async (context) => {
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  (globalThis as Record<string, unknown>).__resourceDefaultDeadlineStarted = started;
+  const source = `export default (api) => api.on("resources_discover", (_event, context) => {
+    globalThis.__resourceDefaultDeadlineSignal = context.signal;
+    globalThis.__resourceDefaultDeadlineStarted();
+    return new Promise(() => {});
+  });\n`;
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-resource-deadline-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "extension.mjs");
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "resource-deadline",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root, resourceDiscoveryTimeoutMs: 25 });
+
+  try {
+    const pending = host.discoverResources("startup");
+    await ready;
+    await assert.rejects(within(pending, 250), /aborted|timeout/i);
+    assert.equal(((globalThis as Record<string, unknown>).__resourceDefaultDeadlineSignal as AbortSignal).aborted, true);
+  } finally {
+    await host.close();
+    delete (globalThis as Record<string, unknown>).__resourceDefaultDeadlineStarted;
+    delete (globalThis as Record<string, unknown>).__resourceDefaultDeadlineSignal;
+  }
+});
+
 test("runtime shutdown listeners and asynchronous disposers are bounded", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-shutdown-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
@@ -384,7 +415,120 @@ test("runtime shutdown listeners and asynchronous disposers are bounded", async 
     sourcePath: disposerPath,
     sha256: sha256(disposerSource),
   }], { workspace: root, shutdownTimeoutMs: 25 });
-  await assert.rejects(within(disposerHost.close()), /aborted|timeout/i);
+  await assert.rejects(within(disposerHost.close()), /aborted|timed out|timeout/i);
+});
+
+test("runtime shutdown phases do not feed cleanup through an expired earlier deadline", { timeout: 1_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-shutdown-phases-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "shutdown-phases.mjs");
+  const order: string[] = [];
+  let disposerStarted!: () => void;
+  let releaseDisposer!: () => void;
+  let registrationStarted!: () => void;
+  let releaseRegistration!: () => void;
+  const disposerReady = new Promise<void>((resolve) => { disposerStarted = resolve; });
+  const disposerRelease = new Promise<void>((resolve) => { releaseDisposer = resolve; });
+  const registrationReady = new Promise<void>((resolve) => { registrationStarted = resolve; });
+  const registrationRelease = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+  Object.assign(globalThis, {
+    __shutdownPhaseOrder: order,
+    __shutdownPhaseDisposerStarted: disposerStarted,
+    __shutdownPhaseDisposerRelease: disposerRelease,
+  });
+  const source = `export default (api) => {
+    api.on("session_shutdown", () => new Promise(() => {}));
+    api.onDispose(async () => {
+      globalThis.__shutdownPhaseOrder.push("disposer:start");
+      globalThis.__shutdownPhaseDisposerStarted();
+      await globalThis.__shutdownPhaseDisposerRelease;
+      globalThis.__shutdownPhaseOrder.push("disposer:end");
+    });
+  };\n`;
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "shutdown-phases",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root, shutdownTimeoutMs: 50 });
+  host.addRegistrationCleanup(async () => {
+    order.push("registration:start");
+    registrationStarted();
+    await registrationRelease;
+    order.push("registration:end");
+  });
+
+  try {
+    const closing = host.close();
+    await within(disposerReady);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ["disposer:start"]);
+    releaseDisposer();
+    await within(registrationReady);
+    assert.deepEqual(order, ["disposer:start", "disposer:end", "registration:start"]);
+    releaseRegistration();
+    await within(closing);
+    assert.deepEqual(order, ["disposer:start", "disposer:end", "registration:start", "registration:end"]);
+  } finally {
+    releaseDisposer();
+    releaseRegistration();
+    await host.close().catch(() => undefined);
+    delete (globalThis as Record<string, unknown>).__shutdownPhaseOrder;
+    delete (globalThis as Record<string, unknown>).__shutdownPhaseDisposerStarted;
+    delete (globalThis as Record<string, unknown>).__shutdownPhaseDisposerRelease;
+  }
+});
+
+test("a hung shutdown listener does not prevent another shutdown listener from running", { timeout: 1_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-shutdown-fairness-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "shutdown-fairness.mjs");
+  const stateKey = "__runtimeShutdownFairness";
+  (globalThis as Record<string, unknown>)[stateKey] = false;
+  const source = `export default (api) => {
+    api.on("session_shutdown", () => new Promise(() => {}));
+    api.on("session_shutdown", () => { globalThis[${JSON.stringify(stateKey)}] = true; });
+  };\n`;
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "shutdown-fairness",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root, shutdownTimeoutMs: 25 });
+
+  try {
+    await host.close();
+    assert.equal((globalThis as Record<string, unknown>)[stateKey], true);
+  } finally {
+    delete (globalThis as Record<string, unknown>)[stateKey];
+    await host.close().catch(() => undefined);
+  }
+});
+
+test("a hung disposer does not prevent remaining cleanup callbacks from starting", { timeout: 1_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-disposer-fairness-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "disposer-fairness.mjs");
+  const stateKey = "__runtimeDisposerFairness";
+  (globalThis as Record<string, unknown>)[stateKey] = false;
+  const source = `export default (api) => {
+    api.onDispose(() => { globalThis[${JSON.stringify(stateKey)}] = true; });
+    api.onDispose(() => new Promise(() => {}));
+  };\n`;
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "disposer-fairness",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root, shutdownTimeoutMs: 25 });
+
+  try {
+    await assert.rejects(host.close(), /timed out after 25ms/u);
+    assert.equal((globalThis as Record<string, unknown>)[stateKey], true);
+  } finally {
+    delete (globalThis as Record<string, unknown>)[stateKey];
+    await host.close().catch(() => undefined);
+  }
 });
 
 test("before-provider request hooks chain safe patches and reject identity, tool, and secret-unsafe failures", async (context) => {

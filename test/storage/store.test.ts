@@ -315,6 +315,39 @@ test("forking moves only the new branch head and preserves immutable ancestry", 
   store.close();
 });
 
+test("event tails bound replay work by event count and encoded bytes", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("tail") });
+  const thread = store.createThread({ threadId: "thread_tail" });
+  for (let index = 0; index < 6; index += 1) {
+    store.appendEvent({
+      threadId: thread.threadId,
+      event: { type: "warning", code: `warning-${index}`, message: `message-${index}` },
+    });
+  }
+
+  const byCount = store.listEventTail(thread.threadId, undefined, { maxEvents: 3, maxBytes: 4_096 });
+  assert.equal(byCount.truncated, true);
+  assert.deepEqual(byCount.events.map((entry) => entry.event.type === "warning" ? entry.event.code : ""), [
+    "warning-3",
+    "warning-4",
+    "warning-5",
+  ]);
+
+  const byBytes = store.listEventTail(thread.threadId, undefined, { maxEvents: 16, maxBytes: 100 });
+  assert.equal(byBytes.truncated, true);
+  assert.ok(byBytes.events.length > 0 && byBytes.events.length < 6);
+  const latest = byBytes.events.at(-1)?.event;
+  assert.equal(latest?.type, "warning");
+  assert.equal(latest?.type === "warning" ? latest.code : "", "warning-5");
+
+  const complete = store.listEventTail(thread.threadId, undefined, { maxEvents: 16, maxBytes: 4_096 });
+  assert.equal(complete.truncated, false);
+  assert.equal(complete.events.length, 6);
+  assert.throws(() => store.listEventTail(thread.threadId, undefined, { maxEvents: 0 }), /maxEvents/u);
+  assert.throws(() => store.listEventTail(thread.threadId, undefined, { maxBytes: 0 }), /maxBytes/u);
+  store.close();
+});
+
 test("entry labels resolve latest changes across branches and survive restart", () => {
   const path = temporaryDatabase();
   let store = new SessionStore(path, { idFactory: ids("labels") });

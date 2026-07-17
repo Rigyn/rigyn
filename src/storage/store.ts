@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -42,6 +42,7 @@ import type {
   RunInputQueueState,
   RunInputRecoveryReport,
   RunRecord,
+  RuntimeOwnerLease,
   StorageOptions,
   ThreadPreview,
   ThreadPreviewOptions,
@@ -51,6 +52,12 @@ import type {
 const TERMINAL_RUN_STATES = new Set<RunState>(["completed", "failed", "cancelled"]);
 const DEFAULT_ARTIFACT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_ARTIFACT_STORE_BYTES = 256 * 1024 * 1024;
+const DEFAULT_RUNTIME_OWNER_LEASE_MS = 30_000;
+const MAX_RUNTIME_OWNER_LEASE_MS = 60 * 60 * 1_000;
+const DEFAULT_EVENT_TAIL_LIMIT = 4_096;
+const DEFAULT_EVENT_TAIL_BYTES = 8 * 1024 * 1024;
+const MAX_EVENT_TAIL_LIMIT = 16_384;
+const MAX_EVENT_TAIL_BYTES = 32 * 1024 * 1024;
 export const MAX_ENTRY_LABEL_BYTES = 256;
 export const MAX_BRANCH_SUMMARY_SOURCE_EVENTS = 4_096;
 export const MAX_BRANCH_SUMMARY_EVENT_BYTES = 128 * 1024;
@@ -766,6 +773,10 @@ export class SessionStore {
   readonly maxArtifactStoreBytes: number;
   readonly clock: () => Date;
   readonly idFactory: (prefix: string) => string;
+  readonly runtimeOwnerLeaseMs: number;
+  readonly #runtimeOwnerId = randomUUID();
+  #runtimeOwner: RuntimeOwnerLease | undefined;
+  #closed = false;
 
   constructor(path: string, options: StorageOptions = {}) {
     const maxArtifactBytes = options.maxArtifactBytes ?? DEFAULT_ARTIFACT_BYTES;
@@ -782,20 +793,39 @@ export class SessionStore {
     if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
       throw new RangeError("busyTimeoutMs must be a non-negative safe integer");
     }
+    const runtimeOwnerLeaseMs = options.runtimeOwnerLeaseMs ?? DEFAULT_RUNTIME_OWNER_LEASE_MS;
+    if (
+      !Number.isSafeInteger(runtimeOwnerLeaseMs)
+      || runtimeOwnerLeaseMs < 1
+      || runtimeOwnerLeaseMs > MAX_RUNTIME_OWNER_LEASE_MS
+    ) {
+      throw new RangeError(`runtimeOwnerLeaseMs must be an integer from 1 to ${MAX_RUNTIME_OWNER_LEASE_MS}`);
+    }
     const database = openSessionDatabase(path, busyTimeoutMs);
     this.database = database;
     this.maxArtifactBytes = maxArtifactBytes;
     this.maxArtifactStoreBytes = maxArtifactStoreBytes;
     this.clock = options.clock ?? (() => new Date());
     this.idFactory = options.idFactory ?? createId;
+    this.runtimeOwnerLeaseMs = runtimeOwnerLeaseMs;
   }
 
   close(): void {
-    this.database.close();
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      this.releaseRuntimeOwner();
+    } finally {
+      this.database.close();
+    }
   }
 
   private now(): string {
     return this.clock().toISOString();
+  }
+
+  private ownerExpiry(now: Date): string {
+    return new Date(now.getTime() + this.runtimeOwnerLeaseMs).toISOString();
   }
 
   private transaction<T>(operation: () => T): T {
@@ -819,6 +849,181 @@ export class SessionStore {
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  currentRuntimeOwner(): RuntimeOwnerLease | undefined {
+    return this.#runtimeOwner === undefined ? undefined : { ...this.#runtimeOwner };
+  }
+
+  acquireRuntimeOwner(): RuntimeOwnerLease {
+    if (this.#closed) throw new HarnessError("STORAGE_CLOSED", "Session store is closed");
+    if (this.#runtimeOwner !== undefined) return this.heartbeatRuntimeOwner();
+    const lease = this.transaction(() => {
+      const now = this.clock();
+      const timestamp = now.toISOString();
+      const expiresAt = this.ownerExpiry(now);
+      const row = this.database.prepare(`
+        INSERT INTO runtime_owners(
+          owner_id, generation, pid, state, acquired_at, heartbeat_at, expires_at, closed_at
+        ) VALUES (?, 1, ?, 'active', ?, ?, ?, NULL)
+        ON CONFLICT(owner_id) DO UPDATE SET
+          generation = runtime_owners.generation + 1,
+          pid = excluded.pid,
+          state = 'active',
+          acquired_at = excluded.acquired_at,
+          heartbeat_at = excluded.heartbeat_at,
+          expires_at = excluded.expires_at,
+          closed_at = NULL
+        WHERE runtime_owners.state = 'closed' OR runtime_owners.expires_at <= excluded.heartbeat_at
+        RETURNING generation, pid, expires_at
+      `).get(this.#runtimeOwnerId, process.pid, timestamp, timestamp, expiresAt) as SqlRow | undefined;
+      if (row === undefined) {
+        throw new HarnessError("STORAGE_OWNER_CONFLICT", "Runtime owner identity is already held by a live generation");
+      }
+      return {
+        ownerId: this.#runtimeOwnerId,
+        generation: requiredNumber(row, "generation"),
+        pid: requiredNumber(row, "pid"),
+        expiresAt: requiredString(row, "expires_at"),
+      };
+    });
+    this.#runtimeOwner = lease;
+    return { ...lease };
+  }
+
+  heartbeatRuntimeOwner(): RuntimeOwnerLease {
+    if (this.#closed) throw new HarnessError("STORAGE_CLOSED", "Session store is closed");
+    const lease = this.#runtimeOwner;
+    if (lease === undefined) throw new HarnessError("STORAGE_OWNER", "Session store has no runtime owner");
+    const refreshed = this.transaction(() => this.refreshRuntimeOwnerInTransaction(lease));
+    return { ...refreshed };
+  }
+
+  releaseRuntimeOwner(): void {
+    const lease = this.#runtimeOwner;
+    if (lease === undefined) return;
+    try {
+      this.transaction(() => {
+        const timestamp = this.now();
+        this.database.prepare(`
+          UPDATE runtime_owners
+          SET state = 'closed', heartbeat_at = ?, expires_at = ?, closed_at = ?
+          WHERE owner_id = ? AND generation = ?
+        `).run(timestamp, timestamp, timestamp, lease.ownerId, lease.generation);
+      });
+    } finally {
+      this.#runtimeOwner = undefined;
+    }
+  }
+
+  private refreshRuntimeOwnerInTransaction(lease = this.#runtimeOwner): RuntimeOwnerLease {
+    if (lease === undefined) throw new HarnessError("STORAGE_OWNER", "Session store has no runtime owner");
+    const now = this.clock();
+    const timestamp = now.toISOString();
+    const expiresAt = this.ownerExpiry(now);
+    const row = this.database.prepare(`
+      UPDATE runtime_owners
+      SET heartbeat_at = ?, expires_at = ?
+      WHERE owner_id = ? AND generation = ? AND state = 'active'
+      RETURNING pid, expires_at
+    `).get(timestamp, expiresAt, lease.ownerId, lease.generation) as SqlRow | undefined;
+    if (row === undefined) {
+      throw new HarnessError("STORAGE_OWNER_FENCED", "Runtime owner lease expired, closed, or was superseded");
+    }
+    const refreshed: RuntimeOwnerLease = {
+      ownerId: lease.ownerId,
+      generation: lease.generation,
+      pid: requiredNumber(row, "pid"),
+      expiresAt: requiredString(row, "expires_at"),
+    };
+    this.#runtimeOwner = refreshed;
+    return refreshed;
+  }
+
+  private activeRuntimeOwnerInTransaction(): RuntimeOwnerLease | undefined {
+    return this.#runtimeOwner === undefined ? undefined : this.refreshRuntimeOwnerInTransaction();
+  }
+
+  private fenceExpiredRuntimeOwnersInTransaction(timestamp: string): void {
+    this.database.prepare(`
+      UPDATE runtime_owners
+      SET state = 'closed', closed_at = ?
+      WHERE state = 'active' AND expires_at <= ?
+    `).run(timestamp, timestamp);
+  }
+
+  private tagRunOwnerInTransaction(runId: RunId, owner: RuntimeOwnerLease | undefined): void {
+    if (owner === undefined) return;
+    this.database.prepare(`
+      INSERT INTO runtime_run_owners(run_id, owner_id, owner_generation)
+      VALUES (?, ?, ?)
+    `).run(runId, owner.ownerId, owner.generation);
+  }
+
+  private claimRunOwnerInTransaction(runId: RunId, owner: RuntimeOwnerLease | undefined): void {
+    if (owner === undefined) return;
+    this.database.prepare(`
+      INSERT INTO runtime_run_owners(run_id, owner_id, owner_generation)
+      VALUES (?, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        owner_id = excluded.owner_id,
+        owner_generation = excluded.owner_generation
+    `).run(runId, owner.ownerId, owner.generation);
+  }
+
+  private assertRunOwnerInTransaction(runId: RunId): void {
+    const owner = this.activeRuntimeOwnerInTransaction();
+    const row = this.database.prepare(`
+      SELECT owner_id, owner_generation FROM runtime_run_owners WHERE run_id = ?
+    `).get(runId) as SqlRow | undefined;
+    if (owner === undefined) {
+      if (row !== undefined) throw new HarnessError("STORAGE_OWNER_FENCED", `Run ${runId} belongs to a runtime owner`);
+      return;
+    }
+    if (
+      row === undefined
+      || requiredString(row, "owner_id") !== owner.ownerId
+      || requiredNumber(row, "owner_generation") !== owner.generation
+    ) {
+      throw new HarnessError("STORAGE_OWNER_FENCED", `Run ${runId} belongs to another runtime owner generation`);
+    }
+  }
+
+  private tagQueueOwnerInTransaction(queueId: string, owner: RuntimeOwnerLease | undefined): void {
+    if (owner === undefined) return;
+    this.database.prepare(`
+      INSERT INTO runtime_queue_owners(queue_id, owner_id, owner_generation)
+      VALUES (?, ?, ?)
+    `).run(queueId, owner.ownerId, owner.generation);
+  }
+
+  private claimQueueOwnerInTransaction(queueId: string, owner: RuntimeOwnerLease | undefined): void {
+    if (owner === undefined) return;
+    this.database.prepare(`
+      INSERT INTO runtime_queue_owners(queue_id, owner_id, owner_generation)
+      VALUES (?, ?, ?)
+      ON CONFLICT(queue_id) DO UPDATE SET
+        owner_id = excluded.owner_id,
+        owner_generation = excluded.owner_generation
+    `).run(queueId, owner.ownerId, owner.generation);
+  }
+
+  private assertQueueOwnerInTransaction(queueId: string): void {
+    const owner = this.activeRuntimeOwnerInTransaction();
+    const row = this.database.prepare(`
+      SELECT owner_id, owner_generation FROM runtime_queue_owners WHERE queue_id = ?
+    `).get(queueId) as SqlRow | undefined;
+    if (owner === undefined) {
+      if (row !== undefined) throw new HarnessError("STORAGE_OWNER_FENCED", `Run input ${queueId} belongs to a runtime owner`);
+      return;
+    }
+    if (
+      row === undefined
+      || requiredString(row, "owner_id") !== owner.ownerId
+      || requiredNumber(row, "owner_generation") !== owner.generation
+    ) {
+      throw new HarnessError("STORAGE_OWNER_FENCED", `Run input ${queueId} belongs to another runtime owner generation`);
     }
   }
 
@@ -1333,6 +1538,7 @@ export class SessionStore {
     for (const image of message.images ?? []) validateImageSource(image);
     assertQueuedRunMessages([message]);
     return this.transaction(() => {
+      const owner = this.activeRuntimeOwnerInTransaction();
       this.branchRow(input.threadId, branch);
       const existing = this.validRunInputRowsInTransaction(input.threadId, branch);
       assertQueuedRunMessages([...existing, message]);
@@ -1353,6 +1559,7 @@ export class SessionStore {
         input.images === undefined ? null : JSON.stringify(input.images),
         this.now(),
       );
+      this.tagQueueOwnerInTransaction(queueId, owner);
       const row = this.database.prepare("SELECT * FROM run_input_queue WHERE queue_id = ?").get(queueId) as SqlRow | undefined;
       if (row === undefined) throw new HarnessError("STORAGE_QUEUE", "Run input queue insert was lost");
       return this.decodeRunInputQueue(row);
@@ -1370,60 +1577,115 @@ export class SessionStore {
   }
 
   beginRunInputDelivery(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      UPDATE run_input_queue
-      SET state = 'draining'
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'queued'
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) {
-      throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} is no longer queued`);
-    }
+    this.transaction(() => {
+      this.assertQueueOwnerInTransaction(queueId);
+      const result = this.database.prepare(`
+        UPDATE run_input_queue
+        SET state = 'draining'
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'queued'
+      `).run(queueId, threadId, validateBranchName(branch));
+      if (result.changes !== 1) {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} is no longer queued`);
+      }
+    });
   }
 
   completeRunInputDelivery(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      DELETE FROM run_input_queue
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'draining'
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) {
-      throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} was not draining`);
-    }
+    this.transaction(() => {
+      this.assertQueueOwnerInTransaction(queueId);
+      const result = this.database.prepare(`
+        DELETE FROM run_input_queue
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'draining'
+      `).run(queueId, threadId, validateBranchName(branch));
+      if (result.changes !== 1) {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} was not draining`);
+      }
+    });
   }
 
   dequeueRunInput(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      DELETE FROM run_input_queue
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
-        AND state IN ('queued', 'recoverable')
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) {
-      throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be dequeued`);
-    }
+    this.transaction(() => {
+      const selected = validateBranchName(branch);
+      const row = this.database.prepare(`
+        SELECT state FROM run_input_queue
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
+      `).get(queueId, threadId, selected) as SqlRow | undefined;
+      if (row === undefined) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be dequeued`);
+      const state = requiredString(row, "state");
+      if (state === "queued") this.assertQueueOwnerInTransaction(queueId);
+      else if (state === "recoverable") {
+        const existingOwner = this.database.prepare(`
+          SELECT 1 FROM runtime_queue_owners WHERE queue_id = ?
+        `).get(queueId);
+        if (existingOwner !== undefined) {
+          throw new HarnessError("STORAGE_OWNER_FENCED", `Recoverable run input ${queueId} still belongs to a runtime owner`);
+        }
+      } else {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be dequeued`);
+      }
+      const result = this.database.prepare(`
+        DELETE FROM run_input_queue
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
+          AND state IN ('queued', 'recoverable')
+      `).run(queueId, threadId, selected);
+      if (result.changes !== 1) {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be dequeued`);
+      }
+    });
   }
 
   leaseRunInput(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      UPDATE run_input_queue SET state = 'leased'
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
-        AND state IN ('queued', 'recoverable')
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be leased`);
+    this.transaction(() => {
+      const selected = validateBranchName(branch);
+      const row = this.database.prepare(`
+        SELECT state FROM run_input_queue
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
+      `).get(queueId, threadId, selected) as SqlRow | undefined;
+      if (row === undefined) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be leased`);
+      const state = requiredString(row, "state");
+      const owner = this.activeRuntimeOwnerInTransaction();
+      if (state === "queued") this.assertQueueOwnerInTransaction(queueId);
+      else if (state === "recoverable") {
+        const existingOwner = this.database.prepare(`
+          SELECT 1 FROM runtime_queue_owners WHERE queue_id = ?
+        `).get(queueId);
+        if (existingOwner !== undefined) {
+          throw new HarnessError("STORAGE_OWNER_FENCED", `Recoverable run input ${queueId} still belongs to a runtime owner`);
+        }
+      } else {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be leased`);
+      }
+      const result = this.database.prepare(`
+        UPDATE run_input_queue SET state = 'leased'
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
+          AND state IN ('queued', 'recoverable')
+      `).run(queueId, threadId, selected);
+      if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be leased`);
+      this.claimQueueOwnerInTransaction(queueId, owner);
+    });
   }
 
   acknowledgeRunInputLease(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      DELETE FROM run_input_queue
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'leased'
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input lease ${queueId} cannot be acknowledged`);
+    this.transaction(() => {
+      this.assertQueueOwnerInTransaction(queueId);
+      const result = this.database.prepare(`
+        DELETE FROM run_input_queue
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'leased'
+      `).run(queueId, threadId, validateBranchName(branch));
+      if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input lease ${queueId} cannot be acknowledged`);
+    });
   }
 
   releaseRunInputLease(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      UPDATE run_input_queue SET state = 'recoverable'
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'leased'
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input lease ${queueId} cannot be released`);
+    this.transaction(() => {
+      this.assertQueueOwnerInTransaction(queueId);
+      const result = this.database.prepare(`
+        UPDATE run_input_queue SET state = 'recoverable'
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ? AND state = 'leased'
+      `).run(queueId, threadId, validateBranchName(branch));
+      if (result.changes !== 1) throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input lease ${queueId} cannot be released`);
+      this.database.prepare("DELETE FROM runtime_queue_owners WHERE queue_id = ?").run(queueId);
+    });
   }
 
   dequeueRecoverableRunInputs(threadId: ThreadId, branch: string, limit?: number): RunInputQueueRecord[] {
@@ -1435,52 +1697,87 @@ export class SessionStore {
       this.branchRow(threadId, selected);
       const available = this.validRunInputRowsInTransaction(threadId, selected, ["recoverable"]);
       const records = limit === undefined ? available : available.slice(0, limit);
+      const dequeued: RunInputQueueRecord[] = [];
       for (const record of records) {
-        this.database.prepare("DELETE FROM run_input_queue WHERE queue_id = ? AND state = 'recoverable'")
-          .run(record.queueId);
+        const result = this.database.prepare(`
+          DELETE FROM run_input_queue AS queue
+          WHERE queue.queue_id = ? AND queue.state = 'recoverable'
+            AND NOT EXISTS (
+              SELECT 1 FROM runtime_queue_owners ownership
+              WHERE ownership.queue_id = queue.queue_id
+            )
+        `).run(record.queueId);
+        if (result.changes === 1) dequeued.push(record);
       }
-      return records;
+      return dequeued;
     });
   }
 
   markRunInputsRecoverable(threadId: ThreadId, branch: string): number {
     const selected = validateBranchName(branch);
     return this.transaction(() => {
+      const owner = this.activeRuntimeOwnerInTransaction();
       this.branchRow(threadId, selected);
+      const ownershipClause = owner === undefined
+        ? "NOT EXISTS (SELECT 1 FROM runtime_queue_owners ownership WHERE ownership.queue_id = queue.queue_id)"
+        : `EXISTS (
+            SELECT 1 FROM runtime_queue_owners ownership
+            WHERE ownership.queue_id = queue.queue_id
+              AND ownership.owner_id = ? AND ownership.owner_generation = ?
+          )`;
+      const ownershipParameters = owner === undefined ? [] : [owner.ownerId, owner.generation];
       this.database.prepare(`
         DELETE FROM run_input_queue AS queue
         WHERE queue.thread_id = ? AND queue.branch_name = ?
+          AND ${ownershipClause}
           AND queue.state != 'quarantined' AND EXISTS (
             SELECT 1 FROM events event
             WHERE event.thread_id = queue.thread_id
               AND event.kind = 'message_appended'
               AND json_extract(event.payload_json, '$.message.id') = queue.message_id
           )
-      `).run(threadId, selected);
+      `).run(threadId, selected, ...ownershipParameters);
       const result = this.database.prepare(`
-        UPDATE run_input_queue
+        UPDATE run_input_queue AS queue
         SET state = 'recoverable'
-        WHERE thread_id = ? AND branch_name = ? AND state IN ('queued', 'draining')
-      `).run(threadId, selected);
+        WHERE queue.thread_id = ? AND queue.branch_name = ?
+          AND queue.state IN ('queued', 'draining')
+          AND ${ownershipClause}
+      `).run(threadId, selected, ...ownershipParameters);
+      this.database.prepare(`
+        DELETE FROM runtime_queue_owners
+        WHERE queue_id IN (
+          SELECT queue_id FROM run_input_queue
+          WHERE thread_id = ? AND branch_name = ? AND state = 'recoverable'
+        )
+          ${owner === undefined ? "AND 0" : "AND owner_id = ? AND owner_generation = ?"}
+      `).run(threadId, selected, ...ownershipParameters);
       return Number(result.changes);
     });
   }
 
   markRunInputRecoverable(queueId: string, threadId: ThreadId, branch: string): void {
-    const result = this.database.prepare(`
-      UPDATE run_input_queue
-      SET state = 'recoverable'
-      WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
-        AND state IN ('queued', 'draining')
-    `).run(queueId, threadId, validateBranchName(branch));
-    if (result.changes !== 1) {
-      throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be recovered`);
-    }
+    this.transaction(() => {
+      this.assertQueueOwnerInTransaction(queueId);
+      const result = this.database.prepare(`
+        UPDATE run_input_queue
+        SET state = 'recoverable'
+        WHERE queue_id = ? AND thread_id = ? AND branch_name = ?
+          AND state IN ('queued', 'draining')
+      `).run(queueId, threadId, validateBranchName(branch));
+      if (result.changes !== 1) {
+        throw new HarnessError("STORAGE_QUEUE_CONFLICT", `Run input ${queueId} cannot be recovered`);
+      }
+      this.database.prepare("DELETE FROM runtime_queue_owners WHERE queue_id = ?").run(queueId);
+    });
   }
 
   recoverRunInputs(workspaceRoot: string): RunInputRecoveryReport {
     const workspace = validateWorkspaceRoot(workspaceRoot);
     return this.transaction(() => {
+      this.activeRuntimeOwnerInTransaction();
+      const recoveryTime = this.now();
+      this.fenceExpiredRuntimeOwnersInTransaction(recoveryTime);
       const beforeQuarantine = requiredNumber(
         this.database.prepare(`
           SELECT count(*) AS value FROM run_input_queue queue
@@ -1492,10 +1789,19 @@ export class SessionStore {
       const rows = this.database.prepare(`
         SELECT queue.* FROM run_input_queue queue
         JOIN threads thread ON thread.thread_id = queue.thread_id
+        LEFT JOIN runtime_queue_owners ownership ON ownership.queue_id = queue.queue_id
+        LEFT JOIN runtime_owners owner ON owner.owner_id = ownership.owner_id
         WHERE thread.workspace_root = ? AND queue.state != 'quarantined'
+          AND (
+            ownership.queue_id IS NULL
+            OR owner.state = 'closed'
+            OR owner.generation != ownership.owner_generation
+            OR owner.expires_at <= ?
+          )
         ORDER BY queue.queue_sequence
-      `).all(workspace) as SqlRow[];
+      `).all(workspace, recoveryTime) as SqlRow[];
       let reconciled = 0;
+      let recovered = 0;
       const groups = new Map<string, RunInputQueueRecord[]>();
       for (const row of rows) {
         let record: RunInputQueueRecord;
@@ -1507,6 +1813,7 @@ export class SessionStore {
           this.database.prepare(`
             UPDATE run_input_queue SET state = 'quarantined', quarantine_reason = ? WHERE queue_id = ?
           `).run(Buffer.from(reason, "utf8").subarray(0, 4096).toString("utf8"), queueId);
+          this.database.prepare("DELETE FROM runtime_queue_owners WHERE queue_id = ?").run(queueId);
           continue;
         }
         const delivered = this.database.prepare(`
@@ -1530,16 +1837,20 @@ export class SessionStore {
           this.database.prepare(`
             UPDATE run_input_queue SET state = 'quarantined', quarantine_reason = ? WHERE queue_id = ?
           `).run("Quarantined corrupt run input: durable queue aggregate exceeds limits", record.queueId);
+          this.database.prepare("DELETE FROM runtime_queue_owners WHERE queue_id = ?").run(record.queueId);
         }
       }
-      const result = this.database.prepare(`
-        UPDATE run_input_queue AS queue
-        SET state = 'recoverable'
-        WHERE queue.state IN ('queued', 'draining', 'leased') AND EXISTS (
-          SELECT 1 FROM threads thread
-          WHERE thread.thread_id = queue.thread_id AND thread.workspace_root = ?
-        )
-      `).run(workspace);
+      for (const group of groups.values()) {
+        for (const record of group) {
+          if (record.state === "recoverable") continue;
+          const result = this.database.prepare(`
+            UPDATE run_input_queue SET state = 'recoverable'
+            WHERE queue_id = ? AND state IN ('queued', 'draining', 'leased')
+          `).run(record.queueId);
+          if (result.changes === 1) recovered += 1;
+          this.database.prepare("DELETE FROM runtime_queue_owners WHERE queue_id = ?").run(record.queueId);
+        }
+      }
       const afterQuarantine = requiredNumber(
         this.database.prepare(`
           SELECT count(*) AS value FROM run_input_queue queue
@@ -1549,7 +1860,7 @@ export class SessionStore {
         "value",
       );
       return {
-        recovered: Number(result.changes),
+        recovered,
         reconciled,
         quarantined: afterQuarantine - beforeQuarantine,
       };
@@ -1728,6 +2039,7 @@ export class SessionStore {
     provider?: ProviderId;
     model?: string;
   }): RunId {
+    const owner = this.activeRuntimeOwnerInTransaction();
     const branch = validateBranchName(input.branch ?? this.getThread(input.threadId).defaultBranch);
     this.branchRow(input.threadId, branch);
     const runId = input.runId ?? this.idFactory("run");
@@ -1745,6 +2057,7 @@ export class SessionStore {
         "INSERT INTO runs(run_id, thread_id, branch_name, state, provider, model, started_at) VALUES (?, ?, ?, 'preparing', ?, ?, ?)",
       )
       .run(runId, input.threadId, branch, input.provider ?? null, input.model ?? null, startedAt);
+    this.tagRunOwnerInTransaction(runId, owner);
     return runId;
   }
 
@@ -1971,6 +2284,7 @@ export class SessionStore {
       throw new HarnessError("STORAGE_HEAD_CONFLICT", `Branch ${branch} changed before append`);
     }
     if (input.runId !== undefined) {
+      this.assertRunOwnerInTransaction(input.runId);
       const run = this.getRun(input.runId);
       if (run.threadId !== input.threadId || run.branch !== branch) {
         throw new HarnessError("STORAGE_RUN", `Run ${input.runId} does not belong to ${input.threadId}:${branch}`);
@@ -2058,9 +2372,10 @@ export class SessionStore {
     else if (event.type === "run_cancelled") state = "cancelled";
     if (state === undefined) return;
     const endedAt = TERMINAL_RUN_STATES.has(state) ? timestamp : null;
-    this.database
+    const result = this.database
       .prepare("UPDATE runs SET state = ?, ended_at = ? WHERE run_id = ?")
       .run(state, endedAt, runId);
+    if (result.changes !== 1) throw new HarnessError("STORAGE_OWNER_FENCED", `Run ${runId} changed ownership before its state update`);
   }
 
   listEvents(threadId: ThreadId, branch?: string): EventEnvelope[] {
@@ -2106,9 +2421,65 @@ export class SessionStore {
     return events;
   }
 
+  /** Bounded recent projection for presentation. Canonical agent/session reconstruction must use listEvents(). */
+  listEventTail(
+    threadId: ThreadId,
+    branch?: string,
+    options: { maxEvents?: number; maxBytes?: number } = {},
+  ): { events: EventEnvelope[]; truncated: boolean } {
+    const maxEvents = options.maxEvents ?? DEFAULT_EVENT_TAIL_LIMIT;
+    const maxBytes = options.maxBytes ?? DEFAULT_EVENT_TAIL_BYTES;
+    if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > MAX_EVENT_TAIL_LIMIT) {
+      throw new RangeError(`Event tail maxEvents must be from 1 through ${MAX_EVENT_TAIL_LIMIT}`);
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_EVENT_TAIL_BYTES) {
+      throw new RangeError(`Event tail maxBytes must be from 1 through ${MAX_EVENT_TAIL_BYTES}`);
+    }
+    const selectedBranch = validateBranchName(branch ?? this.getThread(threadId).defaultBranch);
+    const branchRow = this.branchRow(threadId, selectedBranch);
+    const head = optionalString(branchRow, "head_event_id");
+    if (head === undefined) return { events: [], truncated: false };
+    const rows = this.database.prepare(`
+      WITH RECURSIVE chain AS (
+        SELECT event.*, 1 AS depth,
+          length(CAST(event.payload_json AS BLOB)) AS retained_bytes
+        FROM events event
+        WHERE event.thread_id = ? AND event.event_id = ?
+          AND length(CAST(event.payload_json AS BLOB)) <= ?
+        UNION ALL
+        SELECT event.*, chain.depth + 1,
+          chain.retained_bytes + length(CAST(event.payload_json AS BLOB))
+        FROM events event
+        JOIN chain ON event.event_id = chain.parent_event_id
+        WHERE chain.depth < ?
+          AND chain.retained_bytes + length(CAST(event.payload_json AS BLOB)) <= ?
+      )
+      SELECT * FROM chain ORDER BY sequence ASC
+    `).all(threadId, head, maxBytes, maxEvents, maxBytes) as SqlRow[];
+    const oldest = rows[0];
+    return {
+      events: rows.map((row) => this.decodeEvent(row)),
+      truncated: oldest === undefined || optionalString(oldest, "parent_event_id") !== undefined,
+    };
+  }
+
   getModelSelection(threadId: ThreadId, branch?: string): { provider: ProviderId; model: string; reasoningEffort?: string } | undefined {
-    const event = this.listEvents(threadId, branch).findLast((entry) =>
-      entry.event.type === "model_selected" || entry.event.type === "run_started")?.event;
+    const selectedBranch = validateBranchName(branch ?? this.getThread(threadId).defaultBranch);
+    const branchRow = this.branchRow(threadId, selectedBranch);
+    const head = optionalString(branchRow, "head_event_id");
+    if (head === undefined) return undefined;
+    const row = this.database.prepare(`
+      WITH RECURSIVE chain AS (
+        SELECT * FROM events WHERE thread_id = ? AND event_id = ?
+        UNION ALL
+        SELECT event.* FROM events event JOIN chain ON event.event_id = chain.parent_event_id
+      )
+      SELECT * FROM chain
+      WHERE kind IN ('model_selected', 'run_started')
+      ORDER BY sequence DESC
+      LIMIT 1
+    `).get(threadId, head) as SqlRow | undefined;
+    const event = row === undefined ? undefined : this.decodeEvent(row).event;
     if (event?.type === "model_selected") {
       return {
         provider: event.provider,
@@ -2136,11 +2507,30 @@ export class SessionStore {
     const owner = validateExtensionId(extensionId);
     const version = validateExtensionSchemaVersion(schema);
     const selectedKey = validateExtensionEntryKey(key, "Extension state key");
-    return this.listEvents(threadId, branch).findLast((entry): entry is EventEnvelope<ExtensionStateEvent> =>
-      entry.event.type === "extension_state" &&
-      entry.event.extensionId === owner &&
-      entry.event.schemaVersion === version &&
-      entry.event.key === selectedKey);
+    const selectedBranch = validateBranchName(branch ?? this.getThread(threadId).defaultBranch);
+    const branchRow = this.branchRow(threadId, selectedBranch);
+    const head = optionalString(branchRow, "head_event_id");
+    if (head === undefined) return undefined;
+    const row = this.database.prepare(`
+      WITH RECURSIVE chain AS (
+        SELECT * FROM events WHERE thread_id = ? AND event_id = ?
+        UNION ALL
+        SELECT event.* FROM events event JOIN chain ON event.event_id = chain.parent_event_id
+      )
+      SELECT * FROM chain
+      WHERE kind = 'extension_state'
+        AND json_extract(payload_json, '$.extensionId') = ?
+        AND json_extract(payload_json, '$.schemaVersion') = ?
+        AND json_extract(payload_json, '$.key') = ?
+      ORDER BY sequence DESC
+      LIMIT 1
+    `).get(threadId, head, owner, version, selectedKey) as SqlRow | undefined;
+    if (row === undefined) return undefined;
+    const envelope = this.decodeEvent(row);
+    if (envelope.event.type !== "extension_state") {
+      throw new HarnessError("STORAGE_CORRUPT", "Extension state query returned a different event kind");
+    }
+    return envelope as EventEnvelope<ExtensionStateEvent>;
   }
 
   listExtensionStates(
@@ -2200,17 +2590,38 @@ export class SessionStore {
   recoverAbandonedRuns(workspaceRoot?: string): RecoveryReport {
     const workspace = workspaceRoot === undefined ? undefined : validateWorkspaceRoot(workspaceRoot);
     return this.transaction(() => {
+      const recoveringOwner = this.activeRuntimeOwnerInTransaction();
+      const recoveryTime = this.now();
+      this.fenceExpiredRuntimeOwnersInTransaction(recoveryTime);
       const activeRuns = this.database
         .prepare(
           workspace === undefined
-            ? "SELECT * FROM runs WHERE state NOT IN ('completed', 'failed', 'cancelled') ORDER BY started_at, run_id"
+            ? `SELECT runs.* FROM runs
+               LEFT JOIN runtime_run_owners ownership ON ownership.run_id = runs.run_id
+               LEFT JOIN runtime_owners owner ON owner.owner_id = ownership.owner_id
+               WHERE runs.state NOT IN ('completed', 'failed', 'cancelled')
+                 AND (
+                   ownership.run_id IS NULL
+                   OR owner.state = 'closed'
+                   OR owner.generation != ownership.owner_generation
+                   OR owner.expires_at <= ?
+                 )
+               ORDER BY runs.started_at, runs.run_id`
             : `SELECT runs.* FROM runs
                INNER JOIN threads ON threads.thread_id = runs.thread_id
+               LEFT JOIN runtime_run_owners ownership ON ownership.run_id = runs.run_id
+               LEFT JOIN runtime_owners owner ON owner.owner_id = ownership.owner_id
                WHERE runs.state NOT IN ('completed', 'failed', 'cancelled')
                  AND threads.workspace_root = ?
+                 AND (
+                   ownership.run_id IS NULL
+                   OR owner.state = 'closed'
+                   OR owner.generation != ownership.owner_generation
+                   OR owner.expires_at <= ?
+                 )
                ORDER BY runs.started_at, runs.run_id`,
         )
-        .all(...(workspace === undefined ? [] : [workspace])) as SqlRow[];
+        .all(...(workspace === undefined ? [recoveryTime] : [workspace, recoveryTime])) as SqlRow[];
       const report: RecoveryReport = {
         recoveredRunIds: [],
         repairedToolCallIds: [],
@@ -2219,6 +2630,11 @@ export class SessionStore {
       };
       for (const row of activeRuns) {
         const run = this.decodeRun(row);
+        if (recoveringOwner === undefined) {
+          this.database.prepare("DELETE FROM runtime_run_owners WHERE run_id = ?").run(run.runId);
+        } else {
+          this.claimRunOwnerInTransaction(run.runId, recoveringOwner);
+        }
         const eventRows = this.database
           .prepare("SELECT * FROM events WHERE run_id = ? ORDER BY sequence")
           .all(run.runId) as SqlRow[];
@@ -2426,6 +2842,7 @@ export class SessionStore {
     const timestamp = this.now();
     const digest = createHash("sha256").update(input.content).digest("hex");
     this.transaction(() => {
+      if (input.runId !== undefined) this.assertRunOwnerInTransaction(input.runId);
       const totalRow = this.database
         .prepare("SELECT COALESCE(SUM(byte_length), 0) AS total FROM artifacts")
         .get() as SqlRow | undefined;

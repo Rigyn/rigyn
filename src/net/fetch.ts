@@ -19,6 +19,7 @@ export interface NetworkTransportOptions {
   connectTimeoutMs?: number;
   headersTimeoutMs?: number;
   bodyTimeoutMs?: number;
+  closeTimeoutMs?: number;
   redactor?: SecretRedactor;
 }
 
@@ -51,6 +52,7 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
     headersTimeout: timeout(options.headersTimeoutMs, 300_000, "headersTimeoutMs"),
     bodyTimeout: timeout(options.bodyTimeoutMs, 300_000, "bodyTimeoutMs"),
   };
+  const closeTimeoutMs = timeout(options.closeTimeoutMs, 5_000, "closeTimeoutMs");
   const dispatcher: Dispatcher = http !== undefined || https !== undefined
     ? new EnvHttpProxyAgent({
         ...dispatcherOptions,
@@ -62,6 +64,7 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
       })
     : new Agent(dispatcherOptions);
   let closed = false;
+  let closePromise: Promise<void> | undefined;
   const transportFetch: typeof fetch = async (input, init) => {
     if (closed) throw new Error("Network transport is closed");
     return await undiciFetch(
@@ -84,9 +87,42 @@ export function createNetworkTransport(options: NetworkTransportOptions = {}): N
       noProxyConfigured: noProxy !== undefined && noProxy !== "",
     },
     async close() {
-      if (closed) return;
+      if (closePromise !== undefined) return await closePromise;
       closed = true;
-      await dispatcher.close();
+      closePromise = (async () => {
+        let timer: NodeJS.Timeout | undefined;
+        let completed = false;
+        let gracefulFailure: unknown;
+        try {
+          const graceful = dispatcher.close();
+          completed = await Promise.race([
+            graceful.then(() => true),
+            new Promise<false>((resolve) => {
+              timer = setTimeout(() => resolve(false), closeTimeoutMs);
+            }),
+          ]);
+        } catch (error) {
+          gracefulFailure = error;
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+        if (!completed) {
+          try {
+            await dispatcher.destroy(
+              gracefulFailure instanceof Error
+                ? gracefulFailure
+                : new Error(`Network transport close exceeded ${closeTimeoutMs}ms`),
+            );
+          } catch (destroyFailure) {
+            if (gracefulFailure !== undefined) {
+              throw new AggregateError([gracefulFailure, destroyFailure], "Network transport cleanup failed");
+            }
+            throw destroyFailure;
+          }
+        }
+        if (gracefulFailure !== undefined) throw gracefulFailure;
+      })();
+      return await closePromise;
     },
   };
 }

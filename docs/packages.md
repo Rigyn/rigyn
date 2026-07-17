@@ -103,6 +103,8 @@ rigyn packages reconcile        # install only the existing immutable lock
 
 Normal startup and `/reload` reconcile a trusted declaration only from its existing lock. A healthy installed copy is left untouched, so local edits, tags, ranges, and branches are never followed implicitly. A missing or changed installed copy is rebuilt from the exact locked npm version or Git revision and verified against its digests; a changed local source fails closed until an intentional update. The complete declarative set lives under `.rigyn/packages`, separate from imperative project installs under `.rigyn/extensions`, and is swapped atomically. Interrupted transactions recover the old set unless the new lock was durably committed.
 
+Package mutations use SQLite writer leases under the private per-user state directory (`$XDG_STATE_HOME/rigyn/package-leases`, or `~/.local/state/rigyn/package-leases`). Lease names are keyed by the canonical package root or workspace, so path aliases coordinate through the same file while repositories remain free of lock databases and SQLite sidecars. The small state files persist by design; SQLite releases their active lease automatically if a Rigyn process exits or crashes, so no PID-based stale-lock cleanup is required.
+
 Declarative reconciliation never enables dependency lifecycle scripts. Use an imperative, separately reviewed transaction when a dependency requires `--allow-scripts`. Lock and catalog metadata contain no absolute local path, registry token, HTTPS credential, or SSH secret. The resource catalog exposes safe declaration, filter, lock, and provenance metadata without exposing private staging paths.
 
 ## npm convention packages

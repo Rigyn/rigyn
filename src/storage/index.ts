@@ -30,6 +30,7 @@ export type {
   RunInputQueueState,
   RunInputRecoveryReport,
   RunRecord,
+  RuntimeOwnerLease,
   StorageOptions,
   ThreadRecord,
   ThreadMetadataCursor,

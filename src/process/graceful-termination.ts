@@ -5,6 +5,8 @@ const TERMINATION_EXIT_CODES: Readonly<Record<"SIGINT" | "SIGHUP" | "SIGTERM", n
   SIGHUP: 129,
   SIGTERM: 143,
 });
+const DEFAULT_FORCE_EXIT_AFTER_MS = 10_000;
+const MAX_FORCE_EXIT_AFTER_MS = 60_000;
 
 export type GracefulTerminationSignal = keyof typeof TERMINATION_EXIT_CODES;
 
@@ -27,13 +29,23 @@ export interface GracefulTerminationContext {
   throwIfTerminated(): void;
 }
 
+export interface GracefulTerminationOptions {
+  forceExitAfterMs?: number;
+}
+
 /** Own process termination long enough for command cleanup while preserving conventional exit status. */
 export async function withGracefulTermination<T>(
   operation: (context: GracefulTerminationContext) => Promise<T>,
+  options: GracefulTerminationOptions = {},
 ): Promise<T> {
+  const forceExitAfterMs = options.forceExitAfterMs ?? DEFAULT_FORCE_EXIT_AFTER_MS;
+  if (!Number.isSafeInteger(forceExitAfterMs) || forceExitAfterMs < 1 || forceExitAfterMs > MAX_FORCE_EXIT_AFTER_MS) {
+    throw new RangeError(`forceExitAfterMs must be an integer from 1 through ${MAX_FORCE_EXIT_AFTER_MS}`);
+  }
   const abort = new AbortController();
   const listeners = new Set<(signal: GracefulTerminationSignal) => void>();
   let receivedSignal: GracefulTerminationSignal | undefined;
+  let forceExitTimer: NodeJS.Timeout | undefined;
   const terminate = (signal: GracefulTerminationSignal): void => {
     if (receivedSignal !== undefined) {
       try { terminateTrackedProcessGroups(); } catch {}
@@ -42,6 +54,11 @@ export async function withGracefulTermination<T>(
     receivedSignal = signal;
     const error = new ProcessTerminationError(signal);
     process.exitCode = error.exitCode;
+    forceExitTimer = setTimeout(() => {
+      try { terminateTrackedProcessGroups(); } catch {}
+      process.exit(error.exitCode);
+    }, forceExitAfterMs);
+    forceExitTimer.unref();
     abort.abort(error);
     try { terminateTrackedProcessGroups(); } catch {}
     for (const listener of [...listeners]) {
@@ -75,6 +92,7 @@ export async function withGracefulTermination<T>(
   } catch (error) {
     failure = error;
   } finally {
+    if (forceExitTimer !== undefined) clearTimeout(forceExitTimer);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
     process.off("SIGHUP", onSighup);

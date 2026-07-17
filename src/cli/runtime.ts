@@ -149,6 +149,11 @@ interface RuntimeOptions {
 }
 
 const EPHEMERAL_DATABASE_PATH = ":memory:";
+const RUNTIME_RELOAD_TIMEOUT_MS = 60_000;
+const RUNTIME_RELOAD_COMMIT_TIMEOUT_MS = 5_000;
+const RUNTIME_PROVIDER_DISPOSAL_TIMEOUT_MS = 1_000;
+const RUNTIME_GENERATION_CLOSE_TIMEOUT_MS = 25_000;
+const RUNTIME_RELOAD_CLOSE_WAIT_TIMEOUT_MS = 40_000;
 
 interface RuntimeResourceGeneration {
   trusted: boolean;
@@ -538,6 +543,29 @@ function throwFailures(failures: unknown[], message: string): void {
   if (failures.length > 1) throw new AggregateError(failures, message);
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
+async function settleWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+async function settleWithin<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  try {
+    return await settleWithSignal(operation, signal);
+  } catch (error) {
+    if (signal.aborted) throw new Error(`${label} timed out after ${timeoutMs}ms`, { cause: error });
+    throw error;
+  }
+}
+
 function serviceResources(generation: RuntimeResourceGeneration): HarnessRuntimeResources {
   return {
     providers: generation.providers,
@@ -686,7 +714,7 @@ async function loadResourceGeneration(
     const packageManager = new LocalExtensionPackageManager({
       user: paths.userExtensions,
       ...(trusted ? { project: join(workspace, ".rigyn", "extensions") } : {}),
-    });
+    }, {}, {}, { operationLeaseRoot: join(paths.stateDirectory, "package-leases") });
     for (const scope of trusted ? ["user", "project"] as const : ["user"] as const) {
       try {
         installedPackages.push(...await packageManager.list(
@@ -704,6 +732,7 @@ async function loadResourceGeneration(
       const projectManager = new ProjectPackageManager({
         workspace,
         projectTrusted: true,
+        operationLeaseRoot: join(paths.stateDirectory, "package-leases"),
         commands: {
           ...(config.npmCommand === undefined ? {} : { npm: { command: config.npmCommand[0]!, prefix: config.npmCommand.slice(1) } }),
           ...(config.gitCommand === undefined ? {} : { git: { command: config.gitCommand[0]!, prefix: config.gitCommand.slice(1) } }),
@@ -742,7 +771,7 @@ async function loadResourceGeneration(
     const manager = new LocalExtensionPackageManager({ user: invocationPackageRoot }, {}, {
       ...(config.npmCommand === undefined ? {} : { npm: { command: config.npmCommand[0]!, prefix: config.npmCommand.slice(1) } }),
       ...(config.gitCommand === undefined ? {} : { git: { command: config.gitCommand[0]!, prefix: config.gitCommand.slice(1) } }),
-    });
+    }, { operationLeaseRoot: join(invocationPackageRoot, ".leases") });
     for (const source of packagePaths) {
       const selected = !isAbsolute(source) && !/^(?:npm|git|https|ssh):/u.test(source)
         ? resolve(workspace, source)
@@ -970,6 +999,7 @@ async function loadResourceGeneration(
   const close = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    const providerAdapters = [...new Set([...providers.list(), ...runtimeExtensions.providers()])];
     abortController.abort(new Error("Runtime resource generation closed"));
     const failures: unknown[] = [];
     try {
@@ -977,8 +1007,14 @@ async function loadResourceGeneration(
     } catch (error) {
       failures.push(error);
     }
-    const providerDisposals = [...new Set(providers.list())].flatMap((provider) =>
-      provider.dispose === undefined ? [] : [Promise.resolve().then(async () => await provider.dispose!())]);
+    const providerDisposals = providerAdapters.flatMap((provider) =>
+      provider.dispose === undefined
+        ? []
+        : [settleWithin(
+            Promise.resolve().then(async () => await provider.dispose!()),
+            RUNTIME_PROVIDER_DISPOSAL_TIMEOUT_MS,
+            `Provider ${provider.id} disposal`,
+          )]);
     const results = await Promise.allSettled([...providerDisposals, network.close()]);
     for (const result of results) if (result.status === "rejected") failures.push(result.reason);
     if (invocationPackageRoot !== undefined) {
@@ -1159,6 +1195,8 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
   const stableStore = store;
   const stableService = service;
   let closed = false;
+  let reloadFlight: Promise<RuntimeReloadResult> | undefined;
+  let reloadAbortController: AbortController | undefined;
   let extensionShutdownHandler: RuntimeExtensionShutdownHandler | undefined;
   const runtime: LoadedRuntime = {
     paths,
@@ -1184,86 +1222,126 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
     async reload(reloadOptions: RuntimeReloadOptions = {}): Promise<RuntimeReloadResult> {
       if (closed) throw new Error("Runtime is closed");
       reloadOptions.signal?.throwIfAborted();
-      const candidate = await loadResourceGeneration(paths, workspace, broker, credentials, options, "reload", reloadOptions.signal);
-      bindExtensionControls(candidate.runtimeExtensions);
-      try {
-        await reloadOptions.prepareExtensions?.(candidate.runtimeExtensions);
-      } catch (error) {
-        await candidate.close().catch(() => undefined);
-        throw error;
-      }
-      if (candidate.databasePath !== generation.databasePath) {
-        await candidate.close().catch(() => undefined);
-        throw new Error("databasePath cannot change during /reload; restart chat to use the new session database");
-      }
-      const previous = generation;
-      const warnings: string[] = [];
-      let oldSessionEnded = false;
-      let committed = false;
-      let previousClosed = false;
-      if (reloadOptions.session !== undefined) {
+      if (reloadFlight !== undefined) throw new Error("Runtime reload is already in progress");
+      const operationAbortController = new AbortController();
+      const operation = (async (): Promise<RuntimeReloadResult> => {
+        const signals = [operationAbortController.signal, AbortSignal.timeout(RUNTIME_RELOAD_TIMEOUT_MS)];
+        if (reloadOptions.signal !== undefined) signals.push(reloadOptions.signal);
+        const signal = AbortSignal.any(signals);
+        signal.throwIfAborted();
+        const candidate = await loadResourceGeneration(paths, workspace, broker, credentials, options, "reload", signal);
+        bindExtensionControls(candidate.runtimeExtensions);
         try {
-          await previous.runtimeExtensions.dispatch("session_end", {
-            ...reloadOptions.session,
-            workspace,
-            reason: "reload",
+          await reloadOptions.prepareExtensions?.(candidate.runtimeExtensions);
+        } catch (error) {
+          await candidate.close().catch(() => undefined);
+          throw error;
+        }
+        signal.throwIfAborted();
+        if (candidate.databasePath !== generation.databasePath) {
+          await candidate.close().catch(() => undefined);
+          throw new Error("databasePath cannot change during /reload; restart chat to use the new session database");
+        }
+        const previous = generation;
+        const warnings: string[] = [];
+        let oldSessionEnded = false;
+        let committed = false;
+        let previousClosed = false;
+        if (reloadOptions.session !== undefined) {
+          try {
+            await previous.runtimeExtensions.dispatch("session_end", {
+              ...reloadOptions.session,
+              workspace,
+              reason: "reload",
+            }, signal);
+          } catch (error) {
+            warnings.push(`Extension session shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          oldSessionEnded = true;
+        }
+        try {
+          await stableService.replaceRuntimeResources(serviceResources(candidate), {
+            signal,
+            commit: async () => {
+              generation = candidate;
+              activeNetwork = candidate.network;
+              assignGeneration(runtime, candidate);
+              previous.abortController.abort(new Error("Runtime resources reloaded"));
+              committed = true;
+              try {
+                if (reloadOptions.onCommit !== undefined) {
+                  await settleWithin(
+                    Promise.resolve().then(async () => await reloadOptions.onCommit!()),
+                    RUNTIME_RELOAD_COMMIT_TIMEOUT_MS,
+                    "Runtime reload commit callback",
+                  );
+                }
+              } catch (error) {
+                warnings.push(`Reloaded resources but UI refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              try {
+                await settleWithin(
+                  previous.close(),
+                  RUNTIME_GENERATION_CLOSE_TIMEOUT_MS,
+                  "Old runtime cleanup",
+                );
+              } catch (error) {
+                warnings.push(`Old runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+              previousClosed = true;
+              if (reloadOptions.session !== undefined) {
+                try {
+                  await candidate.runtimeExtensions.dispatch("session_start", {
+                    ...reloadOptions.session,
+                    workspace,
+                    reason: "reload",
+                  });
+                } catch (error) {
+                  warnings.push(`Extension session restart failed: ${error instanceof Error ? error.message : String(error)}`);
+                }
+              }
+            },
           });
         } catch (error) {
-          warnings.push(`Extension session shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (!committed && oldSessionEnded && reloadOptions.session !== undefined) {
+            await previous.runtimeExtensions.dispatch("session_start", {
+              ...reloadOptions.session,
+              workspace,
+              reason: "reload_rollback",
+            }).catch(() => undefined);
+          }
+          if (!committed) await candidate.close().catch(() => undefined);
+          throw error;
         }
-        oldSessionEnded = true;
-      }
+        if (!previousClosed) await previous.close().catch(() => undefined);
+        return { warnings };
+      })();
+      reloadFlight = operation;
+      reloadAbortController = operationAbortController;
       try {
-        await stableService.replaceRuntimeResources(serviceResources(candidate), {
-          ...(reloadOptions.signal === undefined ? {} : { signal: reloadOptions.signal }),
-          commit: async () => {
-            generation = candidate;
-            activeNetwork = candidate.network;
-            assignGeneration(runtime, candidate);
-            previous.abortController.abort(new Error("Runtime resources reloaded"));
-            committed = true;
-            try {
-              await reloadOptions.onCommit?.();
-            } catch (error) {
-              warnings.push(`Reloaded resources but UI refresh failed: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            try {
-              await previous.close();
-            } catch (error) {
-              warnings.push(`Old runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            previousClosed = true;
-            if (reloadOptions.session !== undefined) {
-              try {
-                await candidate.runtimeExtensions.dispatch("session_start", {
-                  ...reloadOptions.session,
-                  workspace,
-                  reason: "reload",
-                });
-              } catch (error) {
-                warnings.push(`Extension session restart failed: ${error instanceof Error ? error.message : String(error)}`);
-              }
-            }
-          },
-        });
-      } catch (error) {
-        if (!committed && oldSessionEnded && reloadOptions.session !== undefined) {
-          await previous.runtimeExtensions.dispatch("session_start", {
-            ...reloadOptions.session,
-            workspace,
-            reason: "reload_rollback",
-          }).catch(() => undefined);
-        }
-        if (!committed) await candidate.close().catch(() => undefined);
-        throw error;
+        return await operation;
+      } finally {
+        if (reloadFlight === operation) reloadFlight = undefined;
+        if (reloadAbortController === operationAbortController) reloadAbortController = undefined;
       }
-      if (!previousClosed) await previous.close().catch(() => undefined);
-      return { warnings };
     },
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
       const failures: unknown[] = [];
+      const pendingReload = reloadFlight;
+      if (pendingReload !== undefined) {
+        reloadAbortController?.abort(new Error("Runtime closed while reload was in progress"));
+        try {
+          await settleWithin(
+            pendingReload.then(() => undefined, () => undefined),
+            RUNTIME_RELOAD_CLOSE_WAIT_TIMEOUT_MS,
+            "Runtime reload shutdown",
+          );
+        } catch (error) {
+          failures.push(error);
+        }
+      }
       try {
         await stableService.close();
       } catch (error) {

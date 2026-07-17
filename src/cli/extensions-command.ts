@@ -103,7 +103,7 @@ async function packageContext(argumentsValue: ParsedArguments, selectedScope: Ex
   }, {}, {
     ...(config.npmCommand === undefined ? {} : { npm: { command: config.npmCommand[0]!, prefix: config.npmCommand.slice(1) } }),
     ...(config.gitCommand === undefined ? {} : { git: { command: config.gitCommand[0]!, prefix: config.gitCommand.slice(1) } }),
-  });
+  }, { operationLeaseRoot: join(paths.stateDirectory, "package-leases") });
   return { paths, workspace, trusted, manager };
 }
 

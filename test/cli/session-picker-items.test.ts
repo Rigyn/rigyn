@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { indexedSessionPickerItems, sessionPickerItems, sessionPickerPage } from "../../src/cli/main.js";
+import {
+  indexedSessionPickerItems,
+  markCurrentSessionPickerItems,
+  refreshSessionCatalogOnOpen,
+  resolveSessionPickerSelection,
+  sessionPickerItems,
+  sessionPickerPage,
+} from "../../src/cli/main.js";
 import type { LoadedRuntime } from "../../src/cli/runtime.js";
 import { WorkspaceSessionIndex } from "../../src/cli/session-index.js";
 import { SessionStore } from "../../src/storage/store.js";
@@ -17,6 +24,74 @@ function message(id: string, role: "user" | "assistant", text: string) {
     content: [{ type: "text" as const, text }],
   };
 }
+
+test("cached session picker items update the active marker without rebuilding previews", () => {
+  const items = [
+    {
+      id: "first",
+      label: "First",
+      value: "first",
+      session: { path: "db#first", createdAt: "2026-01-01", updatedAt: "2026-01-01", current: true },
+    },
+    {
+      id: "second",
+      label: "Second",
+      value: "second",
+      session: { path: "db#second", createdAt: "2026-01-01", updatedAt: "2026-01-01", current: false },
+    },
+  ];
+
+  const updated = markCurrentSessionPickerItems(items, "second");
+
+  assert.deepEqual(updated.map((item) => item.session?.current), [false, true]);
+  assert.deepEqual(updated.map((item) => item.label), ["First", "Second"]);
+});
+
+test("session selection rejects an item removed by an asynchronous catalog reset", () => {
+  const stale = {
+    id: "stale",
+    label: "Stale session",
+    value: "stale",
+    session: { path: "db#stale", createdAt: "2026-01-01", updatedAt: "2026-01-01" },
+  };
+  const current = {
+    id: "current",
+    label: "Current session",
+    value: "current",
+    session: { path: "db#current", createdAt: "2026-01-01", updatedAt: "2026-01-02" },
+  };
+
+  assert.equal(resolveSessionPickerSelection([current], stale), undefined);
+  assert.equal(resolveSessionPickerSelection([current], current), current);
+});
+
+test("session selection resolves the current catalog item instead of stale metadata", () => {
+  const stale = {
+    id: "same",
+    label: "Old name",
+    value: "same",
+    session: { path: "db#same", createdAt: "2026-01-01", updatedAt: "2026-01-01" },
+  };
+  const current = {
+    ...stale,
+    label: "New name",
+    session: { ...stale.session, updatedAt: "2026-01-02" },
+  };
+
+  assert.equal(resolveSessionPickerSelection([current], stale), current);
+});
+
+test("opening a session picker queries only when its cached catalog is stale or out of scope", async () => {
+  let queries = 0;
+  const refresh = async () => { queries += 1; };
+
+  assert.equal(await refreshSessionCatalogOnOpen({ stale: false, scope: "current", query: "" }, refresh), false);
+  assert.equal(queries, 0);
+  assert.equal(await refreshSessionCatalogOnOpen({ stale: true, scope: "current", query: "" }, refresh), true);
+  assert.equal(await refreshSessionCatalogOnOpen({ stale: false, scope: "all", query: "" }, refresh), true);
+  assert.equal(await refreshSessionCatalogOnOpen({ stale: false, scope: "current", query: "old" }, refresh), true);
+  assert.equal(queries, 3);
+});
 
 test("session picker items carry rich metadata and bounded conversation search", () => {
   const store = new SessionStore(":memory:");

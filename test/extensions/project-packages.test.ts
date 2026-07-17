@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test, { type TestContext } from "node:test";
 
 import {
@@ -13,6 +15,8 @@ import {
   parseProjectPackageLock,
   projectPackageDeclarationSha256,
 } from "../../src/extensions/project-packages.js";
+import { EXTENSION_PACKAGE_LOCK } from "../../src/extensions/packages.js";
+import { keyedSqliteLeasePath } from "../../src/process/sqlite-lease.js";
 
 async function fixture(context: TestContext): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), "harness-project-packages-"));
@@ -130,11 +134,13 @@ test("untrusted declarations are ignored without reading malformed project conte
 
 test("explicit update locks local content and ordinary startup never follows later source edits", async (context) => {
   const workspace = await fixture(context);
+  const leaseRoot = `${workspace}-leases`;
+  context.after(async () => await rm(leaseRoot, { recursive: true, force: true }));
   const source = join(workspace, "package-source");
   await mkdir(source);
   await writePackage(source, "1.0.0", "first");
   await writeDeclaration(workspace);
-  const manager = new ProjectPackageManager({ workspace, projectTrusted: true });
+  const manager = new ProjectPackageManager({ workspace, projectTrusted: true, operationLeaseRoot: leaseRoot });
 
   assert.equal((await manager.check()).status, "unlocked");
   const updated = await manager.update({ all: true });
@@ -145,6 +151,8 @@ test("explicit update locks local content and ordinary startup never follows lat
   assert.match(firstLock, /"contentSha256"/u);
   assert.doesNotMatch(firstLock, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
 
+  assert.equal(EXTENSION_PACKAGE_LOCK, ".rigyn-packages.lock");
+  await writeFile(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, ".rigyn-packages.lock"), "legacy crash residue\n");
   await writePackage(source, "2.0.0", "second");
   const reconciled = await manager.reconcile();
   assert.equal(reconciled.changed, false, "a moving local source must not be read while the locked install is healthy");
@@ -155,6 +163,9 @@ test("explicit update locks local content and ordinary startup never follows lat
   assert.equal(second.packages[0]?.version, "2.0.0");
   assert.notEqual(await readFile(join(workspace, PROJECT_PACKAGE_LOCK), "utf8"), firstLock);
   assert.equal((await manager.check()).status, "ready");
+  const repositoryState = await readdir(join(workspace, ".rigyn"), { recursive: true });
+  assert.equal(repositoryState.some((entry) => /\.sqlite3(?:-|$)|-journal$|-wal$|-shm$/u.test(entry)), false);
+  assert.ok((await readdir(leaseRoot)).some((entry) => entry.endsWith(".sqlite3")));
 });
 
 test("failed resolution and staging preserve the prior lock and active package", async (context) => {
@@ -192,6 +203,51 @@ test("concurrent reconcilers serialize and repair only from the immutable lock",
   assert.deepEqual(results.map((entry) => entry.packages[0]?.version), ["1.0.0", "1.0.0"]);
   await access(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "runtime", "index.mjs"));
   assert.equal((await first.check()).status, "ready");
+});
+
+test("a crashed project-package lease owner recovers without leaving repository sidecars", {
+  skip: process.platform === "win32" ? "SIGKILL fixture requires POSIX signal delivery" : false,
+}, async (context) => {
+  const workspace = await fixture(context);
+  const leaseRoot = `${workspace}-leases`;
+  context.after(async () => await rm(leaseRoot, { recursive: true, force: true }));
+  const leasePath = await keyedSqliteLeasePath(leaseRoot, "project-packages", workspace);
+  const moduleUrl = pathToFileURL(new URL("../../src/process/sqlite-lease.ts", import.meta.url).pathname).href;
+  const source = `
+    import { withSqliteProcessLease } from ${JSON.stringify(moduleUrl)};
+    await withSqliteProcessLease(${JSON.stringify(leasePath)}, async () => {
+      process.stdout.write("locked\\n");
+      setInterval(() => {}, 1000);
+      await new Promise(() => {});
+    }, { timeoutMs: 2000, retryMs: 5, label: "project crash fixture" });
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", source], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  context.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  await new Promise<void>((resolveReady, reject) => {
+    const timer = setTimeout(() => reject(new Error("child did not acquire project package lease")), 2_000);
+    child.once("error", reject);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (!chunk.includes("locked")) return;
+      clearTimeout(timer);
+      resolveReady();
+    });
+  });
+
+  const manager = new ProjectPackageManager({ workspace, projectTrusted: true, operationLeaseRoot: leaseRoot });
+  let completed = false;
+  const check = manager.check().finally(() => { completed = true; });
+  await new Promise<void>((resolveWait) => setTimeout(resolveWait, 40));
+  assert.equal(completed, false, "project manager must coordinate through the private state lease");
+  child.kill("SIGKILL");
+  await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+  assert.equal((await check).status, "absent");
+  assert.deepEqual(await readdir(join(workspace, ".rigyn")), []);
 });
 
 test("aborting reconciliation terminates dependency commands and preserves active packages", { timeout: 10_000 }, async (context) => {

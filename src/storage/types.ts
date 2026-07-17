@@ -136,10 +136,18 @@ export interface RunInputRecoveryReport {
   quarantined: number;
 }
 
+export interface RuntimeOwnerLease {
+  ownerId: string;
+  generation: number;
+  pid: number;
+  expiresAt: string;
+}
+
 export interface StorageOptions {
   busyTimeoutMs?: number;
   maxArtifactBytes?: number;
   maxArtifactStoreBytes?: number;
+  runtimeOwnerLeaseMs?: number;
   clock?: () => Date;
   idFactory?: (prefix: string) => string;
 }

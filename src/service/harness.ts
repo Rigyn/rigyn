@@ -613,6 +613,11 @@ export class HarnessService {
   #workspaceRecovery: Promise<void> | undefined;
   #workspaceActivation: Promise<void> | undefined;
   #extensionSessionCleanup: (() => void) | undefined;
+  #runtimeOwnerHeartbeat: NodeJS.Timeout | undefined;
+  #runtimeOwnerStarted = false;
+  #runtimeOwnerFailure: HarnessError | undefined;
+  #initializing = false;
+  #closeStarted = false;
 
   constructor(options: HarnessOptions) {
     this.#options = options;
@@ -717,11 +722,66 @@ export class HarnessService {
   }
 
   async initialize(options: { recover?: boolean; skills?: readonly SkillMetadata[] } = {}): Promise<void> {
-    this.#workspaceBoundary = await WorkspaceBoundary.create(this.#options.workspace);
-    this.#skills = options.skills === undefined
-      ? await discoverSkills(this.#options.skillRoots ?? [])
-      : [...options.skills];
-    if (options.recover === true) await this.recoverWorkspaceRuntime();
+    if (this.#closed) {
+      if (this.#runtimeOwnerFailure !== undefined) {
+        throw new HarnessError(
+          "SERVICE_CLOSED",
+          "Harness service lost runtime storage ownership",
+          { cause: this.#runtimeOwnerFailure },
+        );
+      }
+      throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
+    }
+    if (this.#initializing) throw new HarnessError("SERVICE_INITIALIZING", "Harness service is already initializing");
+    this.#initializing = true;
+    let ownerStarted = false;
+    try {
+      ownerStarted = this.#startRuntimeOwner();
+      this.#workspaceBoundary = await WorkspaceBoundary.create(this.#options.workspace);
+      this.#skills = options.skills === undefined
+        ? await discoverSkills(this.#options.skillRoots ?? [])
+        : [...options.skills];
+      if (options.recover === true) await this.recoverWorkspaceRuntime();
+    } catch (error) {
+      if (ownerStarted) this.#stopRuntimeOwner();
+      throw error;
+    } finally {
+      this.#initializing = false;
+    }
+  }
+
+  #startRuntimeOwner(): boolean {
+    if (this.#runtimeOwnerStarted) return false;
+    this.#options.store.acquireRuntimeOwner();
+    this.#runtimeOwnerStarted = true;
+    const heartbeatMs = Math.max(1, Math.floor(this.#options.store.runtimeOwnerLeaseMs / 3));
+    this.#runtimeOwnerHeartbeat = setInterval(() => {
+      try {
+        this.#options.store.heartbeatRuntimeOwner();
+      } catch (error) {
+        if (
+          !(error instanceof HarnessError)
+          || !["STORAGE_OWNER", "STORAGE_OWNER_FENCED", "STORAGE_CLOSED"].includes(error.code)
+        ) return;
+        if (this.#runtimeOwnerHeartbeat !== undefined) clearInterval(this.#runtimeOwnerHeartbeat);
+        this.#runtimeOwnerHeartbeat = undefined;
+        this.#runtimeOwnerFailure = error;
+        this.#closed = true;
+        for (const threadId of this.#sessions.keys()) {
+          this.#manager.cancel(threadId, "Runtime storage ownership was lost");
+        }
+      }
+    }, heartbeatMs);
+    this.#runtimeOwnerHeartbeat.unref();
+    return true;
+  }
+
+  #stopRuntimeOwner(): void {
+    if (this.#runtimeOwnerHeartbeat !== undefined) clearInterval(this.#runtimeOwnerHeartbeat);
+    this.#runtimeOwnerHeartbeat = undefined;
+    if (!this.#runtimeOwnerStarted) return;
+    this.#runtimeOwnerStarted = false;
+    this.#options.store.releaseRuntimeOwner();
   }
 
   /** Recovers durable run and input-queue state for this workspace. */
@@ -1551,28 +1611,34 @@ export class HarnessService {
   }
 
   async close(reason = "runtime_close"): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closeStarted) return;
+    this.#closeStarted = true;
     this.#closed = true;
     this.#reloading = false;
-    const sessions = [...this.#sessions.entries()];
-    this.#sessions.clear();
-    await Promise.allSettled(sessions.map(async ([threadId, session]) => {
-      if (this.#options.managedExtensionLifecycle !== false) {
-        await this.#observeRuntime("session_end", {
-          reason,
-          threadId,
-          ...(session.branch === undefined ? {} : { branch: session.branch }),
-          workspace: this.#workspaceRoot,
-        });
-      }
-    }));
-    this.#pendingExtensionTurns.clear();
-    this.#extensionSessionCleanup?.();
-    this.#extensionSessionCleanup = undefined;
-    this.#extensionSessionListeners.clear();
-    this.#activeToolSelections.clear();
-    this.#activeToolRuns.clear();
-    this.#runtimeModelSelections.clear();
+    try {
+      const sessionEndReason = this.#runtimeOwnerFailure === undefined ? reason : "runtime_owner_lost";
+      const sessions = [...this.#sessions.entries()];
+      this.#sessions.clear();
+      await Promise.allSettled(sessions.map(async ([threadId, session]) => {
+        if (this.#options.managedExtensionLifecycle !== false) {
+          await this.#observeRuntime("session_end", {
+            reason: sessionEndReason,
+            threadId,
+            ...(session.branch === undefined ? {} : { branch: session.branch }),
+            workspace: this.#workspaceRoot,
+          });
+        }
+      }));
+      this.#pendingExtensionTurns.clear();
+      this.#extensionSessionCleanup?.();
+      this.#extensionSessionCleanup = undefined;
+      this.#extensionSessionListeners.clear();
+      this.#activeToolSelections.clear();
+      this.#activeToolRuns.clear();
+      this.#runtimeModelSelections.clear();
+    } finally {
+      this.#stopRuntimeOwner();
+    }
   }
 
   async #canonicalRunOptions<T extends Pick<RunOptions, "provider" | "model" | "reasoningEffort" | "signal">>(
