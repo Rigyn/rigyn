@@ -1961,7 +1961,9 @@ test("full reload replaces extension commands and providers without replacing th
   ]);
 });
 
-test("reload defers session preview queries until the session picker is opened", async (t) => {
+test("reload defers session preview queries until the session picker is opened", {
+  skip: process.platform !== "linux" || spawnSync("script", ["--version"], { stdio: "ignore" }).status !== 0,
+}, async (t) => {
   const instrumentation = await mkdtemp(join(tmpdir(), "rigyn-reload-preview-"));
   const preloadLog = join(instrumentation, "preload.log");
   const previewLog = join(instrumentation, "preview.log");

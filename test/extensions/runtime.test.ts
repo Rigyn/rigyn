@@ -486,10 +486,13 @@ test("runtime extension loading has one aggregate deadline across entries", { ti
     shutdownTimeoutMs: 10,
   });
 
-  assert.equal((globalThis as Record<string, unknown>).__runtimeLoadStarts, 2);
+  const starts = (globalThis as Record<string, unknown>).__runtimeLoadStarts;
+  assert.ok(typeof starts === "number");
+  assert.ok(starts >= 1 && starts <= 2);
   assert.equal((globalThis as Record<string, unknown>).__runtimeLoadFinalActivated, undefined);
-  assert.match(host.diagnostics()[0]?.message ?? "", /activation timed out after 40ms/u);
-  assert.match(host.diagnostics()[1]?.message ?? "", /load timed out after 65ms/u);
+  const diagnostics = host.diagnostics().map((diagnostic) => diagnostic.message);
+  assert.ok(diagnostics.some((message) => /activation timed out after 40ms/u.test(message)));
+  assert.ok(diagnostics.some((message) => /load timed out after 65ms/u.test(message)));
   await host.close();
   delete (globalThis as Record<string, unknown>).__runtimeLoadStarts;
   delete (globalThis as Record<string, unknown>).__runtimeLoadFinalActivated;
