@@ -164,6 +164,25 @@ test("frame renderer produces a stable transcript, editor, and footer layout", (
   assert.doesNotMatch(frame.text, /thr_1/u);
 });
 
+test("footer workspace uses portable display separators", () => {
+  const frame = renderFrame({
+    context: {
+      status: "idle",
+      workspace: join(homedir(), "projects", "rigyn"),
+      model: "fixture",
+    },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "",
+    editorCursor: 0,
+    inputLabel: "you",
+    inputMode: "normal",
+  }, { columns: 52, rows: 10 }, createTheme("mono", { color: false, unicode: false }));
+
+  assert.match(snapshot(frame.text), /(?:^|\n) ~\/projects\/rigyn(?:\n|$)/u);
+  assert.doesNotMatch(frame.text, /~\\/u);
+});
+
 test("completed reads show every stored line without depending on an expansion key", () => {
   const theme = createTheme("mono", { color: false, unicode: false });
   const read = {

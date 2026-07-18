@@ -998,7 +998,7 @@ function footerWorkspace(workspace: string): string {
   const insideHome = fromHome === ""
     || (fromHome !== ".." && !fromHome.startsWith(`..${sep}`) && !isAbsolute(fromHome));
   if (!insideHome) return workspace;
-  return fromHome === "" ? "~" : `~${sep}${fromHome}`;
+  return fromHome === "" ? "~" : `~/${fromHome.split(sep).join("/")}`;
 }
 
 function footerStatChips(view: TuiViewState): { tokens: string[]; cost?: string; context?: string } {

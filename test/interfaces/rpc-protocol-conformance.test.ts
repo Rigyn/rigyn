@@ -11,10 +11,17 @@ import {
   renderRpcNotificationReference,
 } from "../../src/interfaces/rpc-protocol.js";
 
+function methodHandlerRegistry(source: string): string | undefined {
+  const normalized = source.replaceAll("\r\n", "\n");
+  return /#createMethodHandlers\(\): RpcMethodHandlerRegistry \{\n    return \{\n([\s\S]*?)\n    \} satisfies RpcMethodHandlerRegistry;/u.exec(normalized)?.[1];
+}
+
 test("typed protocol exhaustively matches dispatcher methods and emitted notifications", async () => {
   const source = await readFile(new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url), "utf8");
-  const registry = /#createMethodHandlers\(\): RpcMethodHandlerRegistry \{\n    return \{\n([\s\S]*?)\n    \} satisfies RpcMethodHandlerRegistry;/u.exec(source)?.[1];
+  const registry = methodHandlerRegistry(source);
   assert.ok(registry, "dispatcher must define a typed method registry");
+  const crlfSource = source.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+  assert.ok(methodHandlerRegistry(crlfSource), "dispatcher registry discovery must support CRLF source");
   const methods = [...registry.matchAll(/^      "([^"]+)":/gmu)].map((match) => match[1]!);
   assert.equal(new Set(methods).size, methods.length, "dispatcher contains duplicate method registrations");
   assert.deepEqual([...methods].sort(), [...RPC_METHOD_NAMES].sort());
