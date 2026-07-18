@@ -345,7 +345,7 @@ test("installer PATH normalization preserves a mixed-case Windows Path once", ()
   assert.deepEqual(Object.keys(environment).filter((name) => name.toLowerCase() === "path"), ["PATH"]);
 });
 
-test("packed artifact installs into a blank home and completes an offline extension run", {
+test("packed artifact bootstraps into a blank home and completes a cached offline user install", {
   timeout: 240_000,
 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-packed-artifact-"));
@@ -390,18 +390,17 @@ test("packed artifact installs into a blank home and completes an offline extens
   paths.environment = isolatedEnvironment(paths);
   Object.assign(paths.environment, {
     RIGYN_INSTALL_NPM_CACHE: paths.npmCache,
-    npm_config_offline: "true",
     npm_config_prefix: paths.fakeGlobal,
   });
-  const installerEnvironment = {
+  const bootstrapEnvironment = {
     ...prependEnvironmentPath(paths.environment, join(paths.home, ".local", "bin")),
     RIGYN_INSTALL_DIR: paths.installRoot,
     npm_config_bin_links: "false",
     npm_config_global: "true",
     npm_config_omit: "dev optional",
   };
-  const bootstrapEnvironment = {
-    ...installerEnvironment,
+  const installerEnvironment = {
+    ...bootstrapEnvironment,
     npm_config_offline: "true",
   };
   assert.equal(
