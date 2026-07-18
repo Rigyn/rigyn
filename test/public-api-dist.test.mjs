@@ -171,7 +171,7 @@ test("built package import defers the native image backend", async () => {
       },
     });
     await import(${JSON.stringify(entry)});
-    process.stdout.write("native image backend deferred\\n");
+    (await import("node:fs")).writeFileSync(1, "native image backend deferred\\n");
   `;
   const result = await execute(process.execPath, ["--input-type=module", "--eval", script]);
   assert.equal(result.stdout, "native image backend deferred\n");

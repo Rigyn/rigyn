@@ -16,6 +16,7 @@ export * from "./openai-codex-responses.js";
 export * from "./openai-responses.js";
 export * from "./pricing.js";
 export * from "./registry.js";
+export * from "./routed.js";
 export * from "./sse.js";
 export * from "./tool-results.js";
 export * from "./transport.js";
@@ -31,6 +32,7 @@ export type {
   ModelPricing,
   ModelPricingTier,
   ModelProtocolFamily,
+  ProviderResponseDiagnostics,
   ModelSessionAffinity,
   ModelTokenPrices,
 } from "../core/types.js";

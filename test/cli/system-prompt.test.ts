@@ -130,6 +130,8 @@ test("default system prompt requires inspection, focused edits, verification, an
   assert.match(prompt, /Inspect relevant files before changing them/u);
   assert.match(prompt, /smallest coherent change/u);
   assert.match(prompt, /Verify changes with the most relevant tests or commands/u);
+  assert.match(prompt, /failed verification as unfinished work/u);
+  assert.match(prompt, /never claim success from a command that exited unsuccessfully/u);
   assert.match(prompt, /providers\/auth\/models \(docs\/providers\.md\)/u);
   assert.match(prompt, /extensions\/packages\/themes\/prompts\/TUI \(docs\/extensions\.md and docs\/tui\.md\)/u);
 });

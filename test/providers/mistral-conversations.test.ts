@@ -200,6 +200,7 @@ test("Mistral Conversations starts a stored multimodal conversation and assemble
     model: "devstral-latest",
     responseId: "conversation-1",
     requestId: "request-1",
+    diagnostics: { status: 200, headers: { "x-request-id": "request-1" } },
   });
   const state = stateFrom(events);
   if (state.kind !== "mistral_conversations") assert.fail("wrong provider state");

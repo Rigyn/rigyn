@@ -9,6 +9,7 @@ import type {
   NormalizedUsage,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { catalogId } from "./catalog.js";
@@ -32,6 +33,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -113,6 +115,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const modelId = encodeURIComponent(request.model);
@@ -125,6 +128,7 @@ export class BedrockAdapter implements ProviderAdapter {
       });
       const response = await this.#signedFetch(unsigned, "runtime", signal);
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -155,7 +159,7 @@ export class BedrockAdapter implements ProviderAdapter {
         if (eventType === "messageStart") {
           if (!started) {
             started = true;
-            const start: AdapterEvent = { type: "response_start", model: request.model };
+            const start: AdapterEvent = { type: "response_start", model: request.model, diagnostics };
             if (requestId !== undefined) start.requestId = requestId;
             yield start;
           }
@@ -164,7 +168,7 @@ export class BedrockAdapter implements ProviderAdapter {
 
         if (!started) {
           started = true;
-          const start: AdapterEvent = { type: "response_start", model: request.model };
+          const start: AdapterEvent = { type: "response_start", model: request.model, diagnostics };
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
         }
@@ -297,7 +301,7 @@ export class BedrockAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

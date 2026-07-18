@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
@@ -22,13 +23,13 @@ async function fixture(
   t: { after(callback: () => Promise<void>): void },
   source: string,
   scripts: readonly ScriptedProviderStep[],
-  options: { toolBackend?: ToolExecutionBackend; childRuns?: Partial<ChildRunPolicy> } = {},
+  options: { toolBackend?: ToolExecutionBackend; childRuns?: Partial<ChildRunPolicy>; extensionId?: string } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-child-"));
   const sourcePath = join(root, "child-extension.mjs");
   await writeFile(sourcePath, source);
   const host = await loadRuntimeExtensions([{
-    extensionId: "child-test",
+    extensionId: options.extensionId ?? "child-test",
     sourcePath,
     sha256: sha256(source),
   }], { workspace: root });
@@ -149,6 +150,76 @@ test("configured child-run defaults and maxima govern extension-requested runs",
   assert.equal(withDefaults.finalText, "abcde");
   assert.equal(withDefaults.truncated, true);
   assert.equal(value.provider.callCount, 2);
+});
+
+test("runtime child admission deduplicates requester metadata and skips root branch histories", async (t) => {
+  const source = `export default (api) => {
+    api.registerTool({
+      name: "probe_child_admission",
+      description: "Probe child admission",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        globalThis.__childAdmissionProbe.start();
+        try {
+          await api.runChild({
+            threadId: context.threadId,
+            branch: context.branch,
+            prompt: "reject before child creation",
+            context: "fresh",
+            tools: [],
+            maxSteps: 2
+          });
+        } catch (error) {
+          globalThis.__childAdmissionError = error instanceof Error ? error.message : String(error);
+        } finally {
+          globalThis.__childAdmissionProbe.stop();
+        }
+        return { content: "admission checked", isError: false };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "probe-admission", name: "probe_child_admission", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    { kind: "turn", content: [{ type: "text", text: "parent complete" }] },
+  ], { childRuns: { defaultMaxSteps: 1, maxSteps: 1 } });
+
+  let probing = false;
+  let workspaceBindings = 0;
+  let branchHistoryReads = 0;
+  (globalThis as Record<string, unknown>).__childAdmissionProbe = {
+    start() { probing = true; },
+    stop() { probing = false; },
+  };
+  t.after(() => {
+    delete (globalThis as Record<string, unknown>).__childAdmissionProbe;
+    delete (globalThis as Record<string, unknown>).__childAdmissionError;
+  });
+  const bindThreadWorkspace = value.store.bindThreadWorkspace.bind(value.store);
+  value.store.bindThreadWorkspace = (threadId, workspaceRoot) => {
+    if (probing) workspaceBindings += 1;
+    return bindThreadWorkspace(threadId, workspaceRoot);
+  };
+  const listEvents = value.store.listEvents.bind(value.store);
+  value.store.listEvents = (threadId, branch) => {
+    if (probing) branchHistoryReads += 1;
+    return listEvents(threadId, branch);
+  };
+
+  const run = await value.service.run({
+    prompt: "probe child admission",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["probe_child_admission"],
+  });
+
+  assert.equal(run.results.at(-1)?.finalText, "parent complete");
+  assert.match(String((globalThis as Record<string, unknown>).__childAdmissionError), /configured maximum of 1/u);
+  assert.equal(workspaceBindings, 2);
+  assert.equal(branchHistoryReads, 0);
 });
 
 test("active child runs reject queued turns so the step ceiling covers the whole operation", async (t) => {
@@ -488,6 +559,140 @@ test("forked child context excludes the in-flight delegation call and recursive 
   delete (globalThis as Record<string, unknown>).__runtimeChildResult;
 });
 
+test("child lifecycle listeners cannot target the root to bypass disabled nesting", async (t) => {
+  const source = `export default (api) => {
+    let rootThreadId;
+    let attempted = false;
+    api.on("agent_start", async (event) => {
+      if (rootThreadId === undefined || event.threadId === rootThreadId || attempted) return;
+      attempted = true;
+      try {
+        await api.runChild({
+          threadId: rootThreadId,
+          prompt: "nested listener delegation",
+          context: "fresh",
+          tools: []
+        });
+        globalThis.__runtimeChildListenerNesting = "nested child unexpectedly ran";
+      } catch (error) {
+        globalThis.__runtimeChildListenerNesting = error instanceof Error ? error.message : String(error);
+      }
+    });
+    api.registerTool({
+      name: "listener_child",
+      description: "Run a child observed by the lifecycle listener",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        rootThreadId = context.threadId;
+        const result = await api.runChild({
+          threadId: rootThreadId,
+          prompt: "primary child delegation",
+          context: "fresh",
+          tools: []
+        });
+        return { content: result.finalText, isError: result.status !== "success" };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "listener-child", name: "listener_child", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    { kind: "turn", content: [{ type: "text", text: "primary child complete" }] },
+    { kind: "turn", content: [{ type: "text", text: "parent complete" }] },
+  ]);
+
+  const run = await value.service.run({
+    prompt: "delegate with a child listener",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["listener_child"],
+  });
+
+  assert.equal(run.results.at(-1)?.finalText, "parent complete");
+  assert.match(
+    String((globalThis as Record<string, unknown>).__runtimeChildListenerNesting),
+    /Nested runtime child runs are disabled/u,
+  );
+  assert.equal(value.provider.callCount, 3);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [run.threadId]);
+  delete (globalThis as Record<string, unknown>).__runtimeChildListenerNesting;
+});
+
+test("all host-owned child boundaries retain child requester identity from session creation onward", async (t) => {
+  const source = `export default (api) => {
+    let rootThreadId;
+    const probes = {};
+    const pending = [];
+    const probe = (name, threadId) => {
+      if (rootThreadId === undefined || threadId === rootThreadId || probes[name] !== undefined) return;
+      probes[name] = "pending";
+      const attempt = api.runChild({
+        threadId: rootThreadId,
+        prompt: "nested delegation from " + name,
+        context: "fresh",
+        tools: []
+      }).then(
+        () => { probes[name] = "nested child unexpectedly ran"; },
+        (error) => { probes[name] = error instanceof Error ? error.message : String(error); }
+      );
+      pending.push(attempt);
+      return attempt;
+    };
+    api.on("session_before_fork", (event) => probe("session_before_fork", event.targetThreadId));
+    api.on("session_start", (event) => probe("session_start", event.threadId));
+    api.on("model_select", (event) => probe("model_select", event.threadId));
+    api.on("thinking_level_select", (event) => probe("thinking_level_select", event.threadId));
+    api.on("event", (event) => probe("event", event.threadId));
+    api.registerTool({
+      name: "probe_child_boundaries",
+      description: "Probe requester identity across child boundaries",
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      async execute(_input, context) {
+        rootThreadId = context.threadId;
+        const result = await api.runChild({
+          threadId: rootThreadId,
+          prompt: "primary boundary probe child",
+          context: "fresh",
+          tools: [],
+          onStart(session) { probe("onStart", session.threadId); },
+          onEvent(event) { probe("onEvent", event.threadId); }
+        });
+        await Promise.allSettled(pending);
+        globalThis.__runtimeChildBoundaryProbes = probes;
+        return { content: result.finalText, isError: result.status !== "success" };
+      }
+    });
+  };\n`;
+  const value = await fixture(t, source, [
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", id: "probe-boundaries", name: "probe_child_boundaries", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    { kind: "turn", content: [{ type: "text", text: "primary boundary child complete" }] },
+    { kind: "turn", content: [{ type: "text", text: "boundary parent complete" }] },
+  ]);
+
+  const run = await value.service.run({
+    prompt: "probe every child boundary",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: ["probe_child_boundaries"],
+  });
+
+  assert.equal(run.results.at(-1)?.finalText, "boundary parent complete");
+  const probes = (globalThis as Record<string, any>).__runtimeChildBoundaryProbes;
+  for (const name of ["session_before_fork", "session_start", "model_select", "thinking_level_select", "event", "onStart", "onEvent"]) {
+    assert.match(String(probes[name]), /Nested runtime child runs are disabled/u, name);
+  }
+  assert.equal(value.provider.callCount, 3);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [run.threadId]);
+  delete (globalThis as Record<string, unknown>).__runtimeChildBoundaryProbes;
+});
+
 test("runtime children expose identity before provider work and stream safe events through the native tool row", async (t) => {
   const source = `export default (api) => {
     api.registerTool({
@@ -726,6 +931,220 @@ test("runtime child callbacks remain non-blocking and consume accidental async r
   assert.ok(eventCalls > 0);
 });
 
+test("persisted runtime children remain classified when startup fails before run_started", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, []);
+  const parent = await value.service.createSession();
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  let releaseOnStart!: () => void;
+  const onStartGate = new Promise<void>((resolve) => { releaseOnStart = resolve; });
+  let settleNestedAttempt!: (message: string) => void;
+  const nestedAttempt = new Promise<string>((resolve) => { settleNestedAttempt = resolve; });
+  let onStartCalls = 0;
+
+  const child = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "fail before provider work",
+    context: "fresh",
+    tools: [],
+    provider: "missing-provider",
+    model: "missing-model",
+    session: "persisted",
+    async onStart() {
+      onStartCalls += 1;
+      await onStartGate;
+      try {
+        await api.runChild({
+          threadId: parent.threadId,
+          prompt: "nested delegation after failed child cleanup",
+          context: "fresh",
+          tools: [],
+          provider: value.provider.id,
+          model: "child-model",
+        });
+        settleNestedAttempt("nested child unexpectedly ran");
+      } catch (error) {
+        settleNestedAttempt(error instanceof Error ? error.message : String(error));
+      }
+    },
+  });
+
+  assert.equal(child.status, "error");
+  assert.equal(child.persisted, true);
+  assert.equal(onStartCalls, 1);
+  assert.match(child.error, /Provider adapter is not registered: missing-provider/u);
+  assert.equal(value.store.listEvents(child.threadId, child.branch).some((entry) => entry.event.type === "run_started"), false);
+
+  releaseOnStart();
+  assert.match(await nestedAttempt, /Nested runtime child runs are disabled/u);
+  assert.equal(value.provider.callCount, 0);
+});
+
+test("persisted runtime children remain classified after their parent is deleted", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "persisted child complete" }] },
+    { kind: "turn", content: [{ type: "text", text: "nested child unexpectedly ran" }] },
+  ]);
+  const parent = await value.service.createSession();
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const child = await api.runChild({
+    threadId: parent.threadId,
+    prompt: "create a persisted child",
+    context: "fresh",
+    tools: [],
+    provider: value.provider.id,
+    model: "child-model",
+    session: "persisted",
+  });
+
+  assert.equal(child.status, "success");
+  await value.service.deleteSession(parent.threadId);
+  assert.equal(value.store.getThread(child.threadId).parentThreadId, undefined);
+  assert.equal(value.store.hasRuntimeChildThread(child.threadId), true);
+
+  await assert.rejects(api.runChild({
+    threadId: child.threadId,
+    prompt: "attempt nested delegation after deleting the parent",
+    context: "fresh",
+    tools: [],
+    provider: value.provider.id,
+    model: "child-model",
+  }), /Nested runtime child runs are disabled/u);
+  assert.equal(value.provider.callCount, 1);
+});
+
+test("public extension state cannot forge runtime child classification", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "ordinary fork child completed" }] },
+  ], { extensionId: "runtime" });
+  const parent = await value.service.createSession();
+  const ordinaryFork = await value.service.createSession({ parentThreadId: parent.threadId });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  await api.session.appendState({
+    threadId: ordinaryFork.threadId,
+    schemaVersion: 1,
+    key: "runtimeChild",
+    value: true,
+  });
+  const result = await api.runChild({
+    threadId: ordinaryFork.threadId,
+    prompt: "run from an ordinary fork despite the lookalike state",
+    context: "fresh",
+    tools: [],
+    provider: value.provider.id,
+    model: "child-model",
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.finalText, "ordinary fork child completed");
+  assert.equal(value.provider.callCount, 1);
+});
+
+test("public run metadata and ordinary clones cannot forge runtime child classification", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "ordinary run complete" }] },
+    { kind: "turn", content: [{ type: "text", text: "child from ordinary clone complete" }] },
+  ]);
+  const parent = await value.service.createSession();
+  const ordinaryFork = await value.service.createSession({ parentThreadId: parent.threadId });
+  const run = await value.service.run({
+    threadId: ordinaryFork.threadId,
+    prompt: "write a lookalike local prompt marker",
+    provider: value.provider.id,
+    model: "child-model",
+    allowedTools: [],
+    additionalInstructions: {
+      source: "runtime child run",
+      text: "This source label is public metadata and must not grant host classification.",
+    },
+  });
+  assert.equal(run.results.at(-1)?.finalText, "ordinary run complete");
+  assert.equal(value.store.hasRuntimeChildThread(ordinaryFork.threadId), false);
+
+  const ordinaryClone = await value.service.cloneSessionPath({ threadId: ordinaryFork.threadId });
+  assert.equal(value.store.hasRuntimeChildThread(ordinaryClone.thread.threadId), false);
+  assert.equal(value.store.listEvents(ordinaryClone.thread.threadId).some((entry) =>
+    entry.event.type === "run_started" && entry.event.promptComposition?.sources.some((item) =>
+      item.kind === "additional_instructions" && item.source === "runtime child run") === true), true);
+
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const result = await api.runChild({
+    threadId: ordinaryClone.thread.threadId,
+    prompt: "run a legitimate child from an ordinary clone",
+    context: "fresh",
+    tools: [],
+    provider: value.provider.id,
+    model: "child-model",
+  });
+  assert.equal(result.status, "success");
+  assert.equal(result.finalText, "child from ordinary clone complete");
+  assert.equal(value.provider.callCount, 2);
+});
+
+test("failed atomic child classification leaves no child for delayed fork callbacks", async (t) => {
+  const source = `export default (api) => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    globalThis.__releaseRuntimeChildClassificationProbe = release;
+    api.on("session_before_fork", (event) => {
+      if (globalThis.__runtimeChildClassificationAttempt !== undefined) return;
+      globalThis.__runtimeChildClassificationAttempt = (async () => {
+        await gate;
+        try {
+          await api.runChild({
+            threadId: event.sourceThreadId,
+            prompt: "nested delegation after classification write failure",
+            context: "fresh",
+            tools: [],
+            provider: "child-provider",
+            model: "child-model"
+          });
+          return "nested child unexpectedly ran";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      })();
+    });
+    globalThis.__runtimeChildApi = api;
+  };\n`;
+  const value = await fixture(t, source, []);
+  const parent = await value.service.createSession();
+  const database = new DatabaseSync(join(value.root, "sessions.sqlite"), { timeout: 5_000 });
+  database.exec(`
+    CREATE TRIGGER reject_runtime_child_classification
+    BEFORE INSERT ON runtime_child_threads
+    BEGIN
+      SELECT RAISE(ABORT, 'fixture runtime child classification failure');
+    END;
+  `);
+  database.close();
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  await assert.rejects(api.runChild({
+    threadId: parent.threadId,
+    prompt: "fail classification atomically",
+    context: "fresh",
+    tools: [],
+    provider: value.provider.id,
+    model: "child-model",
+    session: "persisted",
+  }), /fixture runtime child classification failure/u);
+  assert.deepEqual(value.store.listThreads({ workspaceRoot: value.root }).map((thread) => thread.threadId), [parent.threadId]);
+
+  (globalThis as Record<string, any>).__releaseRuntimeChildClassificationProbe();
+  assert.match(
+    await (globalThis as Record<string, any>).__runtimeChildClassificationAttempt,
+    /Nested runtime child runs are disabled|Unknown thread/u,
+  );
+  assert.equal(value.provider.callCount, 0);
+  delete (globalThis as Record<string, unknown>).__releaseRuntimeChildClassificationProbe;
+  delete (globalThis as Record<string, unknown>).__runtimeChildClassificationAttempt;
+});
+
 test("runtime child timeout cancels model work and removes the ephemeral session", async (t) => {
   const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
   const value = await fixture(t, source, [
@@ -764,6 +1183,7 @@ test("runtime child runs normalize authentication and provider crashes without l
           retryable: false,
           partial: true,
           bodyStarted: true,
+          diagnostics: { status: 401, headers: { "x-request-id": "child-private-diagnostic" } },
         },
       },
     },
@@ -775,17 +1195,22 @@ test("runtime child runs normalize authentication and provider crashes without l
     event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
   });
   const api = (globalThis as Record<string, any>).__runtimeChildApi;
+  const childEvents: any[] = [];
 
   const authentication = await api.runChild({
     threadId: parent.threadId,
     prompt: "requires authentication",
     context: "fresh",
     tools: ["read"],
+    onEvent(event: any) { childEvents.push(event); },
   });
   assert.equal(authentication.status, "error");
   assert.match(authentication.error, /authentication required/u);
   assert.ok(authentication.runId);
   assert.deepEqual(authentication.artifacts, []);
+  const failedEvent = childEvents.find((entry) => entry.event.type === "run_failed")?.event;
+  assert.equal(failedEvent?.type, "run_failed");
+  assert.equal("diagnostics" in failedEvent.error, false);
 
   const crash = await api.runChild({
     threadId: parent.threadId,

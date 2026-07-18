@@ -3,18 +3,24 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 
 import { stringifyProviderJson } from "./json.js";
 import type { ResponsesEventStreamInput, ResponsesWireEvent } from "./openai-responses.js";
+import type { ProviderResponseDiagnostics } from "../core/types.js";
 import {
   assertResponseOk,
   HttpResponseError,
   jsonValueOrString,
   ProtocolError,
+  responseDiagnostics,
   type FetchLike,
 } from "./transport.js";
 
 const DEFAULT_MAX_SSE_EVENT_BYTES = 16 * 1024 * 1024;
 
 type ResponsesEventFallback = (input: ResponsesEventStreamInput) => AsyncIterable<ResponsesWireEvent>;
-type ResponsesEventFromValue = (value: unknown, requestId?: string) => ResponsesWireEvent;
+type ResponsesEventFromValue = (
+  value: unknown,
+  requestId?: string,
+  diagnostics?: ProviderResponseDiagnostics,
+) => ResponsesWireEvent;
 type OpenAISdk = typeof import("openai");
 
 export interface OpenAISdkEventStreamConfig {
@@ -79,8 +85,10 @@ async function* sdkResponsesWireEvents(
       signal: input.signal,
     }).withResponse();
     requestId = response.request_id ?? undefined;
+    const diagnostics = responseDiagnostics(response.response);
+    input.onResponse?.(diagnostics, requestId);
     for await (const event of response.data) {
-      yield config.eventFromValue(event, requestId);
+      yield config.eventFromValue(event, requestId, diagnostics);
     }
   } catch (error) {
     const rigynError = nestedRigynError(error);

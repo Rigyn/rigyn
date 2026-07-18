@@ -142,7 +142,7 @@ test("Anthropic SDK and direct transports normalize the same complex response id
     {
       type: "message_start",
       message: {
-        id: "message-parity",
+        id: "message-shared",
         model: "claude-haiku-4-5-20251001",
         usage: {
           input_tokens: 40,
@@ -177,7 +177,7 @@ test("Anthropic SDK and direct transports normalize the same complex response id
     posted.push({ url: incoming.url, body: await incoming.json() });
     return streamResponse(byteChunks(body, [1, 2, 3, 5, 8, 13]), {
       "content-type": "text/event-stream",
-      "x-request-id": "request-parity",
+      "x-request-id": "request-shared",
     });
   });
   const sdk = new AnthropicAdapter({ apiKey: "secret", fetch: transport() });

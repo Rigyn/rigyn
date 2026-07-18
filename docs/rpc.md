@@ -48,15 +48,17 @@ Durable subscriptions replay events after an optional sequence cursor and then h
 
 ```ts
 const subscription = await client.subscribeEvents(
-  { threadId, afterSequence: lastSequence },
+  { threadId, afterSequence: lastSequence, limit: 256 },
   (event) => saveCursor(event.sequence),
-  { onError: console.error },
+  { onError: console.error, maxPendingEvents: 1024, maxPendingBytes: 8 * 1024 * 1024 },
 );
 
 await subscription.unsubscribe();
 ```
 
-Replay is ordered by durable event sequence. The subscribe response reports `replayedThrough`; notifications that race with that response are buffered by the typed client during the replay/live handoff. Consumers should persist the highest processed sequence and reconnect with `afterSequence`. `events.error` means that subscription stopped; it does not invalidate the thread.
+Replay is ordered by durable event sequence. The optional `limit` controls the bounded internal replay batch size (default 256, maximum 1024); the subscription automatically continues every historical batch and then hands off to live delivery. The subscribe response reports the fixed snapshot as `replayedThrough` and describes its initial batch with the exclusive `nextCursor` and `hasMore` fields. Notifications that race with that response are buffered by the typed client during the replay/live handoff. The typed client invokes one subscription callback at a time in notification order without creating an unbounded callback chain. `maxPendingEvents` and `maxPendingBytes` bound accepted callback work, defaulting to 1024 events and 8 MiB; their compiled maxima are 16384 events and 64 MiB. Exceeding either limit stops the remote subscription, drains already accepted callbacks in order, and reports the failure through `onError`. Calling `unsubscribe()` immediately detaches notification listeners, asks the server to stop once, drains callbacks for events already accepted, and resolves after both the drain and server acknowledgement; repeated calls share that completion. Server-side unsubscribe is idempotent, including when `events.error` won the stop race.
+
+Each replay or live subscription notification must fit the advertised `maxSerializedEventBytes`. The replay/live handoff also obeys the advertised `maxPendingLiveEvents` and `maxPendingLiveBytes` bounds before retaining an event. If one durable event cannot fit, the server stops before it and emits `events.error` with `blocked: { reason, sequence, serializedBytes, maximumBytes, resumeAfterSequence }`; the initial subscribe result also contains `blocked` when the first replay page detects it. A transport or writer failure also attempts an `events.error` notification. In every case the reported cursor remains on the last event whose `events.event` notification completed successfully. Advancing `afterSequence` to `resumeAfterSequence` explicitly skips a blocked event; reconnecting with the unchanged cursor encounters it again. Consumers should persist the highest processed sequence and reconnect with `afterSequence`. `events.error` means that subscription stopped; it does not invalidate the thread.
 
 ## Notifications
 
@@ -71,7 +73,7 @@ Replay is ordered by durable event sequence. The subscribe response reports `rep
 | `extension.warning` | { phase, message } | A bounded extension lifecycle observer failed. |
 | `extension.ui.request` | RpcExtensionUiRequest | Correlated UI request owned by this RPC peer. |
 | `events.event` | { subscriptionId, event } | Replay or live event for a durable subscription. |
-| `events.error` | { subscriptionId, cursor, reason } | A durable event subscription stopped at a cursor. |
+| `events.error` | { subscriptionId, cursor, reason, blocked? } | A durable event subscription stopped at a cursor. |
 <!-- rpc-notifications:end -->
 
 `run.event` is best-effort live presentation for the peer that owns the run. Use `events.subscribe` when reconnectable delivery matters. `run.finished` and `run.failed` are convenience notifications; `run.wait` remains the correlated completion contract.
@@ -98,7 +100,7 @@ Runs, queue leases, extension commands, and blocking extension UI requests are o
 
 ## Sessions, branches, and exports
 
-Thread methods are scoped to the server workspace. A branch argument defaults to the thread default branch. `thread.events` returns durable normalized envelopes; it never returns credential material or provider-private hidden reasoning. `thread.fork` creates a branch inside a thread, while extension session cloning is a separate in-process API. `thread.export` returns inline data only within the advertised byte limit; use the CLI export command for larger sessions.
+Thread methods are scoped to the server workspace. A branch argument defaults to the thread default branch. `thread.events` always returns `{ events, nextCursor, hasMore, blocked? }`; the cursor is exclusive, the default page is 256 events, and the hard maximum is 1024. Results also stay below the advertised serialized-byte ceiling. Count and byte limits may therefore produce fewer events than requested while setting `hasMore`. If one event alone exceeds `maxSerializedEventBytes`, the page excludes it, leaves `nextCursor` before it, and reports the same bounded `blocked` metadata described above. Advancing to `blocked.resumeAfterSequence` is an explicit decision to skip that event. Event pages, durable subscription notifications, and live `run.event` notifications use the same portable projection: provider continuation state, opaque provider blocks, provider-private reasoning text, raw usage/error payloads, response identifiers, and arbitrary warning details are omitted before byte accounting or delivery. `thread.fork` creates a branch inside a thread, while extension session cloning is a separate in-process API. `thread.export` returns inline data only within the advertised byte limit; use the CLI export command for larger sessions.
 
 `thread.state` reports activity, queue counts, and current selection. `thread.stats` reports bounded aggregate counts and normalized usage. `thread.lastAssistantText` returns visible assistant text only and rejects an over-limit result rather than returning a silent partial.
 
@@ -132,7 +134,7 @@ This table is rendered from `RPC_METHOD_REFERENCE`. A conformance test compares 
 | `thread.create` | name?, parentThreadId?, parentRunId? | ThreadRecord | Create a workspace-bound thread. |
 | `thread.list` | none | ThreadRecord[] | List workspace threads. |
 | `thread.get` | threadId | { thread, runs } | Read a thread and its runs. |
-| `thread.events` | threadId, branch? | EventEnvelope[] | Read durable events on a branch. |
+| `thread.events` | threadId, branch?, afterSequence?, limit? | RpcEventPage | Read a bounded cursor page of durable events on a branch. |
 | `thread.state` | threadId, branch? | RpcThreadState | Read active state, selection, and pending counts. |
 | `thread.stats` | threadId, branch? | RpcThreadStatistics | Read message, run, usage, and context statistics. |
 | `thread.lastAssistantText` | threadId, branch? | { text } | Read bounded text from the latest assistant message. |
@@ -141,7 +143,7 @@ This table is rendered from `RPC_METHOD_REFERENCE`. A conformance test compares 
 | `thread.delete` | threadId | { deleted } | Delete a workspace thread. |
 | `thread.export` | threadId, format?, branch? | RpcThreadExportResult | Export bounded JSONL, Markdown, or HTML. |
 | `thread.compact` | threadId, provider, model, branch?, budgets? | AgentRunResult | Run manual context compaction. |
-| `events.subscribe` | threadId, branch?, afterSequence? | { subscriptionId, replayedThrough } | Start replayable durable-event delivery. |
+| `events.subscribe` | threadId, branch?, afterSequence?, limit? | RpcEventSubscriptionResult | Start bounded-batch replayable durable-event delivery. |
 | `events.unsubscribe` | subscriptionId | { unsubscribed } | Stop an event subscription. |
 | `run.start` | RpcRunStartParams | { threadId, handled? } | Start a caller-owned agent run. |
 | `run.wait` | threadId | HarnessRun or AgentRunResult | Wait for a caller-owned run or compaction. |

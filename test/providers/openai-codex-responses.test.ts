@@ -36,6 +36,10 @@ class FakeWebSocket extends EventTarget {
     this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(value) }));
   }
 
+  rawMessage(value: unknown): void {
+    this.dispatchEvent(new MessageEvent("message", { data: value }));
+  }
+
   fail(message: string): void {
     this.dispatchEvent(new ErrorEvent("error", { message }));
   }
@@ -173,6 +177,7 @@ test("OpenAI Codex adapter consumes informational Codex events without starting 
     type: "response_start",
     model: "gpt-5.5",
     responseId: "codex-response",
+    diagnostics: { status: 200, headers: { "content-type": "text/event-stream" } },
   });
   assert.equal(terminalCount(events), 1);
 });
@@ -307,5 +312,23 @@ test("Codex WebSocket retries one connection-limit event before producing output
   t.after(() => adapter.dispose());
   const events = await collect(adapter.stream(request("openai-codex"), new AbortController().signal));
   assert.equal(events.some((event) => event.type === "text_delta" && event.text === "ok"), true);
+  assert.equal(terminalCount(events), 1);
+});
+
+test("Codex WebSocket rejects binary events that are not valid UTF-8", async (t) => {
+  const socket = new FakeWebSocket();
+  socket.onSend = () => queueMicrotask(() => socket.rawMessage(Uint8Array.from([0xc3, 0x28])));
+  const adapter = new OpenAICodexResponsesAdapter({
+    credential: async () => ({ accessToken: "subscription-access", accountId: "chatgpt-account" }),
+    transport: "websocket",
+    webSocket: socketFactory(() => socket),
+  });
+  t.after(() => adapter.dispose());
+
+  const events = await collect(adapter.stream(request("openai-codex"), new AbortController().signal));
+
+  const terminal = events.at(-1);
+  assert.equal(terminal?.type, "error");
+  assert.equal(terminal?.type === "error" ? terminal.error.message : undefined, "OpenAI Codex WebSocket message contained invalid UTF-8");
   assert.equal(terminalCount(events), 1);
 });

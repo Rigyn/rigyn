@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "provider": "connected-provider",
+  "model": "shared-model-id",
+  "samples": 3,
+  "timeoutMs": 360000,
+  "outputLimitBytes": 8388608,
+  "harnesses": [
+    {
+      "id": "rigyn",
+      "argv": [
+        "rigyn",
+        "--json",
+        "--no-session",
+        "--provider",
+        "{provider}",
+        "--model",
+        "{model}",
+        "--",
+        "{prompt}"
+      ],
+      "metrics": "rigyn-jsonl"
+    },
+    {
+      "id": "peer",
+      "argv": [
+        "peer-coding-agent",
+        "--provider",
+        "{provider}",
+        "--model",
+        "{model}",
+        "--prompt",
+        "{prompt}"
+      ],
+      "metrics": "none"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "repair-arithmetic",
+      "prompt": "Fix the implementation so the included test passes. Run the test before finishing.",
+      "files": {
+        "math.mjs": "export const add = (left, right) => left - right;\n",
+        "math.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { add } from './math.mjs';\ntest('adds', () => assert.equal(add(2, 3), 5));\n"
+      },
+      "verifier": {
+        "argv": ["node", "--test", "math.test.mjs"],
+        "timeoutMs": 60000
+      }
+    },
+    {
+      "id": "create-module",
+      "prompt": "Create greeting.mjs exporting greet(name), and make the included test pass. Run the test before finishing.",
+      "files": {
+        "greeting.test.mjs": "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { greet } from './greeting.mjs';\ntest('greets', () => assert.equal(greet('Ada'), 'Hello, Ada!'));\n"
+      },
+      "verifier": {
+        "argv": ["node", "--test", "greeting.test.mjs"],
+        "timeoutMs": 60000
+      }
+    }
+  ]
+}

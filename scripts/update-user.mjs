@@ -1,6 +1,10 @@
+import { writeFileSync } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { lt, valid } from "semver";
 
 import {
   assertNoOtherActiveRuntimes,
@@ -15,7 +19,8 @@ import {
 
 const installRoot = resolve(process.env.RIGYN_INSTALL_DIR ?? join(homedir(), ".rigyn"));
 const userHome = homedir();
-const updateSpec = process.env.RIGYN_UPDATE_SPEC ?? "rigyn@latest";
+const explicitUpdateSpec = process.env.RIGYN_UPDATE_SPEC;
+const updateSpec = explicitUpdateSpec ?? "rigyn@latest";
 const sensitiveEnvironmentName = /(?:^|_)(?:api_?key|auth(?:orization|_?token)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 if (updateSpec === "" || updateSpec.includes("\0") || Buffer.byteLength(updateSpec, "utf8") > 8 * 1024) {
   throw new Error("RIGYN_UPDATE_SPEC is invalid");
@@ -39,6 +44,21 @@ function childEnvironment(root) {
 
 async function run(command, args, options) {
   await runLifecycleChild(command, args, options);
+}
+
+export function assertUpdateVersionPolicy(currentVersion, nextVersion, explicitRequest) {
+  if (typeof nextVersion !== "string" || valid(nextVersion) === null) {
+    throw new Error("Downloaded Rigyn package version is invalid");
+  }
+  if (explicitRequest) return;
+  if (typeof currentVersion !== "string" || valid(currentVersion) === null) {
+    throw new Error("Installed Rigyn version is invalid; set RIGYN_UPDATE_SPEC to an explicit reviewed package to recover");
+  }
+  if (lt(nextVersion, currentVersion)) {
+    throw new Error(
+      `Refusing to replace Rigyn ${currentVersion} with older ${nextVersion}; set RIGYN_UPDATE_SPEC to an explicit reviewed package to downgrade`,
+    );
+  }
 }
 
 async function update() {
@@ -83,6 +103,7 @@ async function update() {
       if (manifest?.name !== "rigyn" || typeof manifest.version !== "string" || manifest.version === "") {
         throw new Error("Downloaded package identity is invalid");
       }
+      assertUpdateVersionPolicy(markerRecord.marker.version, manifest.version, explicitUpdateSpec !== undefined);
       const installer = join(packageRoot, "scripts", "install-user.mjs");
       const installerMetadata = await lstat(installer);
       if (!installerMetadata.isFile() || installerMetadata.isSymbolicLink()) {
@@ -97,11 +118,12 @@ async function update() {
       if (installedMarker === undefined || installedMarker.marker.version !== manifest.version) {
         throw new Error("Updated installation marker does not match the downloaded package");
       }
-      process.stdout.write(`Updated Rigyn from ${markerRecord.marker.version} to ${manifest.version}\n`);
+      writeFileSync(1, `Updated Rigyn from ${markerRecord.marker.version} to ${manifest.version}\n`);
     } finally {
       await rm(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   });
 }
 
-await update();
+const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
+if (invokedPath === fileURLToPath(import.meta.url)) await update();

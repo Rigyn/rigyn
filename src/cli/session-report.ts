@@ -83,6 +83,54 @@ function cacheLines(usages: readonly NormalizedUsage[]): string[] {
   ];
 }
 
+function shortHash(value: string): string {
+  return value.slice(0, 12);
+}
+
+function reportIdentity(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]/gu, "?");
+}
+
+/** Formats content-free provenance for the most recent run's host-composed system prompt. */
+export function formatPromptContextReport(events: readonly EventEnvelope[]): string {
+  const envelope = events.findLast((entry) => entry.event.type === "run_started");
+  if (envelope?.event.type !== "run_started") {
+    return [
+      "Model context",
+      "  No composed prompt has been recorded for this branch yet.",
+      "  Start a model run, then use /context again.",
+    ].join("\n");
+  }
+  if (envelope.event.promptComposition === undefined) {
+    return [
+      "Model context",
+      ...(envelope.runId === undefined ? [] : [`  Run: ${envelope.runId}`]),
+      "  The latest run has no recorded prompt-composition metadata.",
+      "  Older run metadata is not shown because it would be stale.",
+    ].join("\n");
+  }
+
+  const composition = envelope.event.promptComposition;
+  const sources = composition.sources.map((source) => {
+    const state = source.truncated === true ? " · truncated" : "";
+    return `  - ${source.kind}: ${reportIdentity(source.source)} · ${count(source.bytes)} bytes · sha256:${shortHash(source.sha256)}${state}`;
+  });
+  const skills = composition.skills.map((skill) =>
+    `  - ${reportIdentity(skill.name)}: ${reportIdentity(skill.manifestPath)}`);
+  return [
+    "Model context",
+    ...(envelope.runId === undefined ? [] : [`  Run: ${envelope.runId}`]),
+    `  Host-composed system prompt: ${count(composition.bytes)} bytes · sha256:${shortHash(composition.sha256)} · ${composition.truncated ? "metadata truncated" : "complete metadata"}`,
+    `  Tools (${count(composition.tools.length)}): ${composition.tools.length === 0 ? "none" : composition.tools.join(", ")}`,
+    `  Sources (${count(composition.sources.length)}):`,
+    ...(sources.length === 0 ? ["  - none"] : sources),
+    `  Skills (${count(composition.skills.length)}):`,
+    ...(skills.length === 0 ? ["  - none"] : skills),
+    "  Runtime extensions may transform the prompt after this metadata is recorded.",
+    "  Prompt and instruction bodies are intentionally not displayed.",
+  ].join("\n");
+}
+
 export function formatSessionReport(input: {
   thread: ThreadRecord;
   branch: string;

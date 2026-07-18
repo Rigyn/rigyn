@@ -482,6 +482,12 @@ test("offline native-provider request and stream contract matrix", async (t) => 
 
       assert.equal(terminalCount(events), 1);
       assert.equal(events.at(-1)?.type, "response_end");
+      const start = events.find((event) => event.type === "response_start");
+      assert.equal(start?.type === "response_start" ? start.diagnostics?.status : undefined, 200);
+      assert.equal(
+        start?.type === "response_start" ? start.diagnostics?.headers["x-request-id"] : undefined,
+        "contract-request",
+      );
       assert.ok(events.some((event) => event.type === "text_delta"));
       const tool = events.find((event) => event.type === "tool_call_end");
       assert.equal(tool?.type === "tool_call_end" ? tool.id : undefined, "contract-call");
@@ -496,6 +502,33 @@ test("offline native-provider request and stream contract matrix", async (t) => 
       assert.match(serialized, /Tool completed with no text output/u);
       assert.match(serialized, /intentional whitespace/u);
       assertNoEmptyWireContainers(posted);
+    });
+  }
+});
+
+test("every native HTTP stream preserves diagnostics when it ends before response_start", async (t) => {
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const adapter = fixture.create(fakeFetch(() => streamResponse([], {
+        "content-type": fixture.contentType,
+        "x-request-id": "empty-stream-request",
+        authorization: "Bearer response-secret",
+      })));
+      const events = await collect(adapter.stream(request(fixture.provider), new AbortController().signal));
+
+      assert.equal(events.some((event) => event.type === "response_start"), false);
+      assert.equal(terminalCount(events), 1);
+      const terminal = events.at(-1);
+      assert.equal(terminal?.type, "error");
+      if (terminal?.type !== "error") return;
+      assert.deepEqual(terminal.error.diagnostics, {
+        status: 200,
+        headers: {
+          "content-type": fixture.contentType,
+          "x-request-id": "empty-stream-request",
+        },
+      });
+      assert.equal("authorization" in (terminal.error.diagnostics?.headers ?? {}), false);
     });
   }
 });

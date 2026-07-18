@@ -10,4 +10,4 @@ rigyn --tools read,text_metrics -p "Use text_metrics on: one two three"
 rigyn remove custom-tool-example
 ```
 
-The tool uses the host's top-level `status`, `summary`, and `nextActions` result fields, while bounded domain data remains in `content`. The package targets extension manifest schema 1 and Rigyn 0.1.x.
+The tool uses the host's top-level `status`, `summary`, and `nextActions` result fields, while bounded domain data remains in `content`. The package targets extension manifest schema 1 and the public APIs documented for the installed Rigyn build.

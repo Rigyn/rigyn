@@ -6,6 +6,8 @@ import type { ThreadRecord } from "../storage/types.js";
 
 export interface CloneSessionPathInput {
   threadId: string;
+  /** Host-reserved destination identity when lifecycle must begin before the clone is committed. */
+  targetThreadId?: string;
   branch?: string;
   atEventId?: string | null;
   beforeEventId?: string;
@@ -109,6 +111,7 @@ export function cloneSessionPath(store: SessionStore, input: CloneSessionPathInp
   const lastSource = selected.at(-1);
   const name = copiedName(source, input.name);
   const thread = store.createThread({
+    ...(input.targetThreadId === undefined ? {} : { threadId: input.targetThreadId }),
     workspaceRoot: input.workspaceRoot,
     parentThreadId: input.threadId,
     ...(lastSource?.runId === undefined ? {} : { parentRunId: lastSource.runId }),

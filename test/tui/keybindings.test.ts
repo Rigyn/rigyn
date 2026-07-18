@@ -47,6 +47,14 @@ test("keybindings accept enhanced modifiers and function keys", () => {
   assert.equal(bindings.matches("app.model.select", { key: "k", hyper: true, meta: true }), true);
 });
 
+test("keybindings accept the plus key with and without modifiers", () => {
+  const bindings = parseKeybindings({ "app.model.select": ["+", "shift+ctrl++"] });
+  assert.deepEqual(bindings.keys("app.model.select"), ["+", "ctrl+shift++"]);
+  assert.equal(bindings.matches("app.model.select", { key: "text", text: "+" }), true);
+  assert.equal(bindings.matches("app.model.select", { key: "text", text: "+", ctrl: true, shift: true }), true);
+  assert.throws(() => parseKeybindings({ "app.model.select": "ctrl+++" }), /Invalid keybinding/u);
+});
+
 test("editor actions expose jump, yank, yank-pop, and non-conflicting redo defaults", () => {
   const bindings = new Keybindings();
   assert.equal(bindings.matches("tui.editor.jumpForward", { key: "]", ctrl: true }), true);

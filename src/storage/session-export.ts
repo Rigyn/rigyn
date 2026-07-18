@@ -3,7 +3,7 @@ import type { CanonicalMessage } from "../core/types.js";
 import type { ArtifactRecord, RunRecord, ThreadRecord } from "./types.js";
 
 export const SESSION_EXPORT_FORMAT = "rigyn/session-jsonl";
-export const SESSION_EXPORT_SCHEMA_VERSION = 1;
+export const SESSION_EXPORT_SCHEMA_VERSION = 2;
 
 export interface SessionExportFormatRecord {
   type: "format";
@@ -26,6 +26,7 @@ export interface SessionExportRunRecord {
 export interface SessionExportEventRecord {
   type: "event";
   branch: string;
+  branchIncarnation: number;
   value: EventEnvelope;
 }
 
@@ -77,7 +78,7 @@ export function sessionExportEvent(event: RuntimeEvent): RuntimeEvent {
     return { ...event, usage };
   }
   if (event.type === "run_failed" && "retryable" in event.error) {
-    const { raw: _raw, requestId: _requestId, ...error } = event.error;
+    const { raw: _raw, requestId: _requestId, diagnostics: _diagnostics, ...error } = event.error;
     return { ...event, error };
   }
   if (event.type === "warning" && event.details !== undefined) {

@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+
 import { createInMemoryHarness } from "rigyn/embedding";
 import { createScriptedProvider } from "rigyn/testing";
 
@@ -5,7 +7,7 @@ const usage = "node examples/embedding-in-memory.mjs [prompt]";
 const prompt = process.argv.slice(2).join(" ");
 
 if (prompt === "--help" || prompt === "-h") {
-  process.stdout.write(`${usage}\n`);
+  writeFileSync(1, `${usage}\n`);
 } else {
   const provider = createScriptedProvider({
     id: "example-memory",
@@ -20,5 +22,5 @@ if (prompt === "--help" || prompt === "-h") {
     model: "example-model",
   });
   const run = await harness.run({ prompt: prompt || "hello" });
-  process.stdout.write(`${run.results.at(-1)?.finalText ?? ""}\n`);
+  writeFileSync(1, `${run.results.at(-1)?.finalText ?? ""}\n`);
 }

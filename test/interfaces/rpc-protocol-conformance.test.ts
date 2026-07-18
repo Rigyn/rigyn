@@ -13,9 +13,12 @@ import {
 
 test("typed protocol exhaustively matches dispatcher methods and emitted notifications", async () => {
   const source = await readFile(new URL("../../src/interfaces/rpc-runtime.ts", import.meta.url), "utf8");
-  const methods = [...source.matchAll(/case "([^"]+)"/gu)].map((match) => match[1]!);
-  assert.equal(new Set(methods).size, methods.length, "dispatcher contains duplicate method cases");
+  const registry = /#createMethodHandlers\(\): RpcMethodHandlerRegistry \{\n    return \{\n([\s\S]*?)\n    \} satisfies RpcMethodHandlerRegistry;/u.exec(source)?.[1];
+  assert.ok(registry, "dispatcher must define a typed method registry");
+  const methods = [...registry.matchAll(/^      "([^"]+)":/gmu)].map((match) => match[1]!);
+  assert.equal(new Set(methods).size, methods.length, "dispatcher contains duplicate method registrations");
   assert.deepEqual([...methods].sort(), [...RPC_METHOD_NAMES].sort());
+  assert.doesNotMatch(source, /switch\s*\(\s*request\.method\s*\)/u);
 
   const notifications = new Set([
     ...[...source.matchAll(/#notify\(\s*[^,]+,\s*"([^"]+)"/gu)].map((match) => match[1]!),

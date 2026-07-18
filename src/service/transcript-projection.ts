@@ -15,7 +15,7 @@ import {
 interface TranscriptProjectionInput {
   threadId: string;
   branch: string;
-  events: readonly EventEnvelope[];
+  events: Iterable<EventEnvelope> | AsyncIterable<EventEnvelope>;
   afterSequence?: number;
   limit?: number;
   signal?: AbortSignal;
@@ -220,12 +220,13 @@ export async function projectHarnessTranscriptPage(input: TranscriptProjectionIn
   };
   const entries: HarnessTranscriptEntry[] = [];
   let hasMore = false;
-  for (let index = 0; index < input.events.length; index += 1) {
+  let index = 0;
+  for await (const envelope of input.events) {
     if (index % 64 === 0) {
       input.signal?.throwIfAborted();
       await yieldToEventLoop();
     }
-    const envelope = input.events[index]!;
+    index += 1;
     if (afterSequence !== undefined && envelope.sequence <= afterSequence) continue;
     const entry = project(envelope);
     if (entry === undefined) continue;

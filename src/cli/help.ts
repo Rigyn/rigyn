@@ -130,6 +130,7 @@ Usage:
 
 Downloads the latest published Rigyn package and atomically replaces
 the self-contained application while preserving user configuration and state.
+An implicit update never replaces a newer installation with an older release.
 `,
   "self-uninstall": `${header}
 

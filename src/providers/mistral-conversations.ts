@@ -9,6 +9,7 @@ import type {
   NormalizedUsage,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { catalogId, catalogLimit } from "./catalog.js";
@@ -33,6 +34,7 @@ import {
   ProviderStreamError,
   readJsonResponse,
   requestIdFromHeaders,
+  responseDiagnostics,
   resolveToken,
   type TokenSource,
 } from "./transport.js";
@@ -134,6 +136,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       request = providerWireRequest(request, request.providerState?.kind === "mistral_conversations");
@@ -167,6 +170,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
         redirect: "error",
       });
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -209,6 +213,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
               type: "response_start",
               model: request.model,
               responseId: conversationId,
+              diagnostics,
             };
             if (requestId !== undefined) event.requestId = requestId;
             yield event;
@@ -317,7 +322,7 @@ export class MistralConversationsAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

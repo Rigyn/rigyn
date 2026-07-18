@@ -1,15 +1,19 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import type { EventEnvelope } from "../core/events.js";
 import { decodeRpcLines, RpcWriter, type RpcId } from "./rpc.js";
 import type {
+  RpcEventPage,
   RpcMethod,
   RpcMethodParams,
   RpcMethodResult,
   RpcNotification,
   RpcNotificationMap,
   RpcNotificationParams,
+  RpcOversizedEvent,
+  RpcThreadEventsPagedParams,
 } from "./rpc-protocol.js";
 
 export interface RpcClientOptions {
@@ -58,20 +62,46 @@ type NotificationListener<K extends RpcNotification> = (
 type AnyNotificationListener = (method: string, params: unknown) => void | Promise<void>;
 
 interface PendingRequest {
+  readonly method: RpcMethod;
+  readonly params: unknown;
+  readonly eventSubscriptionHandoff?: EventSubscriptionHandoff;
   resolve(value: unknown): void;
   reject(error: Error): void;
   cleanup(): void;
 }
 
+type BufferedEventSubscriptionNotification =
+  | { type: "event"; value: RpcNotificationMap["events.event"] }
+  | { type: "error"; value: RpcNotificationMap["events.error"] };
+
+interface EventSubscriptionHandoff {
+  buffered: BufferedEventSubscriptionNotification[];
+  bufferedBytes: number;
+  subscriptionId?: string;
+  overflow?: Error;
+}
+
+const eventSubscriptionCallback = new AsyncLocalStorage<object>();
+
 export interface RpcEventSubscription {
   readonly subscriptionId: string;
   readonly replayedThrough: number;
+  readonly nextCursor: number;
+  readonly hasMore: boolean;
+  readonly blocked?: RpcOversizedEvent;
   unsubscribe(): Promise<void>;
 }
 
 export interface RpcEventSubscriptionOptions extends RpcRequestOptions {
   onError?: (error: Error) => void;
+  maxPendingEvents?: number;
+  maxPendingBytes?: number;
 }
+
+export const RPC_EVENT_CLIENT_DEFAULT_MAX_PENDING_EVENTS = 1_024;
+export const RPC_EVENT_CLIENT_DEFAULT_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+const RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS = 16_384;
+const RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES = 64 * 1024 * 1024;
 
 function error(value: unknown, fallback: string): Error {
   return value instanceof Error ? value : new Error(value === undefined ? fallback : String(value));
@@ -86,6 +116,18 @@ function abortError(signal: AbortSignal): Error {
 
 function own(value: object, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function pendingLimit(value: number | undefined, fallback: number, maximum: number, label: string): number {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected < 1 || selected > maximum) {
+    throw new RangeError(`${label} must be from 1 through ${maximum}`);
+  }
+  return selected;
+}
+
+function serializedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 function responseId(value: unknown): RpcId {
@@ -111,12 +153,22 @@ export class RpcClient {
   readonly #closeTransport: (() => void | Promise<void>) | undefined;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #pending = new Map<RpcId, PendingRequest>();
-  readonly #ignoredIds = new Set<RpcId>();
+  readonly #ignoredRequests = new Map<RpcId, RpcMethod>();
   readonly #listeners = new Map<string, Set<(params: unknown) => void | Promise<void>>>();
   readonly #anyListeners = new Set<AnyNotificationListener>();
+  readonly #eventSubscriptionIds = new Set<string>();
+  readonly #externalEventSubscriptionIds = new Set<string>();
+  readonly #pendingEventSubscriptionHandoffs = new Set<EventSubscriptionHandoff>();
+  readonly #claimedEventSubscriptionHandoffs = new Map<string, EventSubscriptionHandoff>();
+  readonly #unattributedEventSubscriptionNotifications = new Map<string, {
+    notifications: BufferedEventSubscriptionNotification[];
+    bytes: number;
+  }>();
   readonly #closedPromise: Promise<Error>;
   #resolveClosed!: (reason: Error) => void;
   #nextId = 1;
+  #unattributedEventSubscriptionEvents = 0;
+  #unattributedEventSubscriptionBytes = 0;
   #closedReason: Error | undefined;
   #transportClosing: Promise<void> | undefined;
 
@@ -146,6 +198,7 @@ export class RpcClient {
     return this.#pending.size;
   }
 
+  request(method: "thread.events", params: RpcThreadEventsPagedParams, options?: RpcRequestOptions): Promise<RpcEventPage>;
   request<K extends RpcMethod>(
     method: K,
     ...args: [RpcMethodParams<K>] extends [undefined]
@@ -153,8 +206,9 @@ export class RpcClient {
       : undefined extends RpcMethodParams<K>
         ? [params?: Exclude<RpcMethodParams<K>, undefined>, options?: RpcRequestOptions]
         : [params: RpcMethodParams<K>, options?: RpcRequestOptions]
-  ): Promise<RpcMethodResult<K>> {
-    return this.#request(method, args as unknown[]) as Promise<RpcMethodResult<K>>;
+  ): Promise<RpcMethodResult<K>>;
+  request(method: RpcMethod, ...args: unknown[]): Promise<unknown> {
+    return this.#request(method, args);
   }
 
   onNotification<K extends RpcNotification>(method: K, listener: NotificationListener<K>): () => void {
@@ -184,50 +238,184 @@ export class RpcClient {
     options: RpcEventSubscriptionOptions = {},
   ): Promise<RpcEventSubscription> {
     options.signal?.throwIfAborted();
+    this.#assertOpen();
+    const maxPendingEvents = pendingLimit(
+      options.maxPendingEvents,
+      RPC_EVENT_CLIENT_DEFAULT_MAX_PENDING_EVENTS,
+      RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS,
+      "RPC event subscription pending event limit",
+    );
+    const maxPendingBytes = pendingLimit(
+      options.maxPendingBytes,
+      RPC_EVENT_CLIENT_DEFAULT_MAX_PENDING_BYTES,
+      RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES,
+      "RPC event subscription pending byte limit",
+    );
+    const handoff: EventSubscriptionHandoff = { buffered: [], bufferedBytes: 0 };
+    this.#pendingEventSubscriptionHandoffs.add(handoff);
+    const callbackToken = {};
     let subscriptionId: string | undefined;
-    const buffered: Array<RpcNotificationMap["events.event"]> = [];
-    const failures: Array<RpcNotificationMap["events.error"]> = [];
-    const report = (cause: unknown): void => (options.onError ?? this.#onError)?.(error(cause, "RPC event subscription failed"));
-    const deliver = (event: EventEnvelope): void => {
+    let accepting = true;
+    let remoteStopped = false;
+    let remoteStopRequested = false;
+    let remoteOutcomePromise: Promise<{ ok: true } | { ok: false; failure: unknown }> | undefined;
+    let pumpPromise: Promise<void> | undefined;
+    let unsubscribePromise: Promise<void> | undefined;
+    let reentrantUnsubscribePromise: Promise<void> | undefined;
+    let retainedEvents = 0;
+    let retainedBytes = 0;
+    let bufferedBytes = 0;
+    let terminalFailure: Error | undefined;
+    let terminalReported = false;
+    const pending: Array<{ event: EventEnvelope; bytes: number }> = [];
+    const buffered: BufferedEventSubscriptionNotification[] = [];
+    const report = (cause: unknown): void => {
+      const failure = error(cause, "RPC event subscription failed");
       try {
-        void Promise.resolve(listener(event)).catch(report);
-      } catch (cause) {
-        report(cause);
+        if (options.onError !== undefined) options.onError(failure);
+        else this.#onError?.(failure);
+      } catch {
+        // A diagnostic callback cannot disrupt ordered subscription delivery.
       }
     };
-    const offEvent = this.onNotification("events.event", (notification) => {
-      if (subscriptionId === undefined) buffered.push(notification);
-      else if (notification.subscriptionId === subscriptionId) deliver(notification.event);
+    let offEvent = (): void => {};
+    let offError = (): void => {};
+    const detach = (): void => {
+      if (!accepting) return;
+      accepting = false;
+      offEvent();
+      offError();
+    };
+    const forgetSubscription = (): void => {
+      if (subscriptionId !== undefined) this.#eventSubscriptionIds.delete(subscriptionId);
+    };
+    const remoteStop = (): void => {
+      remoteStopRequested = true;
+      if (remoteOutcomePromise !== undefined || subscriptionId === undefined) return;
+      remoteOutcomePromise = (remoteStopped || this.closed
+        ? Promise.resolve({ ok: true as const })
+        : this.request("events.unsubscribe", { subscriptionId }).then(
+          () => ({ ok: true as const }),
+          (failure: unknown) => ({ ok: false as const, failure }),
+        )).finally(forgetSubscription);
+    };
+    const pump = (): void => {
+      if (pumpPromise !== undefined) return;
+      pumpPromise = (async () => {
+        while (pending.length > 0) {
+          const selected = pending.shift()!;
+          try {
+            await eventSubscriptionCallback.run(callbackToken, async () => await listener(selected.event));
+          } catch (cause) {
+            report(cause);
+          } finally {
+            retainedEvents -= 1;
+            retainedBytes -= selected.bytes;
+          }
+        }
+        if (terminalFailure !== undefined && !terminalReported) {
+          terminalReported = true;
+          report(terminalFailure);
+        }
+      })().finally(() => {
+        pumpPromise = undefined;
+        if (pending.length > 0 || (terminalFailure !== undefined && !terminalReported)) pump();
+      });
+    };
+    const stopLocally = (failure: Error): void => {
+      if (terminalFailure === undefined) terminalFailure = failure;
+      detach();
+      remoteStop();
+      pump();
+    };
+    const deliver = (event: EventEnvelope): void => {
+      if (!accepting) return;
+      const bytes = serializedBytes(event);
+      if (retainedEvents >= maxPendingEvents || retainedBytes + bytes > maxPendingBytes) {
+        stopLocally(new Error(
+          `RPC event subscription delivery queue exceeded ${maxPendingEvents} events or ${maxPendingBytes} bytes`,
+        ));
+        return;
+      }
+      pending.push({ event, bytes });
+      retainedEvents += 1;
+      retainedBytes += bytes;
+      pump();
+    };
+    const buffer = (
+      notification:
+        | { type: "event"; value: RpcNotificationMap["events.event"] }
+        | { type: "error"; value: RpcNotificationMap["events.error"] },
+    ): void => {
+      if (!accepting) return;
+      const bytes = serializedBytes(notification.value);
+      if (buffered.length >= maxPendingEvents || bufferedBytes + bytes > maxPendingBytes) {
+        stopLocally(new Error(
+          `RPC event subscription handoff queue exceeded ${maxPendingEvents} notifications or ${maxPendingBytes} bytes`,
+        ));
+        return;
+      }
+      buffered.push(notification);
+      bufferedBytes += bytes;
+    };
+    const fail = (notification: RpcNotificationMap["events.error"]): void => {
+      if (!accepting) return;
+      remoteStopped = true;
+      detach();
+      forgetSubscription();
+      terminalFailure ??= new Error(notification.reason);
+      pump();
+    };
+    offEvent = this.onNotification("events.event", (notification) => {
+      if (subscriptionId !== undefined && notification.subscriptionId === subscriptionId) deliver(notification.event);
     });
-    const offError = this.onNotification("events.error", (notification) => {
-      if (subscriptionId === undefined) failures.push(notification);
-      else if (notification.subscriptionId === subscriptionId) report(new Error(notification.reason));
+    offError = this.onNotification("events.error", (notification) => {
+      if (subscriptionId !== undefined && notification.subscriptionId === subscriptionId) fail(notification);
     });
     let result: RpcMethodResult<"events.subscribe">;
     try {
-      result = await this.request("events.subscribe", params, options);
+      result = await this.#request("events.subscribe", [params, options], handoff) as RpcMethodResult<"events.subscribe">;
     } catch (cause) {
       offEvent();
       offError();
       throw cause;
     }
     subscriptionId = result.subscriptionId;
+    this.#activateEventSubscriptionHandoff(handoff, result.blocked === undefined);
+    if (result.blocked !== undefined) remoteStopped = true;
+    if (handoff.overflow !== undefined) stopLocally(handoff.overflow);
+    else for (const notification of handoff.buffered) buffer(notification);
     for (const notification of buffered) {
-      if (notification.subscriptionId === subscriptionId) deliver(notification.event);
+      if (notification.value.subscriptionId !== subscriptionId) continue;
+      if (notification.type === "event") deliver(notification.value.event);
+      else fail(notification.value);
     }
-    for (const notification of failures) {
-      if (notification.subscriptionId === subscriptionId) report(new Error(notification.reason));
-    }
-    let active = true;
+    buffered.length = 0;
+    bufferedBytes = 0;
+    if (remoteStopRequested) remoteStop();
     return {
       subscriptionId,
       replayedThrough: result.replayedThrough,
-      unsubscribe: async () => {
-        if (!active) return;
-        active = false;
-        offEvent();
-        offError();
-        if (!this.closed) await this.request("events.unsubscribe", { subscriptionId: subscriptionId! });
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+      ...(result.blocked === undefined ? {} : { blocked: result.blocked }),
+      unsubscribe: () => {
+        detach();
+        remoteStop();
+        if (eventSubscriptionCallback.getStore() === callbackToken) {
+          reentrantUnsubscribePromise ??= (async () => {
+            const outcome = await remoteOutcomePromise!;
+            if (!outcome.ok) throw outcome.failure;
+          })();
+          return reentrantUnsubscribePromise;
+        }
+        if (unsubscribePromise !== undefined) return unsubscribePromise;
+        unsubscribePromise = (async () => {
+          while (pumpPromise !== undefined) await pumpPromise;
+          const outcome = await remoteOutcomePromise!;
+          if (!outcome.ok) throw outcome.failure;
+        })();
+        return unsubscribePromise;
       },
     };
   }
@@ -241,7 +429,121 @@ export class RpcClient {
     await this.#closeOwnedTransport();
   }
 
-  async #request(method: RpcMethod, args: unknown[]): Promise<unknown> {
+  #captureEventSubscriptionNotification(method: string, params: unknown): void {
+    if (method !== "events.event" && method !== "events.error") return;
+    if (params === null || typeof params !== "object" || Array.isArray(params)) return;
+    const subscriptionId = (params as { subscriptionId?: unknown }).subscriptionId;
+    if (typeof subscriptionId !== "string") return;
+    const claimed = this.#claimedEventSubscriptionHandoffs.get(subscriptionId);
+    if (claimed !== undefined) {
+      const notification = method === "events.event"
+        ? { type: "event" as const, value: params as RpcNotificationMap["events.event"] }
+        : { type: "error" as const, value: params as RpcNotificationMap["events.error"] };
+      const bytes = serializedBytes(notification.value);
+      if (
+        claimed.buffered.length >= RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS
+        || claimed.bufferedBytes + bytes > RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES
+      ) {
+        claimed.overflow ??= new Error(
+          `RPC event subscription attribution queue exceeded ${RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS} notifications or ${RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES} bytes`,
+        );
+      } else if (claimed.overflow === undefined) {
+        claimed.buffered.push(notification);
+        claimed.bufferedBytes += bytes;
+      }
+      return;
+    }
+    if (this.#eventSubscriptionIds.has(subscriptionId) || this.#externalEventSubscriptionIds.has(subscriptionId)) {
+      if (method === "events.error") this.#externalEventSubscriptionIds.delete(subscriptionId);
+      return;
+    }
+    const pending = [...this.#pendingEventSubscriptionHandoffs].filter((handoff) => handoff.overflow === undefined);
+    if (pending.length === 0) return;
+    const notification = method === "events.event"
+      ? { type: "event" as const, value: params as RpcNotificationMap["events.event"] }
+      : { type: "error" as const, value: params as RpcNotificationMap["events.error"] };
+    const bytes = serializedBytes(notification.value);
+    if (
+      this.#unattributedEventSubscriptionEvents >= RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS
+      || this.#unattributedEventSubscriptionBytes + bytes > RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES
+    ) {
+      const failure = new Error(
+        `RPC event subscription attribution queue exceeded ${RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_EVENTS} notifications or ${RPC_EVENT_CLIENT_ABSOLUTE_MAX_PENDING_BYTES} bytes`,
+      );
+      for (const handoff of pending) handoff.overflow = failure;
+      this.#clearUnattributedEventSubscriptionNotifications();
+      return;
+    }
+    let entry = this.#unattributedEventSubscriptionNotifications.get(subscriptionId);
+    if (entry === undefined) {
+      entry = { notifications: [], bytes: 0 };
+      this.#unattributedEventSubscriptionNotifications.set(subscriptionId, entry);
+    }
+    entry.notifications.push(notification);
+    entry.bytes += bytes;
+    this.#unattributedEventSubscriptionEvents += 1;
+    this.#unattributedEventSubscriptionBytes += bytes;
+  }
+
+  #attributeEventSubscription(
+    subscriptionId: string,
+    active: boolean,
+    handoff?: EventSubscriptionHandoff,
+  ): void {
+    const entry = this.#takeUnattributedEventSubscriptionNotifications(subscriptionId);
+    if (handoff === undefined) {
+      if (active) this.#externalEventSubscriptionIds.add(subscriptionId);
+    } else {
+      this.#pendingEventSubscriptionHandoffs.delete(handoff);
+      handoff.buffered = entry?.notifications ?? [];
+      handoff.bufferedBytes = entry?.bytes ?? 0;
+      handoff.subscriptionId = subscriptionId;
+      if (active) this.#claimedEventSubscriptionHandoffs.set(subscriptionId, handoff);
+    }
+    if (this.#pendingEventSubscriptionHandoffs.size === 0) {
+      this.#clearUnattributedEventSubscriptionNotifications();
+    }
+  }
+
+  #cancelEventSubscriptionHandoff(handoff: EventSubscriptionHandoff): void {
+    this.#pendingEventSubscriptionHandoffs.delete(handoff);
+    if (handoff.subscriptionId !== undefined) {
+      this.#claimedEventSubscriptionHandoffs.delete(handoff.subscriptionId);
+    }
+    if (this.#pendingEventSubscriptionHandoffs.size === 0) {
+      this.#clearUnattributedEventSubscriptionNotifications();
+    }
+  }
+
+  #activateEventSubscriptionHandoff(handoff: EventSubscriptionHandoff, active: boolean): void {
+    if (handoff.subscriptionId === undefined) return;
+    this.#claimedEventSubscriptionHandoffs.delete(handoff.subscriptionId);
+    if (active && !this.closed) this.#eventSubscriptionIds.add(handoff.subscriptionId);
+  }
+
+  #takeUnattributedEventSubscriptionNotifications(subscriptionId: string): {
+    notifications: BufferedEventSubscriptionNotification[];
+    bytes: number;
+  } | undefined {
+    const entry = this.#unattributedEventSubscriptionNotifications.get(subscriptionId);
+    if (entry === undefined) return undefined;
+    this.#unattributedEventSubscriptionNotifications.delete(subscriptionId);
+    this.#unattributedEventSubscriptionEvents -= entry.notifications.length;
+    this.#unattributedEventSubscriptionBytes -= entry.bytes;
+    return entry;
+  }
+
+  #clearUnattributedEventSubscriptionNotifications(): void {
+    this.#unattributedEventSubscriptionNotifications.clear();
+    this.#unattributedEventSubscriptionEvents = 0;
+    this.#unattributedEventSubscriptionBytes = 0;
+  }
+
+  async #request(
+    method: RpcMethod,
+    args: unknown[],
+    eventSubscriptionHandoff?: EventSubscriptionHandoff,
+  ): Promise<unknown> {
     this.#assertOpen();
     const methodHasParams = args.length > 1 || (args.length > 0 && !this.#requestOptions(args[0]));
     const params = methodHasParams ? args[0] : undefined;
@@ -254,12 +556,16 @@ export class RpcClient {
         if (abortListener !== undefined) options?.signal?.removeEventListener("abort", abortListener);
       };
       const pending: PendingRequest = {
+        method,
+        params,
+        ...(eventSubscriptionHandoff === undefined ? {} : { eventSubscriptionHandoff }),
         resolve: (value) => {
           cleanup();
           resolve(value);
         },
         reject: (cause) => {
           cleanup();
+          if (eventSubscriptionHandoff !== undefined) this.#cancelEventSubscriptionHandoff(eventSubscriptionHandoff);
           reject(cause);
         },
         cleanup,
@@ -268,9 +574,8 @@ export class RpcClient {
       if (options?.signal !== undefined) {
         abortListener = () => {
           if (this.#pending.delete(id)) {
-            cleanup();
-            this.#rememberIgnoredId(id);
-            reject(abortError(options.signal!));
+            this.#rememberIgnoredRequest(id, pending.method);
+            pending.reject(abortError(options.signal!));
           }
         };
         options.signal.addEventListener("abort", abortListener, { once: true });
@@ -302,7 +607,7 @@ export class RpcClient {
     const id = this.#nextId;
     if (id >= Number.MAX_SAFE_INTEGER) this.#nextId = 1;
     else this.#nextId += 1;
-    if (this.#pending.has(id) || this.#ignoredIds.has(id)) throw new Error("RPC request ID space is exhausted");
+    if (this.#pending.has(id) || this.#ignoredRequests.has(id)) throw new Error("RPC request ID space is exhausted");
     return id;
   }
 
@@ -345,13 +650,39 @@ export class RpcClient {
       const id = responseId(record.id);
       const pending = this.#pending.get(id);
       if (pending === undefined) {
-        if (this.#ignoredIds.delete(id)) return;
+        const ignoredMethod = this.#ignoredRequests.get(id);
+        if (ignoredMethod !== undefined) {
+          this.#ignoredRequests.delete(id);
+          this.#handleIgnoredResponse(ignoredMethod, record);
+          return;
+        }
         throw new RpcClientProtocolError(`RPC response references unknown request ID ${String(id)}`);
       }
       if (own(record, "result") === own(record, "error")) {
         throw new RpcClientProtocolError("RPC response must contain exactly one of result or error");
       }
       const failure = own(record, "error") ? remoteError(record.error) : undefined;
+      if (failure === undefined && pending.method === "events.subscribe") {
+        if (record.result === null || typeof record.result !== "object" || Array.isArray(record.result)) {
+          throw new RpcClientProtocolError("RPC event subscription response is invalid");
+        }
+        const subscriptionId = (record.result as { subscriptionId?: unknown }).subscriptionId;
+        if (typeof subscriptionId !== "string" || subscriptionId === "") {
+          throw new RpcClientProtocolError("RPC event subscription response is invalid");
+        }
+        this.#attributeEventSubscription(
+          subscriptionId,
+          (record.result as { blocked?: unknown }).blocked === undefined,
+          pending.eventSubscriptionHandoff,
+        );
+      }
+      if (failure === undefined && pending.method === "events.unsubscribe") {
+        const subscriptionId = (pending.params as { subscriptionId?: unknown } | undefined)?.subscriptionId;
+        if (typeof subscriptionId === "string") {
+          this.#eventSubscriptionIds.delete(subscriptionId);
+          this.#externalEventSubscriptionIds.delete(subscriptionId);
+        }
+      }
       this.#pending.delete(id);
       if (failure === undefined) pending.resolve(record.result);
       else pending.reject(failure);
@@ -364,6 +695,7 @@ export class RpcClient {
   }
 
   #dispatchNotification(method: string, params: unknown): void {
+    this.#captureEventSubscriptionNotification(method, params);
     for (const listener of this.#listeners.get(method) ?? []) this.#invokeListener(async () => await listener(params));
     for (const listener of this.#anyListeners) this.#invokeListener(async () => await listener(method, params));
   }
@@ -376,9 +708,27 @@ export class RpcClient {
     }
   }
 
-  #rememberIgnoredId(id: RpcId): void {
-    this.#ignoredIds.add(id);
-    if (this.#ignoredIds.size > 1_024) this.#ignoredIds.delete(this.#ignoredIds.values().next().value!);
+  #rememberIgnoredRequest(id: RpcId, method: RpcMethod): void {
+    this.#ignoredRequests.set(id, method);
+    if (this.#ignoredRequests.size > 1_024) {
+      this.#ignoredRequests.delete(this.#ignoredRequests.keys().next().value!);
+    }
+  }
+
+  #handleIgnoredResponse(method: RpcMethod, record: Record<string, unknown>): void {
+    if (method !== "events.subscribe" || !own(record, "result") || own(record, "error")) return;
+    const result = record.result;
+    if (result === null || typeof result !== "object" || Array.isArray(result)) return;
+    const subscriptionId = (result as { subscriptionId?: unknown }).subscriptionId;
+    if (typeof subscriptionId !== "string" || subscriptionId === "") return;
+
+    // A locally cancelled subscribe can still succeed remotely. Attribute any
+    // replay notifications to that server-owned ID, then clean it up without
+    // allowing its traffic to enter an unrelated helper handoff.
+    this.#attributeEventSubscription(subscriptionId, true);
+    void this.request("events.unsubscribe", { subscriptionId }).catch((cause) => {
+      this.#report(error(cause, "Late RPC event subscription cleanup failed"));
+    });
   }
 
   #terminate(reason: Error): void {
@@ -386,8 +736,14 @@ export class RpcClient {
     this.#closedReason = reason;
     for (const pending of this.#pending.values()) pending.reject(reason);
     this.#pending.clear();
+    this.#ignoredRequests.clear();
     this.#listeners.clear();
     this.#anyListeners.clear();
+    this.#eventSubscriptionIds.clear();
+    this.#externalEventSubscriptionIds.clear();
+    this.#pendingEventSubscriptionHandoffs.clear();
+    this.#claimedEventSubscriptionHandoffs.clear();
+    this.#clearUnattributedEventSubscriptionNotifications();
     this.#resolveClosed(reason);
   }
 

@@ -62,7 +62,13 @@ function runtimeInterceptors(host: RuntimeExtensionHost) {
     beforeCall: async (invocation: ToolInvocation, context: ToolContext) =>
       await host.reduceToolCall({ ...invocation, threadId: context.threadId, runId: context.runId, branch: "main" }, context.signal),
     afterResult: async (invocation: ToolInvocation, result: Parameters<RuntimeExtensionHost["reduceToolResult"]>[0]["result"], context: ToolContext) =>
-      await host.reduceToolResult({ invocation, result }, context.signal),
+      await host.reduceToolResult({
+        threadId: context.threadId,
+        runId: context.runId,
+        branch: context.branch ?? "main",
+        invocation,
+        result,
+      }, context.signal),
   };
 }
 
@@ -284,7 +290,11 @@ test("prepared and intercepted inputs are detached from asynchronously mutated o
         queueMicrotask(() => { prepared.value = "late-prepared-mutation"; });
         await Promise.resolve();
         assert.deepEqual(invocation.input, { value: "prepared" });
-        return { invocation: { ...invocation, input: intercepted }, blocked: false };
+        return {
+          invocation: { ...invocation, input: intercepted },
+          blocked: false,
+          transformations: [{ actor: "fixture-interceptor" }],
+        };
       },
     },
   );

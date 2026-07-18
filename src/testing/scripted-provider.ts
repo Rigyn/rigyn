@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "../core/json.js";
+import { validateProviderResponseDiagnostics } from "../core/provider-diagnostics.js";
 import type {
   AdapterError,
   AdapterEvent,
@@ -315,6 +316,7 @@ function validateError(value: unknown, label: string): asserts value is AdapterE
     "retryable",
     "partial",
     "bodyStarted",
+    "diagnostics",
     "raw",
   ], label);
   required(error, ["category", "message", "retryable", "partial"], label);
@@ -332,6 +334,7 @@ function validateError(value: unknown, label: string): asserts value is AdapterE
   if (error.bodyStarted === true && error.partial !== true) {
     throw new Error(`${label}.bodyStarted cannot be true when partial is false`);
   }
+  if (error.diagnostics !== undefined) validateProviderResponseDiagnostics(error.diagnostics);
   if (error.raw !== undefined) validateJson(error.raw, `${label}.raw`);
 }
 
@@ -339,26 +342,56 @@ function validateState(value: unknown, label: string): asserts value is Provider
   const state = record(value, label);
   const kind = state.kind;
   if (typeof kind !== "string") throw new Error(`${label}.kind must be a string`);
+  const stateKeys = (keys: string[]) => [...keys, "routed"];
+  if (state.routed !== undefined) {
+    const routed = record(state.routed, `${label}.routed`);
+    exactKeys(routed, ["provider", "model", "delegate", "upstreamModel", "protocolFamily", "scope"], `${label}.routed`);
+    required(routed, ["provider", "model", "delegate", "upstreamModel", "protocolFamily", "scope"], `${label}.routed`);
+    const routedIdentity = (value: unknown, field: string, maxBytes: number) => {
+      const identity = boundedString(value, `${label}.routed.${field}`, { maxBytes });
+      if (identity.trim() !== identity || /[\u007f-\u009f]/u.test(identity)) {
+        throw new Error(`${label}.routed.${field} must be canonical`);
+      }
+    };
+    routedIdentity(routed.provider, "provider", 128);
+    routedIdentity(routed.model, "model", 512);
+    routedIdentity(routed.delegate, "delegate", 128);
+    routedIdentity(routed.upstreamModel, "upstreamModel", 512);
+    if (![
+      "openai-responses",
+      "openai-chat-completions",
+      "anthropic-messages",
+      "gemini-generate-content",
+      "gemini-interactions",
+      "bedrock-converse",
+      "mistral-conversations",
+      "ollama-chat",
+    ].includes(String(routed.protocolFamily))) throw new Error(`${label}.routed.protocolFamily is invalid`);
+    if (
+      typeof routed.scope !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(routed.scope)
+    ) throw new Error(`${label}.routed.scope is invalid`);
+  }
   switch (kind) {
     case "openai_responses":
-      exactKeys(state, ["kind", "previousResponseId", "outputItems"], label);
+      exactKeys(state, stateKeys(["kind", "previousResponseId", "outputItems"]), label);
       required(state, ["kind", "outputItems"], label);
       if (state.previousResponseId !== undefined) boundedString(state.previousResponseId, `${label}.previousResponseId`);
       validateJsonArray(state.outputItems, `${label}.outputItems`);
       break;
     case "anthropic_messages":
-      exactKeys(state, ["kind", "assistantBlocks"], label);
+      exactKeys(state, stateKeys(["kind", "assistantBlocks"]), label);
       required(state, ["kind", "assistantBlocks"], label);
       validateJsonArray(state.assistantBlocks, `${label}.assistantBlocks`);
       break;
     case "gemini_interactions":
-      exactKeys(state, ["kind", "previousInteractionId", "steps"], label);
+      exactKeys(state, stateKeys(["kind", "previousInteractionId", "steps"]), label);
       required(state, ["kind", "steps"], label);
       if (state.previousInteractionId !== undefined) boundedString(state.previousInteractionId, `${label}.previousInteractionId`);
       validateJsonArray(state.steps, `${label}.steps`);
       break;
     case "mistral_conversations":
-      exactKeys(state, ["kind", "conversationId", "model", "requestFingerprint", "outputs"], label);
+      exactKeys(state, stateKeys(["kind", "conversationId", "model", "requestFingerprint", "outputs"]), label);
       required(state, ["kind", "model", "requestFingerprint", "outputs"], label);
       if (state.conversationId !== undefined) boundedString(state.conversationId, `${label}.conversationId`, { maxBytes: 4_096 });
       boundedString(state.model, `${label}.model`, { maxBytes: 1_024 });
@@ -366,19 +399,19 @@ function validateState(value: unknown, label: string): asserts value is Provider
       validateJsonArray(state.outputs, `${label}.outputs`);
       break;
     case "gemini_generate_content":
-      exactKeys(state, ["kind", "parts"], label);
+      exactKeys(state, stateKeys(["kind", "parts"]), label);
       required(state, ["kind", "parts"], label);
       validateJsonArray(state.parts, `${label}.parts`);
       break;
     case "bedrock_converse":
-      exactKeys(state, ["kind", "assistantMessage"], label);
+      exactKeys(state, stateKeys(["kind", "assistantMessage"]), label);
       required(state, ["kind", "assistantMessage"], label);
       validateJson(state.assistantMessage, `${label}.assistantMessage`);
       break;
     case "chat_completions":
     case "openrouter_chat":
     case "ollama_chat":
-      exactKeys(state, ["kind", "assistantMessage"], label);
+      exactKeys(state, stateKeys(["kind", "assistantMessage"]), label);
       required(state, ["kind", "assistantMessage"], label);
       validateJson(state.assistantMessage, `${label}.assistantMessage`);
       break;

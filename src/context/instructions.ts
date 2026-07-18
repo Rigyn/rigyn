@@ -86,7 +86,7 @@ export async function discoverInstructions(
   if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes < 1) {
     throw new RangeError("maxTotalBytes must be a positive safe integer");
   }
-  const filenames = options.filenames ?? ["AGENTS.override.md", "AGENTS.md"];
+  const filenames = options.filenames ?? ["AGENTS.override.md", "AGENTS.md", "CLAUDE.md"];
   if (filenames.length === 0 || filenames.some((name) => name.length === 0 || name.includes("/") || name.includes("\\"))) {
     throw new HarnessError("CONTEXT_INSTRUCTIONS", "Instruction filenames must be simple names");
   }

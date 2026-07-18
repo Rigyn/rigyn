@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+
 import {
   EditTool,
   FindTool,
@@ -85,11 +87,11 @@ async function main(): Promise<void> {
     threadId: "external-backend-thread",
   });
   if (completed === undefined) throw new Error("Backend tool did not return a result");
-  process.stdout.write(`${JSON.stringify({ schemaVersion: 1, result: completed.result })}\n`);
+  writeFileSync(1, `${JSON.stringify({ schemaVersion: 1, result: completed.result })}\n`);
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message.replaceAll("\0", "�").slice(0, 4096)}\n`);
+  writeFileSync(2, `${message.replaceAll("\0", "�").slice(0, 4096)}\n`);
   process.exitCode = 1;
 });

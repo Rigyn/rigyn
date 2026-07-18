@@ -173,7 +173,12 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<KeybindingAction, readonly str
 });
 
 export function normalizeKeybinding(value: string): string {
-  const parts = value.trim().toLowerCase().split("+").map((part) => part.trim());
+  const input = value.trim().toLowerCase();
+  const parts = input === "+"
+    ? ["+"]
+    : input.endsWith("++")
+      ? [...input.slice(0, -2).split("+"), "+"].map((part) => part.trim())
+      : input.split("+").map((part) => part.trim());
   if (parts.some((part) => part === "")) throw new Error(`Invalid keybinding: ${value}`);
   const baseInput = parts.pop();
   if (baseInput === undefined) throw new Error(`Invalid keybinding: ${value}`);

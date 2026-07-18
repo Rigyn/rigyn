@@ -196,6 +196,41 @@ async function fixture(provider: ProviderAdapter) {
   return { root, database, store, service, thread, common, abandoned, target };
 }
 
+test("tree navigation reads only the source and target histories", async (t) => {
+  const value = await fixture(new SummaryProvider("unused"));
+  t.after(async () => {
+    await value.service.close();
+    value.store.close();
+    await rm(value.root, { recursive: true, force: true });
+  });
+  for (let index = 0; index < 24; index += 1) {
+    value.store.forkBranch({
+      threadId: value.thread.threadId,
+      fromBranch: "main",
+      newBranch: `unrelated-${index}`,
+      atEventId: value.common.eventId,
+    });
+  }
+  const reads: Array<string | undefined> = [];
+  const listEvents = value.store.listEvents.bind(value.store);
+  value.store.listEvents = (threadId, branch) => {
+    reads.push(branch);
+    return listEvents(threadId, branch);
+  };
+
+  const result = await value.service.navigateTree({
+    threadId: value.thread.threadId,
+    branch: "main",
+    targetBranch: "sibling",
+    targetEventId: value.target.eventId,
+    newBranch: "targeted-navigation",
+    summarize: false,
+  });
+
+  assert.equal(result.cancelled, false);
+  assert.deepEqual(reads, ["main", "sibling"]);
+});
+
 test("accepted branch summarization targets the selected branch and survives restart", async (t) => {
   const provider = new SummaryProvider("Preserve the main-only decision for later.");
   const value = await fixture(provider);

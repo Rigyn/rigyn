@@ -4,6 +4,23 @@
 
 ## Configured owner
 
+For IDEs, desktop applications, and other long-lived hosts, use the session-oriented methods on the same narrow owner:
+
+```ts
+await using rigyn = await createEmbeddingHarness({ workspace: process.cwd() });
+const session = await rigyn.createSession({ name: "refactor" });
+await session.setModel({ provider: "openai", model: "gpt-5" });
+
+const stop = session.subscribe((event) => {
+  // Typed, canonical run events. No credentials or raw provider payloads.
+  console.log(event.event.type);
+});
+const result = await session.run({ prompt: "Inspect the parser and propose a fix." });
+stop();
+```
+
+`createSession()`, `openSession()`, and `listSessions()` provide durable, workspace-scoped session ownership without exposing the credential store, provider registry, SQLite store, or `HarnessService`. An `EmbeddingSession` can run, steer, queue a follow-up, abort, compact, fork, navigate, read a bounded transcript, rename itself, and select a model. `setModel()` validates the exact provider/model pair and records the selection immediately on that branch, so it survives restart even before the next run. Steering, follow-up, and abort operations reject a handle whose branch is not the active run branch. Event subscriptions are scoped to runs started through that session handle. Their detached event copies omit provider continuation state, provider-opaque message blocks, provider-trace reasoning, and raw usage/error payloads.
+
 ```js
 import { createEmbeddingHarness } from "rigyn/embedding";
 
@@ -65,6 +82,8 @@ Both owners follow the same bounded lifecycle:
 2. A second active run on the same thread is rejected; separate threads may run concurrently.
 3. `waitForIdle(signal?)` includes starts still being prepared and every owned active run. Its optional signal cancels only the wait.
 4. `close()` rejects new starts, cancels owned runs, waits for settlement, then releases runtime resources. It is idempotent. `await using` calls the same close path.
+
+Configured session handles are owned by their `EmbeddingHarness`. Closing the owner invalidates every handle and subscription, cancels service work, and waits for already-started session operations to settle. Reopen the durable session through a new owner after restart; do not retain a handle across owner lifetimes.
 
 The in-memory preset also combines every run signal with a 30-second default hard deadline and the owner close signal. Set `timeoutMs` at creation to another value from 1 ms through 10 minutes. Calling a run handle's `cancel()` affects only that thread. Calling `close()` affects every run owned by that harness.
 

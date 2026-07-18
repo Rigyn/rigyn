@@ -43,6 +43,9 @@ export function buildSystemPrompt(input: {
   const toolGuidelines = selectedTools.flatMap((name) =>
     (toolMetadata.get(name)?.promptGuidelines ?? []).map((guideline) =>
       `- ${boundedPromptText(guideline, `tool ${name} prompt guideline`)}`));
+  const bashGuideline = selectedTools.includes("bash")
+    ? "- Use bash for file operations such as ls, rg, and find when dedicated tools are unavailable\n"
+    : "";
   const discoveredInstructions = renderInstructions(input.instructions);
   const appended = (input.appendSystemPrompt ?? []).map((entry) =>
     `[appended instructions: ${safeSource(entry.source)}]\n${boundedPromptText(entry.text, "appended system prompt")}`
@@ -61,8 +64,8 @@ Guidelines:
 - Make the smallest coherent change that satisfies the request and preserve unrelated user work
 - Work through the requested outcome; when blocked, state the concrete blocker and what is needed
 - Verify changes with the most relevant tests or commands before claiming success
-- Use bash for file operations such as ls, rg, and find when dedicated tools are unavailable
-- Be concise in your responses
+- Treat failed verification as unfinished work: inspect the failure, fix it, and rerun; never claim success from a command that exited unsuccessfully
+${bashGuideline}- Be concise in your responses
 - Show file paths clearly when working with files
 ${toolGuidelines.length === 0 ? "" : `${toolGuidelines.join("\n")}\n`}
 

@@ -45,6 +45,8 @@ import {
   type ProviderRequest,
   type ProviderRegistryOptions,
   type PromptCompositionMetadata,
+  type RpcOversizedEvent,
+  type RoutedProviderStateProvenance,
   type ResourceClaim,
   type ResolvedModelSelection,
   type ResolveModelSelectionOptions,
@@ -104,6 +106,25 @@ import {
   type ExtensionGalleryIndex,
   type ToolInputPreparer,
 } from "rigyn";
+
+const oversizedEvent = {
+  reason: "event_exceeds_serialized_byte_limit",
+  sequence: 2,
+  serializedBytes: 2_000_000,
+  maximumBytes: 1_000_000,
+  resumeAfterSequence: 2,
+} satisfies RpcOversizedEvent;
+void oversizedEvent;
+
+const routedStateProvenance = {
+  provider: "company",
+  model: "public-model",
+  delegate: "wire",
+  upstreamModel: "upstream-model",
+  protocolFamily: "openai-responses",
+  scope: "00000000-0000-4000-8000-000000000000",
+} satisfies RoutedProviderStateProvenance;
+void routedStateProvenance;
 
 declare const childSession: RuntimeChildSession;
 declare const childEvent: RuntimeChildEvent;

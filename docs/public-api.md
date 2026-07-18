@@ -39,6 +39,8 @@ All four classes are covered by the compatibility rules below; “advanced” an
 
 The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/Rigyn/rigyn/blob/main/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
 
+The package export map above describes ordinary Node.js consumers. Managed extension runtime entries use a narrower host-owned value-import boundary: only `rigyn/extensions`, `rigyn/providers`, and `rigyn/tui` are resolved to the running host. This keeps one canonical host instance when an installed extension lives outside Rigyn's dependency tree. Managed runtimes cannot import the root package or any other `rigyn/*` subpath; type-only authoring imports remain governed by TypeScript and the package export map.
+
 Each JavaScript entry point is ESM-only and Node-only and has a matching TypeScript declaration entry. No entry point is browser-safe. Browser clients should use the local RPC process or a reviewed loopback extension bridge. A browser-safe protocol/types package is a conditional non-goal until a concrete client requires it; do not bundle credential or filesystem authority into browser code.
 
 Adding an export is compatible within a minor release. Removing or renaming an entry point, export, method, required field, or accepted value is a breaking API change. Before 1.0, such a change requires a minor version increase plus a `Breaking` section and migration instructions in the changelog. Patch releases must remain backward compatible. After 1.0, breaking changes require a major version.

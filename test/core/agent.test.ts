@@ -1021,6 +1021,25 @@ test("provider response identity is single-shot, bounded, and control-free", asy
       stream: [{ type: "response_start", model: "bad\u001bmodel" } as const],
       pattern: /response model/u,
     },
+    {
+      name: "invalid response diagnostics",
+      stream: [{ type: "response_start", model: "m", diagnostics: { status: 99, headers: {} } } as const],
+      pattern: /response diagnostics/u,
+    },
+    {
+      name: "invalid error response diagnostics",
+      stream: [{
+        type: "error",
+        error: {
+          category: "rate_limit",
+          message: "retry later",
+          retryable: true,
+          partial: false,
+          diagnostics: { status: 429, headers: {}, body: "forbidden" },
+        },
+      } as unknown as AdapterEvent],
+      pattern: /response diagnostics/u,
+    },
   ]) {
     await t.test(entry.name, async () => {
       const provider = new ScriptedProvider([() => events(entry.stream)]);

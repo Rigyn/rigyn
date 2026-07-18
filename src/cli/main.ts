@@ -101,7 +101,7 @@ import {
 } from "../extensions/index.js";
 import { runExtensionsCommand, runPackageCommand, runPackageConfigCommand, runProjectPackageCommand } from "./extensions-command.js";
 import { combinePromptImages, expandPromptReferences } from "./prompt-input.js";
-import { formatSessionReport } from "./session-report.js";
+import { formatPromptContextReport, formatSessionReport } from "./session-report.js";
 import { formatResourceCatalogReport } from "./resource-report.js";
 import { withMachineOutputGuard, writeMachineOutput } from "../interfaces/output-guard.js";
 import { systemPromptCliOptions, type SystemPromptCliOptions } from "./system-prompt.js";
@@ -1634,7 +1634,7 @@ async function pickLoginProvider(
   return terminal.choose(path === "subscription" ? "Select subscription provider" : "Select API-key provider", choices, signal);
 }
 
-async function pickModel(runtime: LoadedRuntime, provider: ProviderId, terminal: TerminalPrompter): Promise<string> {
+export async function pickModel(runtime: LoadedRuntime, provider: ProviderId, terminal: TerminalPrompter): Promise<string> {
   let models: ModelInfo[];
   try {
     const signal = AbortSignal.timeout(30_000);
@@ -2170,7 +2170,7 @@ async function expandOneShotSubmission(
   return prompt === undefined ? message : renderExtensionPrompt(prompt, args);
 }
 
-function runtimeUi(
+export function runtimeUi(
   terminal: TuiController,
   extensionId: string,
   lifecycleSignal?: AbortSignal,
@@ -3112,6 +3112,14 @@ async function chatCommandOperation(
           timestamp: envelope.timestamp,
         }, context),
       }, rendererSignal);
+      const bindEditorRenderer = (): void => {
+        if (rendererHost.renderers().some((renderer) => renderer.kind === "editor")) {
+          terminal.setEditorRenderer({
+            render: (view, context) => rendererHost.renderEditor(view, context),
+          }, rendererSignal);
+        } else terminal.setEditorRenderer();
+      };
+      bindEditorRenderer();
       extensionSessionPublicationCleanup?.();
       const publicationService = runtime!.service;
       extensionSessionPublicationCleanup = publicationService.onExtensionSessionEvent((publication) => {
@@ -3190,6 +3198,7 @@ async function chatCommandOperation(
           bindRuntimeInputs();
         }
         else if (change === "shortcut" || change === "autocomplete" || change === "editor_middleware") bindRuntimeInputs();
+        else if (change === "editor_renderer") bindEditorRenderer();
         else if (change === "tool_renderer") terminal.setToolRenderers({
           has: (name) => rendererHost.renderers().some((renderer) => renderer.kind === "tool" && renderer.key === name),
           renderCall: (name, view, context) => rendererHost.renderToolCall(name, view, context),
@@ -4372,6 +4381,10 @@ async function chatCommandOperation(
           runs,
           ...(choice === undefined ? {} : { provider: choice.provider, model: choice.model }),
         }));
+        continue;
+      }
+      if (line === "/context") {
+        terminal.notify(formatPromptContextReport(runtime.store.listEvents(threadId, branch)));
         continue;
       }
       if (line === "/resources") {

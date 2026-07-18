@@ -1,4 +1,5 @@
 import type { EventEnvelope } from "../core/events.js";
+import { defaultSecretRedactor } from "../auth/redaction.js";
 import {
   canonicalExtensionMessageEvent,
   canonicalExtensionStateEvent,
@@ -12,6 +13,8 @@ import { detectTerminalCapabilities, terminalSize } from "./capabilities.js";
 import {
   RuntimeUiComponentMount,
   sanitizeRuntimeUiBlock,
+  type RuntimeEditorRendererBinding,
+  type RuntimeEditorRenderView,
   type RuntimeToolRendererBinding,
   type RuntimeSessionRendererBinding,
   type RuntimeToolRenderView,
@@ -153,6 +156,13 @@ interface ToolRendererOwner {
 interface SessionRendererOwner {
   binding: RuntimeSessionRendererBinding;
   signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface EditorRendererOwner {
+  binding: RuntimeEditorRendererBinding;
+  signal: AbortSignal;
+  warned: boolean;
   onAbort(): void;
 }
 
@@ -393,7 +403,9 @@ function normalizeRuntimeCustomOptions(value: RuntimeUiCustomOptions | undefined
   if (unknownOverlayOptions.length > 0) throw new Error(`Runtime overlay options contain unknown keys: ${unknownOverlayOptions.join(", ")}`);
   if (input.anchor !== undefined && !RUNTIME_OVERLAY_ANCHORS.has(input.anchor)) throw new Error("Runtime overlay anchor is invalid");
   runtimeOverlayLength(input.width, "Runtime overlay width");
-  runtimeOverlayLength(input.minWidth, "Runtime overlay minWidth");
+  if (input.minWidth !== undefined && (!Number.isSafeInteger(input.minWidth) || input.minWidth < 1 || input.minWidth > 1_000_000)) {
+    throw new Error("Runtime overlay minWidth must be a positive safe integer");
+  }
   runtimeOverlayLength(input.maxHeight, "Runtime overlay maxHeight");
   runtimeOverlayLength(input.row, "Runtime overlay row", true, true);
   runtimeOverlayLength(input.col, "Runtime overlay col", true, true);
@@ -569,6 +581,7 @@ export class TuiController {
   readonly #inlineRevealedIds = new Set<string>();
   #toolRenderers: ToolRendererOwner | undefined;
   #sessionRenderers: SessionRendererOwner | undefined;
+  #editorRenderer: EditorRendererOwner | undefined;
   readonly #sessionEvents = new Map<string, RetainedSessionEvent>();
   #sessionEventBytes = 0;
   #extensionShortcuts: ExtensionShortcutOwner | undefined;
@@ -777,6 +790,30 @@ export class TuiController {
     this.#editorMiddleware = owner;
     signal.addEventListener("abort", owner.onAbort, { once: true });
     if (signal.aborted) owner.onAbort();
+  }
+
+  setEditorRenderer(binding?: RuntimeEditorRendererBinding, signal?: AbortSignal): void {
+    const previous = this.#editorRenderer;
+    if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+    this.#editorRenderer = undefined;
+    if (binding !== undefined) {
+      if (signal === undefined) throw new Error("Editor renderer requires a generation signal");
+      signal.throwIfAborted();
+      const owner: EditorRendererOwner = {
+        binding,
+        signal,
+        warned: false,
+        onAbort: () => {
+          if (this.#editorRenderer !== owner) return;
+          this.#editorRenderer = undefined;
+          this.#scheduleRender();
+        },
+      };
+      this.#editorRenderer = owner;
+      signal.addEventListener("abort", owner.onAbort, { once: true });
+      if (signal.aborted) owner.onAbort();
+    }
+    this.#scheduleRender();
   }
 
   start(): void {
@@ -2068,6 +2105,7 @@ export class TuiController {
   clearExtensionUi(): void {
     this.setToolRenderers();
     this.setSessionRenderers();
+    this.setEditorRenderer();
     this.setExtensionShortcuts();
     this.setCommandCompletionProvider();
     this.setAutocompleteProvider();
@@ -2235,6 +2273,38 @@ export class TuiController {
     };
   }
 
+  #renderEditorBlock(view: RuntimeEditorRenderView, size: { columns: number; rows: number }): RuntimeUiBlock | undefined {
+    const owner = this.#editorRenderer;
+    if (owner === undefined || owner.signal.aborted) return undefined;
+    try {
+      const width = Math.max(1, size.columns - 1);
+      const height = Math.min(6, Math.max(2, Math.floor(Math.max(8, size.rows) / 3)));
+      const rendered = owner.binding.render(Object.freeze({ ...view }), {
+        width,
+        height,
+        focused: true,
+        expanded: false,
+        theme: {
+          name: this.#theme.name,
+          color: this.#theme.ansi,
+          unicode: this.capabilities.unicode,
+        },
+      });
+      if (rendered === undefined) return undefined;
+      const sanitized = sanitizeRuntimeUiBlock(rendered, { width, maxLines: height, maxBytes: this.#limits.maxEditorBytes });
+      if (sanitized.cursor === undefined) throw new Error("Editor renderer output requires a cursor");
+      return sanitized;
+    } catch (cause) {
+      if (!owner.warned && !owner.signal.aborted && !this.#closed) {
+        owner.warned = true;
+        try {
+          this.notify(`Editor renderer failed: ${defaultSecretRedactor.redact(error(cause).message).slice(0, 4096)}`, "warning");
+        } catch {}
+      }
+      return undefined;
+    }
+  }
+
   renderNow(): void {
     if (!this.#started || this.#closed || this.#suspended || this.#secretAbort !== undefined || this.#externalEditing || this.mode !== "full") return;
     this.#renderScheduled = false;
@@ -2311,6 +2381,9 @@ export class TuiController {
       });
       else overlayOwner.mount.close();
     }
+    const selectionNavigation = `${this.#bindingHint("tui.select.up", 1)}/${this.#bindingHint("tui.select.down", 1)} navigate`;
+    const selectionConfirm = this.#bindingHint("tui.select.confirm", 1);
+    const selectionCancel = this.#bindingHint("tui.select.cancel", 1);
     const overlayView = overlay === undefined
       ? undefined
       : overlay.settings !== undefined
@@ -2324,7 +2397,7 @@ export class TuiController {
             ...(overlay.items[overlay.selected]?.description === undefined
               ? {}
               : { selectedDescription: overlay.items[overlay.selected]!.description }),
-            hints: ["Type to search · Enter/Space/Right to change · Left previous · Esc close"],
+            hints: [`${selectionNavigation} · ${selectionConfirm} next · Left previous · ${selectionCancel} close`],
             ...(overlay.settings.status === undefined ? {} : { status: overlay.settings.status }),
           }
       : overlay.tree !== undefined
@@ -2341,28 +2414,27 @@ export class TuiController {
               ...(overlay.tree.status === undefined ? {} : { status: overlay.tree.status }),
             }
           : {
-              title: `${overlay.title} · ${overlay.tree.filter} · ${overlay.tree.activeOnly ? "Active path" : "All paths"}`,
+              title: overlay.title,
+              states: [overlay.tree.filter, overlay.tree.activeOnly ? "active path" : "all paths"],
               query: overlay.query.text,
               selected: overlay.selected,
               items: overlay.items,
               hints: [
-                `${this.#bindingHint("tui.select.up", 1)}/${this.#bindingHint("tui.select.down", 1)} navigate · Left/Right page`,
-                `${this.#bindingHint("app.tree.foldOrPreviousEndpoint")} fold/previous endpoint · ${this.#bindingHint("app.tree.unfoldOrNextEndpoint")} unfold/next`,
-                `${this.#bindingHint("app.message.copy", 1)} copy · ${this.#bindingHint("app.tree.editLabel", 1)} label · ${this.#bindingHint("app.tree.toggleLabelTimestamp", 1)} timestamps · ${this.#bindingHint("app.tree.filter.cycleForward", 1)}/${this.#bindingHint("app.tree.filter.cycleBackward", 1)} filter`,
-                `${this.#bindingHint("app.tree.togglePath", 1)} active/all · ${this.#bindingHint("tui.select.confirm", 1)} select · ${this.#bindingHint("tui.select.cancel", 1)} cancel`,
+                `${selectionConfirm} open · ${this.#bindingHint("app.tree.foldOrPreviousEndpoint", 1)} fold · ${this.#bindingHint("app.tree.unfoldOrNextEndpoint", 1)} unfold · ${selectionCancel} close`,
+                `${this.#bindingHint("app.tree.togglePath", 1)} path · ${this.#bindingHint("app.message.copy", 1)} copy · ${this.#bindingHint("app.tree.editLabel", 1)} label · ${this.#bindingHint("app.tree.filter.cycleForward", 1)} filter`,
               ],
               emptyMessage: overlay.tree.activeOnly ? "No matching entries on the active path" : "No matching tree entries",
               ...(overlay.tree.status === undefined ? {} : { status: overlay.tree.status }),
             }
       : overlay.scopedModels !== undefined
         ? {
-            title: `Scoped Models · ${overlay.scopedModels.all ? "All enabled" : `${overlay.scopedModels.selected.size} selected`}`,
+            title: "Scoped Models",
+            states: [overlay.scopedModels.all ? "all enabled" : `${overlay.scopedModels.selected.size} selected`],
             query: overlay.query.text,
             selected: overlay.selected,
             items: overlay.items,
             hints: [
-              `Enter/Space toggle · ${this.#bindingHint("app.models.reorderUp", 1)}/${this.#bindingHint("app.models.reorderDown", 1)} reorder`,
-              `${this.#bindingHint("app.models.toggleProvider", 1)} provider`,
+              `${selectionConfirm} toggle · ${this.#bindingHint("app.models.reorderUp", 1)}/${this.#bindingHint("app.models.reorderDown", 1)} order · ${this.#bindingHint("app.models.toggleProvider", 1)} provider`,
               `${this.#bindingHint("app.models.enableAll", 1)} all · ${this.#bindingHint("app.models.clearAll", 1)} none · ${this.#bindingHint("app.models.save", 1)} save · ${this.#bindingHint("tui.select.cancel", 1)} cancel`,
             ],
             emptyMessage: "No matching models",
@@ -2370,11 +2442,12 @@ export class TuiController {
           }
       : overlay.kind === "model"
         ? {
-            title: `${overlay.title}${overlay.modelPicker?.scoped === undefined ? "" : ` · ${overlay.modelPicker.mode}`}`,
+            title: overlay.title,
+            ...(overlay.modelPicker?.scoped === undefined ? {} : { states: [overlay.modelPicker.mode] }),
             query: overlay.query.text,
             selected: overlay.selected,
             items: overlay.items.map((item) => modelPickerDisplayItem(item, this.#model.context, this.capabilities.unicode)),
-            ...(overlay.modelPicker?.scoped === undefined ? {} : { hints: ["Tab all/scoped"] }),
+            hints: [`${selectionNavigation} · ${selectionConfirm} select · ${selectionCancel} cancel${overlay.modelPicker?.scoped === undefined ? "" : " · Tab scope"}`],
             ...(this.#modelPickerLoading ? { status: "Refreshing live available models…" } : {}),
             emptyMessage: overlay.source.length === 0
               ? this.#modelPickerLoading
@@ -2389,6 +2462,7 @@ export class TuiController {
             query: overlay.query.text,
             selected: overlay.selected,
             items: overlay.items,
+            ...(overlay.kind === "command" ? {} : { hints: [`${selectionNavigation} · ${selectionConfirm} select · ${selectionCancel} cancel`] }),
           }
         : overlay.session.mode === "rename"
           ? {
@@ -2397,7 +2471,7 @@ export class TuiController {
               query: overlay.query.text,
               selected: 0,
               items: [],
-              hints: ["Enter save · Esc cancel"],
+              hints: [`${selectionConfirm} save · ${selectionCancel} cancel`],
               ...(overlay.session.status === undefined ? {} : { status: overlay.session.status }),
             }
           : overlay.session.mode === "confirm_delete"
@@ -2407,28 +2481,46 @@ export class TuiController {
                 query: "",
                 selected: 0,
                 items: [],
-                hints: ["Enter delete · Esc cancel"],
+                hints: [`${selectionConfirm} delete · ${selectionCancel} cancel`],
                 ...(overlay.session.status === undefined ? {} : { status: overlay.session.status }),
               }
             : {
-                title: `Resume Session · ${overlay.session.scope === "all" ? "All workspaces" : "Current workspace"} · Name: ${overlay.session.namedOnly ? "Named" : "All"} · Sort: ${overlay.session.sort[0]?.toUpperCase() ?? ""}${overlay.session.sort.slice(1)} · Path: ${overlay.session.showPath ? "on" : "off"}`,
+                title: "Resume Session",
+                states: [
+                  overlay.session.scope === "all" ? "all workspaces" : "workspace",
+                  overlay.session.namedOnly ? "named" : "all",
+                  overlay.session.sort,
+                  overlay.session.showPath ? "path on" : "path off",
+                ],
                 query: overlay.query.text,
                 selected: overlay.selected,
                 items: overlay.items,
                 hints: [
-                  "re:<pattern> regex · \"phrase\" exact",
-                  `${this.#bindingHint("app.session.toggleScope", 1)} current/all · ${this.#bindingHint("app.session.toggleSort", 1)} sort · ${this.#bindingHint("app.session.toggleNamedFilter", 1)} named · ${this.#bindingHint("app.session.togglePath", 1)} path`,
-                  "Ctrl+R rename · Ctrl+D delete · Ctrl+Backspace delete empty search",
-                  ...(overlay.session.hasMore ? ["Right loads the next bounded catalog page"] : []),
-                  "/resume --all searches every indexed workspace",
+                  `${selectionConfirm} open · ${this.#bindingHint("app.session.rename", 1)} rename · ${this.#bindingHint("app.session.delete", 1)} delete · ${selectionCancel} close`,
+                  `${this.#bindingHint("app.session.toggleScope", 1)} scope · ${this.#bindingHint("app.session.toggleSort", 1)} sort · ${this.#bindingHint("app.session.toggleNamedFilter", 1)} named · ${this.#bindingHint("app.session.togglePath", 1)} paths${overlay.session.hasMore ? " · Right more" : ""}`,
                 ],
                 emptyMessage: overlay.query.empty
-                  ? overlay.session.namedOnly ? "No named sessions found. Press Ctrl+N to show all." : "No sessions in this workspace."
+                  ? overlay.session.namedOnly
+                    ? `No named sessions found. Press ${this.#bindingHint("app.session.toggleNamedFilter", 1)} to show all.`
+                    : "No sessions in this workspace. Use /resume --all to search every indexed workspace."
                   : "No matching sessions",
                 ...(overlay.session.status === undefined ? {} : { status: overlay.session.status }),
               };
     const workingMessage = [...this.#extensionWorkingMessages.values()].at(-1);
     const workingVisible = [...this.#extensionWorkingVisibility.values()].at(-1);
+    const editorText = this.#inputBlocked ?? (overlay?.kind === "command" ? this.#commandEditorText(overlay) : this.#editor.text);
+    const editorCursor = this.#inputBlocked !== undefined
+      ? splitGraphemes(this.#inputBlocked).length
+      : overlay?.kind === "command"
+        ? splitGraphemes(this.#commandEditorText(overlay)).length
+        : this.#editor.cursor;
+    const editorBlock = overlay === undefined ? this.#renderEditorBlock({
+      text: editorText,
+      cursor: editorCursor,
+      label: this.#inputBlocked === undefined ? this.#inputLabel : this.#inputBlockedLabel,
+      mode: this.#inputMode,
+      blocked: this.#inputBlocked !== undefined,
+    }, size) : undefined;
     const view: TuiViewState = {
       context: {
         ...this.#model.context,
@@ -2440,8 +2532,9 @@ export class TuiController {
       },
       transcript,
       transcriptOffset: this.#transcriptOffset,
-      editorText: this.#inputBlocked ?? (overlay?.kind === "command" ? this.#commandEditorText(overlay) : this.#editor.text),
-      editorCursor: this.#inputBlocked?.length ?? (overlay?.kind === "command" ? this.#commandEditorText(overlay).length : this.#editor.cursor),
+      editorText,
+      editorCursor,
+      ...(editorBlock === undefined ? {} : { editorBlock }),
       inputLabel: this.#inputBlocked === undefined ? this.#inputLabel : this.#inputBlockedLabel,
       inputMode: this.#inputMode,
       ...(this.#queuedMessages.length === 0 ? {} : { queuedMessages: this.#queuedMessages }),
@@ -2491,6 +2584,8 @@ export class TuiController {
     this.#toolRenderers = undefined;
     if (this.#sessionRenderers !== undefined) this.#sessionRenderers.signal.removeEventListener("abort", this.#sessionRenderers.onAbort);
     this.#sessionRenderers = undefined;
+    if (this.#editorRenderer !== undefined) this.#editorRenderer.signal.removeEventListener("abort", this.#editorRenderer.onAbort);
+    this.#editorRenderer = undefined;
     this.#sessionEvents.clear();
     this.#sessionEventBytes = 0;
     if (this.#extensionShortcuts !== undefined) this.#extensionShortcuts.signal.removeEventListener("abort", this.#extensionShortcuts.onAbort);

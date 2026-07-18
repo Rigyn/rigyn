@@ -320,6 +320,7 @@ export interface TuiViewState {
   transcriptOffset: number;
   editorText: string;
   editorCursor: number;
+  editorBlock?: RuntimeUiBlock;
   inputLabel: string;
   inputMode: "normal" | "follow_up";
   usage?: TuiUsageSummary;
@@ -345,6 +346,7 @@ export interface TuiViewState {
     inline?: boolean;
     settings?: boolean;
     selectedDescription?: string;
+    states?: readonly string[];
     queryLabel?: string;
     query: string;
     selected: number;

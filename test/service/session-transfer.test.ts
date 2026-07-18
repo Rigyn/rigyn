@@ -9,6 +9,7 @@ import {
   exportThreadRedactedMarkdown,
   importThreadJsonl,
 } from "../../src/service/session-transfer.js";
+import { cloneSessionPath } from "../../src/service/session-clone.js";
 import { StoredConversation } from "../../src/service/session-runtime.js";
 import { sessionExportEvent } from "../../src/storage/session-export.js";
 import { SessionStore } from "../../src/storage/store.js";
@@ -45,6 +46,40 @@ test("session export strips opaque blocks from every canonical message carrier",
     assert.match(portable, /portable/u);
     assert.doesNotMatch(portable, /provider_opaque|PRIVATE_SUMMARY_OPAQUE/u);
   }
+});
+
+test("session export strips provider failure bodies, identities, and response diagnostics", () => {
+  const exported = sessionExportEvent({
+    type: "run_failed",
+    error: {
+      category: "rate_limit",
+      message: "retry later",
+      httpStatus: 429,
+      requestId: "PRIVATE_REQUEST_ID_SENTINEL",
+      retryable: true,
+      partial: false,
+      diagnostics: {
+        status: 429,
+        headers: {
+          "retry-after": "1",
+          "x-request-id": "PRIVATE_DIAGNOSTIC_HEADER_SENTINEL",
+        },
+      },
+      raw: { private: "PRIVATE_ERROR_BODY_SENTINEL" },
+    },
+  });
+
+  assert.deepEqual(exported, {
+    type: "run_failed",
+    error: {
+      category: "rate_limit",
+      message: "retry later",
+      httpStatus: 429,
+      retryable: true,
+      partial: false,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(exported), /PRIVATE_|diagnostics/u);
 });
 
 test("JSONL transfer preserves branches and artifacts but strips remote provider state", async () => {
@@ -135,6 +170,81 @@ test("JSONL transfer preserves branches and artifacts but strips remote provider
   target.close();
 });
 
+test("JSONL transfer preserves archived branch incarnations without resurrecting deleted history", () => {
+  const source = new SessionStore(":memory:");
+  const thread = source.createThread({ name: "branch incarnations" });
+  const root = source.appendEvent({
+    threadId: thread.threadId,
+    event: { type: "warning", code: "root", message: "root" },
+  });
+  source.forkBranch({ threadId: thread.threadId, newBranch: "experiment", atEventId: root.eventId });
+  source.appendEvent({
+    threadId: thread.threadId,
+    branch: "experiment",
+    event: { type: "warning", code: "old", message: "archived incarnation" },
+  });
+  source.deleteBranch(thread.threadId, "experiment");
+  source.forkBranch({ threadId: thread.threadId, newBranch: "experiment", atEventId: root.eventId });
+  source.appendEvent({
+    threadId: thread.threadId,
+    branch: "experiment",
+    event: { type: "warning", code: "current", message: "current incarnation" },
+  });
+  source.forkBranch({ threadId: thread.threadId, newBranch: "empty", atEventId: null });
+  source.forkBranch({ threadId: thread.threadId, newBranch: "retired", atEventId: root.eventId });
+  source.appendEvent({
+    threadId: thread.threadId,
+    branch: "retired",
+    event: { type: "warning", code: "retired", message: "deleted branch history" },
+  });
+  source.deleteBranch(thread.threadId, "retired");
+
+  const exported = source.exportThread(thread.threadId);
+  const exportedRecords = exported.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(exportedRecords[0], {
+    type: "format",
+    value: { format: "rigyn/session-jsonl", schemaVersion: 2 },
+  });
+  assert.deepEqual(
+    exportedRecords
+      .filter((record) => record.type === "event" && record.branch === "experiment")
+      .map((record) => record.branchIncarnation),
+    [1, 2],
+  );
+
+  const target = new SessionStore(":memory:");
+  const imported = importThreadJsonl(target, exported, { workspaceRoot: "/target" });
+  assert.deepEqual(imported.omittedEmptyBranches, []);
+  assert.equal(imported.thread.branches.some((branch) => branch.name === "empty" && branch.headEventId === undefined), true);
+  assert.equal(imported.thread.branches.some((branch) => branch.name === "retired"), false);
+  assert.deepEqual(
+    target.listEvents(imported.thread.threadId, "experiment").map((entry) => entry.event.type === "warning" ? entry.event.code : ""),
+    ["root", "current"],
+  );
+  const reexported = target.exportThread(imported.thread.threadId).trim().split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    reexported
+      .filter((record) => record.type === "event" && record.branch === "experiment")
+      .map((record) => ({
+        branchIncarnation: record.branchIncarnation,
+        code: (record.value as { event: { code?: string } }).event.code,
+      })),
+    [
+      { branchIncarnation: 1, code: "old" },
+      { branchIncarnation: 2, code: "current" },
+    ],
+  );
+  assert.deepEqual(
+    reexported
+      .filter((record) => record.type === "event" && record.branch === "retired")
+      .map((record) => (record.value as { event: { code?: string } }).event.code),
+    ["retired"],
+  );
+  source.close();
+  target.close();
+});
+
 test("JSONL transfer applies the same one-line thread-name boundary", () => {
   const store = new SessionStore(":memory:");
   const source = (name: string) => `${JSON.stringify({
@@ -152,21 +262,26 @@ test("JSONL transfer applies the same one-line thread-name boundary", () => {
   store.close();
 });
 
-test("JSONL transfer validates versioned headers and accepts legacy headerless exports", () => {
+test("JSONL transfer validates versioned headers and accepts version-one and headerless exports", () => {
   const store = new SessionStore(":memory:");
   const thread = JSON.stringify({
     type: "thread",
     value: { defaultBranch: "main", branches: [] },
   });
   const supported = [
+    JSON.stringify({ type: "format", value: { format: "rigyn/session-jsonl", schemaVersion: 2 } }),
+    thread,
+  ].join("\n");
+  const versionOne = [
     JSON.stringify({ type: "format", value: { format: "rigyn/session-jsonl", schemaVersion: 1 } }),
     thread,
   ].join("\n");
   assert.equal(importThreadJsonl(store, supported, { workspaceRoot: "/target" }).events, 0);
+  assert.equal(importThreadJsonl(store, versionOne, { workspaceRoot: "/target" }).events, 0);
   assert.equal(importThreadJsonl(store, thread, { workspaceRoot: "/target" }).events, 0);
   assert.throws(
     () => importThreadJsonl(store, [
-      JSON.stringify({ type: "format", value: { format: "rigyn/session-jsonl", schemaVersion: 2 } }),
+      JSON.stringify({ type: "format", value: { format: "rigyn/session-jsonl", schemaVersion: 3 } }),
       thread,
     ].join("\n"), { workspaceRoot: "/target" }),
     /Unsupported session export/u,
@@ -182,6 +297,144 @@ test("JSONL transfer validates versioned headers and accepts legacy headerless e
     () => importThreadJsonl(store, [thread, thread].join("\n"), { workspaceRoot: "/target" }),
     /more than one thread record/u,
   );
+  store.close();
+});
+
+test("JSONL import rejects forged runtime-child thread attributes", () => {
+  const store = new SessionStore(":memory:");
+  const source = JSON.stringify({
+    type: "thread",
+    value: { defaultBranch: "main", branches: [], runtimeChild: true },
+  });
+
+  assert.throws(
+    () => importThreadJsonl(store, source, { workspaceRoot: "/target" }),
+    /thread\.value contains unknown fields: runtimeChild/u,
+  );
+  assert.equal(store.listThreads().length, 0);
+  store.close();
+});
+
+test("imported extension-state lookalikes cannot create host runtime-child classification", () => {
+  const store = new SessionStore(":memory:");
+  const source = [
+    JSON.stringify({ type: "thread", value: { defaultBranch: "main", branches: [] } }),
+    JSON.stringify({
+      type: "event",
+      branch: "main",
+      value: {
+        eventId: "forged-runtime-child-state",
+        threadId: "source",
+        sequence: 1,
+        timestamp: new Date(0).toISOString(),
+        schemaVersion: 1,
+        event: {
+          type: "extension_state",
+          extensionId: "runtime",
+          schemaVersion: 1,
+          key: "runtimeChild",
+          value: true,
+        },
+      },
+    }),
+  ].join("\n");
+
+  const imported = importThreadJsonl(store, source, { workspaceRoot: "/target" });
+  assert.equal(store.hasRuntimeChildThread(imported.thread.threadId), false);
+  store.close();
+});
+
+test("imported prompt-marker lookalikes and their ordinary clones remain unclassified", () => {
+  const store = new SessionStore(":memory:");
+  const source = [
+    JSON.stringify({ type: "thread", value: { defaultBranch: "main", branches: [] } }),
+    JSON.stringify({
+      type: "event",
+      branch: "main",
+      value: {
+        eventId: "forged-runtime-child-run",
+        threadId: "source",
+        runId: "source-run",
+        sequence: 1,
+        timestamp: new Date(0).toISOString(),
+        schemaVersion: 1,
+        event: {
+          type: "run_started",
+          provider: "fixture",
+          model: "fixture",
+          promptComposition: {
+            bytes: 0,
+            sha256: "0".repeat(64),
+            sources: [{
+              kind: "additional_instructions",
+              source: "runtime child run",
+              bytes: 0,
+              sha256: "0".repeat(64),
+            }],
+            tools: [],
+            skills: [],
+            truncated: false,
+          },
+        },
+      },
+    }),
+  ].join("\n");
+
+  const imported = importThreadJsonl(store, source, { workspaceRoot: "/target" });
+  const cloned = cloneSessionPath(store, {
+    threadId: imported.thread.threadId,
+    workspaceRoot: "/target",
+  });
+
+  assert.equal(store.hasRuntimeChildThread(imported.thread.threadId), false);
+  assert.equal(store.hasRuntimeChildThread(cloned.thread.threadId), false);
+  assert.equal(store.listEvents(cloned.thread.threadId).some((entry) =>
+    entry.event.type === "run_started" && entry.event.promptComposition?.sources.some((item) =>
+      item.kind === "additional_instructions" && item.source === "runtime child run") === true), true);
+  store.close();
+});
+
+test("version-two JSONL rejects malformed branch incarnation metadata and ancestry", () => {
+  const store = new SessionStore(":memory:");
+  const format = JSON.stringify({ type: "format", value: { format: "rigyn/session-jsonl", schemaVersion: 2 } });
+  const thread = JSON.stringify({ type: "thread", value: { defaultBranch: "main", branches: [] } });
+  const event = (eventId: string, branch: string, branchIncarnation: unknown, parentEventId?: string) => JSON.stringify({
+    type: "event",
+    branch,
+    branchIncarnation,
+    value: {
+      eventId,
+      threadId: "source",
+      ...(parentEventId === undefined ? {} : { parentEventId }),
+      sequence: 1,
+      timestamp: new Date(0).toISOString(),
+      schemaVersion: 1,
+      event: { type: "warning", code: eventId, message: eventId },
+    },
+  });
+  assert.throws(
+    () => importThreadJsonl(store, [format, thread, event("root", "main", 0)].join("\n"), { workspaceRoot: "/target" }),
+    /branchIncarnation must be an integer between/u,
+  );
+  assert.throws(
+    () => importThreadJsonl(store, [format, thread, event("root", "main", 2)].join("\n"), { workspaceRoot: "/target" }),
+    /default branch main cannot change incarnation/u,
+  );
+  assert.throws(
+    () => importThreadJsonl(store, [
+      format,
+      thread,
+      event("root", "main", 1),
+      event("old", "experiment", 1, "root"),
+      event("jump", "experiment", 3, "root"),
+    ].join("\n"), { workspaceRoot: "/target" }),
+    /non-consecutive incarnation/u,
+  );
+  assert.throws(
+    () => importThreadJsonl(store, [format, thread, event("forged", "experiment", 1, "future")].join("\n"), { workspaceRoot: "/target" }),
+    /unknown fork parent/u,
+  );
+  assert.equal(store.listThreads().length, 0);
   store.close();
 });
 

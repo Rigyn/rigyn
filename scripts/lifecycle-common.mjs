@@ -12,7 +12,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, parse, relative, resolve, sep, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 
 export const INSTALLATION_MARKER = ".installation.json";
 export const INSTALL_TRANSACTION = ".install-transaction.json";
@@ -70,8 +70,11 @@ export async function resolveNpmInvocation(args, options = {}) {
 }
 
 export function inside(parent, candidate) {
-  const path = relative(parent, candidate);
-  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
+  const pathApi = win32.isAbsolute(parent) && win32.isAbsolute(candidate)
+    ? win32
+    : { isAbsolute, relative, sep };
+  const path = pathApi.relative(parent, candidate);
+  return path === "" || (!pathApi.isAbsolute(path) && path !== ".." && !path.startsWith(`..${pathApi.sep}`));
 }
 
 async function physicalCreationTarget(target) {

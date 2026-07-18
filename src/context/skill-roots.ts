@@ -13,6 +13,7 @@ export function sharedUserSkillRoots(homeDirectory: string): SkillRoot[] {
     path: join(homeDirectory, directory, "skills"),
     scope: "user",
     trusted: true,
+    rootMarkdown: false,
   }));
 }
 
@@ -26,5 +27,6 @@ export function sharedWorkspaceSkillRoots(workspace: string, projectTrusted: boo
     path: join(workspace, directory, "skills"),
     scope: "workspace",
     trusted: true,
+    rootMarkdown: false,
   }));
 }

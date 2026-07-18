@@ -8,6 +8,7 @@ import { TuiController, TuiSelectionCancelledError } from "../../src/tui/control
 import { Keybindings } from "../../src/tui/keybindings.js";
 import { parseThemeDefinition } from "../../src/tui/theme.js";
 import type { TuiAction, TuiInputImageAttachment } from "../../src/tui/types.js";
+import { stripAnsi } from "../../src/tui/unicode.js";
 import { FakeInput, FakeOutput, FakeSignals, envelope, tick } from "./helpers.js";
 
 function shellQuote(value: string): string {
@@ -20,6 +21,10 @@ async function waitForOutput(read: () => string, expected: string): Promise<void
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${expected}`);
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
+}
+
+function terminalWords(value: string): string {
+  return stripAnsi(value).replaceAll("│", " ").replace(/\s+/gu, " ").trim();
 }
 
 function fullController(options: {
@@ -112,7 +117,7 @@ test("startup content is present in the first full-screen frame", () => {
   const { output, controller } = fullController();
   controller.setContext({ status: "idle" });
   controller.setStartup("Ready from startup", "Ready from startup");
-  assert.ok(output.text.indexOf("Ready from startup") < output.text.indexOf("no-model"));
+  assert.match(output.text, /Ready from startup/u);
   controller.close();
 });
 
@@ -869,7 +874,7 @@ test("an empty session picker remains usable and explains all-workspace recovery
   const selection = controller.choosePicker("session", "Resume Session", []);
   await tick();
   assert.match(output.text, /No sessions in this workspace/u);
-  assert.match(output.text, /\/resume --all searches every indexed workspace/u);
+  assert.match(output.text, /\/resume --all to search every/u);
   input.write("\u001b");
   await assert.rejects(selection, TuiSelectionCancelledError);
   controller.close();
@@ -904,7 +909,7 @@ test("an empty model picker explains that authentication lives under /login", as
   controller.setPickerItems("model", []);
   input.write(Buffer.from([12]));
   await tick();
-  assert.match(output.text, /No available models\. Use \/login to connect a provider\./u);
+  assert.match(terminalWords(output.text), /No available models\. Use \/login to connect a provider\./u);
   input.write("\u001b");
   controller.close();
 });
@@ -916,9 +921,9 @@ test("an empty connected model picker reports catalog recovery instead of asking
   controller.setModelPickerEmptyMessage("Connected provider catalogs are unavailable: corp (network). Retry /model or /reload.");
   input.write(Buffer.from([12]));
   await tick();
-  assert.match(output.text, /Connected provider catalogs are unavailable: corp \(network\)/u);
-  assert.match(output.text, /Retry \/model/u);
-  assert.match(output.text, /\/reload\./u);
+  const visible = terminalWords(output.text);
+  assert.match(visible, /Connected provider catalogs are unavailable: corp \(network\)/u);
+  assert.match(visible, /\/model or \/reload\./u);
   assert.doesNotMatch(output.text, /Use \/login to connect/u);
   input.write("\u001b");
   controller.close();
@@ -1002,6 +1007,45 @@ test("model picker shows provider badges, marks the active model, and wraps arro
   controller.close();
 });
 
+test("picker command decks describe remapped navigation and actions", async () => {
+  const { input, output, controller } = fullController();
+  controller.setKeybindings(new Keybindings({
+    "tui.select.up": "alt+k",
+    "tui.select.down": "alt+j",
+    "tui.select.confirm": "alt+o",
+    "tui.select.cancel": "alt+x",
+    "app.session.rename": "alt+r",
+    "app.session.delete": "alt+d",
+  }));
+  controller.setPickerItems("model", [
+    { id: "p/one", label: "p / one", value: { provider: "p", model: "one" } },
+  ]);
+  controller.start();
+  input.write(Buffer.from([12]));
+  await tick();
+  assert.match(output.text, /Alt\+K\/Alt\+J navigate/u);
+  assert.match(output.text, /Alt\+O select · Alt\+X cancel/u);
+  input.write("\u001bx");
+
+  output.chunks.length = 0;
+  const session = controller.choosePicker("session", "Resume Session", [{
+    id: "session",
+    label: "Session",
+    value: "session",
+    session: {
+      path: "/workspace/session",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  }]);
+  await tick();
+  assert.match(output.text, /Alt\+O open · Alt\+R rename/u);
+  assert.match(output.text, /Alt\+D delete · Alt\+X close/u);
+  input.write("\u001bx");
+  await assert.rejects(session, TuiSelectionCancelledError);
+  controller.close();
+});
+
 test("scoped-model picker searches, toggles exact models, saves, and preserves the draft", async () => {
   const { input, output, controller } = fullController();
   controller.start();
@@ -1013,7 +1057,9 @@ test("scoped-model picker searches, toggles exact models, saves, and preserves t
   ], { all: false, selected: [] });
   await tick();
   assert.match(output.text, /Scoped Models/u);
-  assert.match(output.text, /Ctrl\+A all · Ctrl\+X none · Ctrl\+S save/u);
+  assert.match(output.text, /Ctrl\+A all/u);
+  assert.match(terminalWords(output.text), /Ctrl\+X none Ctrl\+S save/u);
+  assert.match(output.text, /Esc cancel/u);
   input.write("beta\r");
   await tick();
   assert.match(output.text, /☑ p \/ beta/u);
@@ -1098,7 +1144,7 @@ test("scoped-model picker reorders an ordered draft with remappable keys", async
     { id: "q/gamma", label: "q / gamma", value: { provider: "q", model: "gamma" } },
   ], { all: false, selected: ["q/gamma", "p/alpha", "p/beta"] });
   await tick();
-  assert.match(output.text, /Ctrl\+K\/Ctrl\+N reorder/u);
+  assert.match(output.text, /Ctrl\+K\/Ctrl\+N order/u);
   input.write("alpha");
   input.write(Buffer.from([11]));
   await tick();
@@ -1160,7 +1206,7 @@ test("session-tree picker folds, toggles paths, cycles sibling endpoints, and pr
   ];
   const selection = controller.chooseSessionTree("Session Tree", rows);
   await tick();
-  assert.match(output.text, /Ctrl\+← \/ Alt\+← fold\/previous endpoint/u);
+  assert.match(output.text, /Ctrl\+← fold/u);
 
   input.write("\u001b[A");
   input.write("\u001b[1;5D");
@@ -1172,7 +1218,7 @@ test("session-tree picker folds, toggles paths, cycles sibling endpoints, and pr
 
   input.write(Buffer.from([16]));
   await tick();
-  assert.match(output.text, /Session Tree · default · Active path/u);
+  assert.match(terminalWords(output.text), /default · active path/u);
   input.write(Buffer.from([16]));
   input.write("\u001b[1;5C\u001b[1;5C");
   input.write("\r");
@@ -1204,8 +1250,9 @@ test("session-tree help follows remapped tree actions", async () => {
     tree: { eventId: "root", kind: "user", depth: 0, prefix: "└─ ", branches: ["main"], paths: ["main"], active: true },
   }]);
   await tick();
-  assert.match(output.text, /Alt\+H fold\/previous endpoint · Alt\+L unfold\/next/u);
-  assert.match(output.text, /Alt\+A active\/all/u);
+  assert.match(output.text, /Alt\+H fold/u);
+  assert.match(output.text, /Alt\+L unfold/u);
+  assert.match(output.text, /Alt\+A path/u);
   assert.match(output.text, /Ctrl\+X copy/u);
   input.write(Buffer.from([24]));
   await tick();
@@ -1231,7 +1278,7 @@ test("session-tree labels, timestamps, and filters remain interactive without se
   });
   input.write(Buffer.from([21]));
   await tick();
-  assert.match(output.text, /Filter: user-only/u);
+  assert.match(terminalWords(output.text), /Filter: user-only/u);
   input.write("L");
   await tick();
   assert.match(output.text, /Add entry label/u);
@@ -1243,8 +1290,9 @@ test("session-tree labels, timestamps, and filters remain interactive without se
   input.write(Buffer.from([12]));
   input.write("T");
   await tick();
-  assert.match(output.text, /Session Tree · labeled-only · All paths/u);
-  assert.match(output.text, /\[bookmark\] 2026-07-10 12:34 User prompt/u);
+  assert.match(terminalWords(output.text), /labeled-only · all paths/u);
+  assert.match(output.text, /\[bookmark\] User prompt/u);
+  assert.match(output.text, /2026-07-10 12:34 User prompt/u);
   input.write("L");
   input.write(Buffer.from([21]));
   input.write("\r");
@@ -1429,6 +1477,54 @@ test("editor middleware is structural, bounded, and cannot retain input after ge
   controller.close();
 });
 
+test("editor renderer is structural, preserves host input semantics, and expires with its generation", async () => {
+  const { input, output, controller } = fullController();
+  const generation = new AbortController();
+  controller.start();
+  controller.setEditorRenderer({
+    render(view) {
+      const text = `custom:${view.text}`;
+      return {
+        lines: [{ spans: [{ text, role: "accent" }] }],
+        cursor: { row: 0, column: "custom:".length + view.cursor },
+      };
+    },
+  }, generation.signal);
+  input.write("x");
+  await tick();
+  assert.equal(controller.getEditorText(), "x");
+  assert.match(output.text, /custom:x/u);
+
+  generation.abort(new Error("extension reloaded"));
+  input.write("y");
+  await tick();
+  assert.equal(controller.getEditorText(), "xy");
+
+  const malformed = new AbortController();
+  controller.setEditorRenderer({ render: () => ({ lines: [{ spans: [{ text: "no cursor" }] }] }) }, malformed.signal);
+  controller.renderNow();
+  await tick();
+  assert.match(output.text, /Editor renderer failed/u);
+  controller.close();
+});
+
+test("editor renderer failure notices redact credential-shaped exception text", async () => {
+  const { output, controller } = fullController();
+  const generation = new AbortController();
+  const secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  controller.start();
+  controller.setEditorRenderer({
+    render() {
+      throw new Error(secret);
+    },
+  }, generation.signal);
+  controller.renderNow();
+  await tick();
+  assert.match(output.text, /Editor renderer failed: \[REDACTED\]/u);
+  assert.doesNotMatch(output.text, new RegExp(secret, "u"));
+  controller.close();
+});
+
 test("extension shortcuts stop at their generation boundary", async () => {
   const actions: TuiAction[] = [];
   const { input, controller } = fullController({ actions });
@@ -1610,7 +1706,7 @@ test("the global model picker can open with a fuzzy query already populated", as
   ]);
   controller.openPicker("model", "Models", "codex");
   await tick();
-  assert.match(output.text, /> codex/u);
+  assert.match(output.text, /SEARCH  codex/u);
   assert.match(output.text, /gpt \[openai-codex\]/u);
   assert.doesNotMatch(output.text, /gpt \[openai\]/u);
   controller.close();
@@ -1649,7 +1745,7 @@ test("session picker exposes sort, named, path, and threaded controls", async ()
 
   input.write("\u001bs");
   await tick();
-  assert.match(output.text, /Resume Session · Current workspace · Name: All · Sort: Threaded · Path: off/u);
+  assert.match(terminalWords(output.text), /Resume Session .*workspace · all · threaded · path off/u);
   assert.match(output.text, /└─ Unnamed child/u);
 
   output.chunks.length = 0;
@@ -1657,7 +1753,7 @@ test("session picker exposes sort, named, path, and threaded controls", async ()
   input.write(Buffer.from([14]));
   input.write(Buffer.from([16]));
   await tick();
-  assert.match(output.text, /Resume Session · Current workspace · Name: Named · Sort: Recent · Path: on/u);
+  assert.match(terminalWords(output.text), /workspace · named · recent · path on/u);
   assert.match(output.text, /\/tmp\/sessions\.db#parent/u);
   assert.doesNotMatch(output.text, /Unnamed child/u);
   controller.close();
@@ -1690,7 +1786,7 @@ test("session picker switches live between current and all-workspace catalogs", 
   input.write(Buffer.from([1]));
   await tick();
   assert.deepEqual(actions, [{ type: "session_scope", scope: "all" }]);
-  assert.match(output.text, /All workspaces/u);
+  assert.match(output.text, /all workspaces/u);
   assert.match(output.text, /Loading all workspaces/u);
   controller.setPickerItems("session", [{
     id: "other",
@@ -1720,7 +1816,7 @@ test("session picker requests full-catalog searches and explicit bounded next pa
   controller.start();
   controller.openPicker("session", "Resume Session");
   await tick();
-  assert.match(output.text, /Right loads the next bounded catalog page/u);
+  assert.match(output.text, /Right more/u);
 
   input.write("archive");
   await tick();
@@ -1785,19 +1881,19 @@ test("session picker renames, confirms deletion, and protects the active session
 
   input.write(Buffer.from([4]));
   await tick();
-  assert.match(output.text, /active session cannot be deleted/u);
+  assert.match(terminalWords(output.text), /active session cannot be deleted/iu);
   assert.equal(actions.length, 1);
 
   input.write("\u001b[B");
   input.write(Buffer.from([4]));
   await tick();
-  assert.match(output.text, /Delete session permanently/u);
-  assert.match(output.text, /Delete “Older”\?/u);
+  assert.match(terminalWords(output.text), /Delete session permanently/u);
+  assert.match(terminalWords(output.text), /Delete “Older”\?/u);
   input.write("\r");
   await tick();
   assert.equal(actions[1]?.type, "session_delete");
   if (actions[1]?.type === "session_delete") assert.equal(actions[1].item.value, "older");
-  assert.match(output.text, /Resume Session · Current workspace · Name: All · Sort: Threaded/u);
+  assert.match(terminalWords(output.text), /Resume Session .*workspace · all · threaded/u);
   controller.close();
 });
 
@@ -2607,6 +2703,9 @@ test("runtime overlay options reject unsafe dimensions before mounting", async (
   assert.throws(() => controller.showOverlay(() => ({ render: () => ({ lines: [] }) }), {
     overlayOptions: { minWidth: 0 },
   }), /minWidth must be a positive safe integer/u);
+  assert.throws(() => controller.showOverlay(() => ({ render: () => ({ lines: [] }) }), {
+    overlayOptions: { minWidth: "50%" as unknown as number },
+  }), /minWidth must be a positive safe integer/u);
   controller.close();
 });
 
@@ -2650,7 +2749,8 @@ test("full TUI owns generation-bound tool renderers and falls back after expiry 
   controller.render(envelope({ type: "tool_requested", callId: "two", name: "read", input: { path: "two.ts" }, index: 1 }, 5));
   await tick();
   assert.equal(v1Calls, callsBeforeAbort);
-  assert.match(output.text, /Read · \[ts\] two\.ts · queued/u);
+  assert.match(output.text, /Read · \[ts\] two\.ts/u);
+  assert.match(output.text, /│ ○ Read · \[ts\] two\.ts · queued/u);
   assert.doesNotMatch(output.text, /V1 CALL two\.ts/u);
 
   const failed = new AbortController();
@@ -2662,7 +2762,8 @@ test("full TUI owns generation-bound tool renderers and falls back after expiry 
   output.chunks.length = 0;
   controller.render(envelope({ type: "tool_requested", callId: "three", name: "read", input: { path: "three.ts" }, index: 2 }, 6));
   await tick();
-  assert.match(output.text, /Read · \[ts\] three\.ts · queued/u);
+  assert.match(output.text, /Read · \[ts\] three\.ts/u);
+  assert.match(output.text, /│ ○ Read · \[ts\] three\.ts · queued/u);
   controller.close();
 });
 
@@ -2841,7 +2942,7 @@ test("runtime presentation replacement clears stale UI and blocks input without 
   input.write("\u001b");
   await new Promise<void>((resolve) => setTimeout(resolve, 35));
   assert.match(output.text, /Reloading keybindings/u);
-  assert.match(output.text, /reload>/u);
+  assert.match(output.text, /reload> /u);
   assert.equal(actions.at(-1)?.type, "cancel");
 
   controller.clearExtensionUi();
@@ -2864,7 +2965,199 @@ test("blocked operations use their semantic input label", async () => {
   controller.start();
   controller.setInputBlocked("Reading clipboard…", "clipboard");
   await tick();
-  assert.match(output.text, /clipboard>/u);
-  assert.doesNotMatch(output.text, /reload>/u);
+  assert.match(output.text, /clipboard> /u);
+  assert.doesNotMatch(output.text, /reload> /u);
+  controller.close();
+});
+
+test("settings picker cycles values, blocks overlapping saves, and closes without changing the draft", async () => {
+  const { input, output, controller } = fullController();
+  controller.start();
+  controller.setEditorText("keep this draft");
+  let release!: () => void;
+  const saving = new Promise<void>((resolve) => { release = resolve; });
+  const changes: Array<{ id: string; previous: string; next: string }> = [];
+  const settings = controller.chooseSettings([
+    {
+      id: "thinking",
+      label: "Thinking",
+      description: "Reasoning effort for the selected model",
+      value: "medium",
+      values: ["low", "medium", "high"],
+    },
+    {
+      id: "theme",
+      label: "Theme",
+      description: "Terminal color theme",
+      value: "dark",
+      values: ["dark", "light"],
+    },
+  ], (item, next) => {
+    changes.push({ id: item.id, previous: item.value, next });
+    return changes.length === 1 ? saving : undefined;
+  });
+  await tick();
+  assert.match(output.text, /Settings/u);
+  assert.match(output.text, /Thinking/u);
+  assert.match(output.text, /Reasoning effort/u);
+
+  input.write("\u001b[C");
+  await tick();
+  assert.deepEqual(changes, [{ id: "thinking", previous: "medium", next: "high" }]);
+  assert.match(output.text, /Saving Thinking/u);
+  input.write("\u001b[C");
+  await tick();
+  assert.equal(changes.length, 1, "a pending settings write must serialize further changes");
+  release();
+  await tick();
+
+  input.write("\u001b[D");
+  await tick();
+  assert.deepEqual(changes[1], { id: "thinking", previous: "high", next: "medium" });
+  input.write(Buffer.from([27]));
+  await new Promise<void>((resolve) => setTimeout(resolve, 35));
+  await settings;
+  assert.equal(controller.getEditorText(), "keep this draft");
+  controller.close();
+});
+
+test("settings picker reports failed writes, restores values, and supports bounded navigation and search", async () => {
+  const { input, output, controller } = fullController();
+  controller.start();
+  let rejectSave!: (cause: Error) => void;
+  const failedSave = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+  let writes = 0;
+  const settings = controller.chooseSettings([
+    { id: "alpha", label: "Alpha", description: "First option", value: "one", values: ["one", "two"] },
+    { id: "beta", label: "Beta", description: "Second option", value: "off", values: ["off", "on"] },
+  ], () => {
+    writes += 1;
+    if (writes === 1) return failedSave;
+    throw new Error("settings store is read-only");
+  });
+  input.write("\u001b[C");
+  await tick();
+  rejectSave(new Error("disk full"));
+  await tick();
+  assert.match(output.text, /Could not save Alpha: disk full/u);
+
+  input.write("\u001b[C");
+  await tick();
+  assert.equal(writes, 2);
+  assert.match(output.text, /settings store is read-only/u);
+  input.write("\u001b[B\u001b[6~\u001b[5~\u001b[A");
+  input.write("beta");
+  input.write(Buffer.from([127]));
+  input.write("\u001b[3~");
+  input.write(Buffer.from([21]));
+  await tick();
+  assert.match(output.text, /Alpha/u);
+
+  input.write(Buffer.from([3]));
+  await settings;
+  controller.close();
+});
+
+test("settings picker rejects unavailable, invalid, overlapping, and cancelled menus", async () => {
+  const { input, controller } = fullController();
+  controller.start();
+  await assert.rejects(controller.chooseSettings([], () => undefined), /No settings are available/u);
+  assert.throws(() => controller.chooseSettings([
+    { id: "Bad Setting", label: "Bad", description: "bad id", value: "on", values: ["on"] },
+  ], () => undefined), /Invalid setting definition/u);
+  assert.throws(() => controller.chooseSettings([
+    { id: "empty", label: "Empty", description: "no values", value: "", values: [] },
+  ], () => undefined), /Invalid setting definition/u);
+  assert.throws(() => controller.chooseSettings([
+    { id: "missing", label: "Missing", description: "unknown current value", value: "other", values: ["known"] },
+  ], () => undefined), /Invalid setting definition/u);
+
+  controller.openPicker("command", "Commands");
+  await assert.rejects(controller.chooseSettings([
+    { id: "theme", label: "Theme", description: "colors", value: "dark", values: ["dark", "light"] },
+  ], () => undefined), /Another terminal picker is active/u);
+  input.write(Buffer.from([3]));
+  const aborted = new AbortController();
+  aborted.abort(new Error("settings request cancelled"));
+  assert.throws(() => controller.chooseSettings([
+    { id: "theme", label: "Theme", description: "colors", value: "dark", values: ["dark", "light"] },
+  ], () => undefined, aborted.signal), /settings request cancelled/u);
+  controller.close();
+
+  const classic = new TuiController({
+    input: new FakeInput(),
+    output: new FakeOutput(),
+    mode: "classic",
+    environment: { TERM: "dumb" },
+    handleSignals: false,
+  });
+  classic.start();
+  await assert.rejects(classic.chooseSettings([
+    { id: "theme", label: "Theme", description: "colors", value: "dark", values: ["dark", "light"] },
+  ], () => undefined), /requires the full TUI/u);
+  classic.close();
+});
+
+test("controller exposes pending attachments, recovered queue ownership, and runtime chrome setters", async () => {
+  const { input, output, controller } = fullController();
+  controller.start();
+  controller.insertClipboardText("clipboard text");
+  assert.equal(controller.getEditorText(), "clipboard text");
+  const attachment = inputImage("pending image");
+  controller.attachInputImage(attachment);
+  assert.deepEqual(controller.takePendingInputImages(), [attachment]);
+  assert.deepEqual(controller.takePendingInputImages(), []);
+
+  const recovered = { type: "image" as const, mediaType: "image/png", data: "aGVsbG8=" };
+  controller.restoreQueuedMessages([{ mode: "follow_up", text: "restored", images: [recovered] }]);
+  assert.deepEqual(controller.takePendingRecoveredImages(), [recovered]);
+  assert.deepEqual(controller.takePendingRecoveredImages(), []);
+  const answer = controller.question("you> ");
+  input.write("\r");
+  assert.equal(await answer, "restored\n\nclipboard text");
+  assert.equal(controller.takeSubmittedRecoveredQueueDraft(), true);
+  assert.equal(controller.takeSubmittedRecoveredQueueDraft(), false);
+
+  controller.setExtensionHeader("fixture", "header\nvalue");
+  controller.setExtensionFooter("fixture", "footer\nvalue");
+  await tick();
+  assert.match(terminalWords(output.text), /header value/u);
+  assert.match(terminalWords(output.text), /footer value/u);
+  controller.setExtensionHeader("fixture");
+  controller.setExtensionFooter("fixture", "");
+
+  let interrupted = 0;
+  controller.setInterruptHandler(() => { interrupted += 1; });
+  input.write(Buffer.from([27]));
+  await new Promise<void>((resolve) => setTimeout(resolve, 35));
+  assert.equal(interrupted, 1);
+  controller.setInterruptHandler(undefined);
+  controller.setDoubleEscapeAction("none");
+  controller.close();
+});
+
+test("reasoning toggles after committed output and multi-choice autocomplete stays generation-owned", async () => {
+  const { input, output, controller } = fullController();
+  controller.start();
+  controller.render(envelope({ type: "reasoning_delta", text: "inspect the failure", part: 0, visibility: "summary" }, 1));
+  controller.render(envelope({ type: "assistant_completed", finishReason: "stop" }, 2));
+  await tick();
+  assert.equal(controller.toggleReasoning(), true);
+  assert.equal(controller.toggleReasoning(), true);
+
+  const generation = new AbortController();
+  controller.setAutocompleteProvider(async () => [
+    { start: 0, end: 2, value: "first", label: "First", detail: "first choice" },
+    { start: 0, end: 2, value: "second", label: "Second" },
+  ], generation.signal);
+  controller.setEditorText("go");
+  input.write("\t");
+  await tick();
+  assert.match(output.text, /Completions/u);
+  assert.match(output.text, /First/u);
+  input.write("\u001b[B\r");
+  await tick();
+  assert.equal(controller.getEditorText(), "second");
+  generation.abort(new Error("generation replaced"));
   controller.close();
 });

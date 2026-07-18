@@ -40,6 +40,7 @@ test("tool interception revalidates mutations and reduces results before redacti
     },
   };
   const received: ToolInvocation[] = [];
+  const transformed: string[][] = [];
   const completed: string[] = [];
   const coordinator = new ToolCoordinator(
     new ToolRegistry([tool]),
@@ -50,7 +51,11 @@ test("tool interception revalidates mutations and reduces results before redacti
     },
     {
       beforeCall(invocation) {
-        return { invocation: { ...invocation, input: { value: "patched" } }, blocked: false };
+        return {
+          invocation: { ...invocation, input: { value: "patched" } },
+          blocked: false,
+          transformations: [{ actor: "fixture-extension" }],
+        };
       },
       afterResult(_invocation, result) {
         return { ...result, content: `${result.content}:SECRET`, metadata: { patched: "SECRET" } };
@@ -61,6 +66,7 @@ test("tool interception revalidates mutations and reduces results before redacti
     [{ callId: "call", name: "echo", input: { value: "original" }, index: 0 }],
     await toolContext(t),
     {
+      transformed(_invocation, audit) { transformed.push(audit.map((entry) => entry.actor)); },
       received(invocation) { received.push(invocation); },
       completed(entry) { completed.push(entry.result.content); },
     },
@@ -68,9 +74,48 @@ test("tool interception revalidates mutations and reduces results before redacti
 
   assert.deepEqual(seen, ["execute:patched"]);
   assert.deepEqual(received.map((entry) => entry.input), [{ value: "patched" }]);
+  assert.deepEqual(transformed, [["fixture-extension"]]);
   assert.equal(result[0]?.result.content, "patched:[redacted]");
   assert.deepEqual(result[0]?.result.metadata, { patched: "[redacted]" });
   assert.deepEqual(completed, ["patched:[redacted]"]);
+});
+
+test("legacy host interceptors retain input replacement compatibility with audit attribution", async (t) => {
+  const transformed: string[][] = [];
+  const executed: unknown[] = [];
+  const tool: HarnessTool = {
+    definition: { name: "legacy", description: "legacy", inputSchema: { type: "object" } },
+    validate(input) {
+      if (input === null || typeof input !== "object" || Array.isArray(input) || typeof input.value !== "string") {
+        throw new Error("value required");
+      }
+    },
+    resources() { return []; },
+    async execute(input) {
+      executed.push(structuredClone(input));
+      return { content: "ok", isError: false };
+    },
+  };
+  const coordinator = new ToolCoordinator(
+    new ToolRegistry([tool]),
+    {},
+    undefined,
+    {
+      beforeCall(invocation) {
+        return { invocation: { ...invocation, input: { value: "patched" } }, blocked: false };
+      },
+    },
+  );
+
+  const [result] = await coordinator.execute(
+    [{ callId: "legacy-call", name: "legacy", input: { value: "original" }, index: 0 }],
+    await toolContext(t),
+    { transformed(_invocation, audit) { transformed.push(audit.map((entry) => entry.actor)); } },
+  );
+
+  assert.equal(result?.result.isError, false);
+  assert.deepEqual(executed, [{ value: "patched" }]);
+  assert.deepEqual(transformed, [["host"]]);
 });
 
 test("blocked, identity-changing, and schema-invalid tool reductions never execute", async (t) => {
@@ -118,9 +163,10 @@ test("blocked, identity-changing, and schema-invalid tool reductions never execu
   assert.equal(executions, 0);
 });
 
-test("blocked reductions validate before durable observation and throwing preparers retain a canonical baseline", async (t) => {
+test("invalid transformed reductions retain the validated baseline for durable observation", async (t) => {
   let executions = 0;
   const observed: ToolInvocation[] = [];
+  const transformed: string[][] = [];
   const raw = { ok: true, value: "original" };
   const tool: HarnessTool = {
     definition: { name: "prepared_guard", description: "prepared guard", inputSchema: { type: "object" } },
@@ -145,18 +191,28 @@ test("blocked reductions validate before durable observation and throwing prepar
     undefined,
     {
       beforeCall(invocation) {
-        return { invocation: { ...invocation, input: { ok: false } }, blocked: true, reason: "must not mask validation" };
+        return {
+          invocation: { ...invocation, input: { ok: false } },
+          blocked: true,
+          reason: "must not mask validation",
+          transformations: [{ actor: "invalid-transform" }],
+        };
       },
     },
   );
   const [blocked] = await invalidBlocked.execute(
     [{ callId: "blocked-invalid", name: "prepared_guard", input: raw, index: 0 }],
     await toolContext(t),
-    { received(invocation) { observed.push(structuredClone(invocation)); } },
+    {
+      transformed(_invocation, audit) { transformed.push(audit.map((entry) => entry.actor)); },
+      received(invocation) { observed.push(structuredClone(invocation)); },
+    },
   );
   assert.match(blocked?.result.content ?? "", /ok required/u);
   assert.doesNotMatch(blocked?.result.content ?? "", /must not mask validation/u);
-  assert.deepEqual(observed[0]?.input, { ok: false });
+  assert.deepEqual(observed[0]?.input, raw);
+  assert.deepEqual(blocked?.invocation.input, raw);
+  assert.deepEqual(transformed, []);
 
   const throwing = new ToolCoordinator(new ToolRegistry([tool]));
   const throwingRaw = { ok: true, value: "throw" };
@@ -168,5 +224,48 @@ test("blocked reductions validate before durable observation and throwing prepar
   assert.match(failed?.result.content ?? "", /preparation failed/u);
   assert.deepEqual(throwingRaw, { ok: true, value: "throw" });
   assert.deepEqual(observed[1]?.input, { ok: true, value: "throw" });
+  assert.equal(executions, 0);
+});
+
+test("audit observer failure never exposes the transformed input as received", async (t) => {
+  let executions = 0;
+  const received: ToolInvocation[] = [];
+  const tool: HarnessTool = {
+    definition: { name: "audited", description: "audited", inputSchema: { type: "object" } },
+    validate(input) {
+      if (input === null || typeof input !== "object" || Array.isArray(input) || typeof input.value !== "string") {
+        throw new Error("value required");
+      }
+    },
+    resources() { return []; },
+    async execute() { executions += 1; return { content: "unsafe", isError: false }; },
+  };
+  const coordinator = new ToolCoordinator(
+    new ToolRegistry([tool]),
+    {},
+    undefined,
+    {
+      beforeCall(invocation) {
+        return {
+          invocation: { ...invocation, input: { value: "transformed" } },
+          blocked: false,
+          transformations: [{ actor: "fixture-extension" }],
+        };
+      },
+    },
+  );
+
+  const [failed] = await coordinator.execute(
+    [{ callId: "audit-failure", name: "audited", input: { value: "original" }, index: 0 }],
+    await toolContext(t),
+    {
+      transformed() { throw new Error("audit sink failed"); },
+      received(invocation) { received.push(structuredClone(invocation)); },
+    },
+  );
+
+  assert.match(failed?.result.content ?? "", /audit sink failed/u);
+  assert.deepEqual(failed?.invocation.input, { value: "original" });
+  assert.deepEqual(received.map((entry) => entry.input), [{ value: "original" }]);
   assert.equal(executions, 0);
 });

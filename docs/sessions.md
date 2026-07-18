@@ -10,6 +10,7 @@ By default, a new workspace conversation is stored in the global SQLite database
 /new       create a fresh session
 /resume    select a saved session
 /session   inspect the current session
+/context   inspect content-free prompt, tool, instruction-source, and skill provenance for the latest run
 /name      change its display name
 /fork      continue from an earlier event on a new branch
 /clone     copy the current reachable history into a new session
@@ -18,6 +19,8 @@ By default, a new workspace conversation is stored in the global SQLite database
            write a presentation export; --redact creates a review-required share copy
 /import    import a session export
 ```
+
+`/context` reads only the latest reachable run on the current branch. It reports hashes, byte counts, tool names, and redacted source/skill identities for the host-composed prompt without displaying instruction or prompt bodies. It does not fall back to older metadata when the latest run lacks provenance, and it labels that case explicitly. Runtime `before_agent_start` extensions may transform the prompt after the recorded host composition, so this report is provenance rather than a provider-request dump and is not a share-safety guarantee.
 
 The CLI equivalents include `--continue`, `--resume`, `--session`, `--session-id`, `--fork`, `--workspace`, `--session-dir`, `--name`, and `--no-session`. Add `--all` to `--continue`, `--resume`, or `--session` to search every indexed workspace instead of only the selected launch workspace. For example:
 
@@ -47,7 +50,7 @@ SQLite foreign keys prevent branches, runs, events, and artifacts from crossing 
 
 The session database has an integer SQLite schema version and an ordered `schema_migrations` history. A fresh database is created directly at the current schema. An existing supported database is upgraded through every retained intermediate migration in one `BEGIN IMMEDIATE` transaction; data changes, migration-history rows, and `PRAGMA user_version` commit together or all roll back. A database from a newer Rigyn build is refused before migration metadata is written.
 
-Rigyn is pre-1.0, so the supported upgrade floor is explicit rather than implied. This build uses schema 15 and supports a direct upgrade from schema 13. Schemas 1 through 12 predate the retained migration history and are refused without schema changes; use the corresponding older build to upgrade or export them before opening the result with this build. Keep a backup before crossing pre-release versions.
+Rigyn is pre-1.0, so the supported upgrade floor is explicit rather than implied. This build uses schema 18 and supports a direct upgrade from schema 13. Schema 18 adds host-owned runtime-child classification that is committed atomically with child session creation and is not part of session export; schema 17 added indexed branch incarnations so cursor paging remains exact when a deleted branch name is reused without scanning unrelated history. Schemas 1 through 12 predate the retained migration history and are refused without schema changes; use the corresponding older build to upgrade or export them before opening the result with this build. Keep a backup before crossing pre-release versions.
 
 From schema 13 onward, schema changes must append an ordered migration instead of replacing an older step. Each step has a predecessor fixture and rollback coverage. Raising the upgrade floor before 1.0 requires an explicit release note and a documented export or intermediate-upgrade path.
 

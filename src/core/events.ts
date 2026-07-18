@@ -73,6 +73,7 @@ export type RuntimeEvent =
   | { type: "text_delta"; text: string; part: number }
   | { type: "reasoning_delta"; text: string; part: number; visibility: "summary" | "provider_trace" }
   | { type: "assistant_completed"; finishReason: FinishReason; rawReason?: string }
+  | { type: "tool_input_transformed"; callId: string; name: string; index: number; actors: string[] }
   | { type: "tool_requested"; callId: string; name: string; input: JsonValue; index: number }
   | { type: "tool_started"; callId: string; name: string; index: number }
   | {

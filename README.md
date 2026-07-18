@@ -14,10 +14,10 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.1.7 GitHub release:
+From the v0.2.0 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.7/rigyn-0.1.7.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.2.0/rigyn-0.2.0.tgz -- rigyn self-install
 rigyn
 ```
 
@@ -43,7 +43,7 @@ rigyn self-update
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest` from npm. The installer replaces only its marker-owned application files.
+`self-update` installs `rigyn@latest` from npm and refuses an implicit downgrade when the registry is older than the installed copy. The installer replaces only its marker-owned application files.
 
 Uninstall is marker-verified and removes the installed application, configuration, OAuth/API-key profiles, sessions, cache, and its managed command. It never deletes the source checkout or unrelated files.
 
@@ -102,7 +102,7 @@ Useful interactive commands are:
 /settings                 /model [PROVIDER/MODEL]
 /scoped-models            /login [PROVIDER]
 /logout [PROVIDER]        /new
-/resume                   /session
+/resume                   /session                   /context
 /name [NAME]              /fork
 /clone [NAME]             /tree
 /compact [INSTRUCTIONS]   /reload
@@ -307,7 +307,7 @@ rigyn --export session.html
 
 RPC is strict LF-delimited JSON-RPC 2.0 over standard input/output. Start with `initialize`, then use `run.start`; it responds with a `threadId`, emits `run.event` notifications while work proceeds, and emits `run.finished` when the run settles. `run.wait` waits for the caller-owned run, and passing the same `threadId` to another `run.start` continues that session. The `initialize` response advertises the supported session, queue, compaction, model, authentication, extension, export, and event capabilities.
 
-Node.js clients can use the typed `RpcClient` and `spawnRpcClient` exports from `rigyn/interfaces`. The complete method, notification, cancellation, extension-UI, and durable-subscription contract is in [RPC protocol and typed client](docs/rpc.md).
+Node.js clients can use the typed `RpcClient` and `spawnRpcClient` exports from `rigyn/interfaces`. Durable history supports count- and byte-bounded cursor pages, explicit oversized-event markers, ordered async subscription callbacks, and deterministic unsubscribe draining. The complete method, notification, cancellation, extension-UI, and durable-subscription contract is in [RPC protocol and typed client](docs/rpc.md).
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize"}
@@ -316,7 +316,7 @@ Node.js clients can use the typed `RpcClient` and `spawnRpcClient` exports from 
 {"jsonrpc":"2.0","id":4,"method":"shutdown"}
 ```
 
-Send each object only after handling the response needed by the next one; request handling is concurrent and response IDs, rather than output order, provide correlation. For durable reconnectable event consumption, call `events.subscribe` with a `threadId` and optional `afterSequence` cursor.
+Send each object only after handling the response needed by the next one; request handling is concurrent and response IDs, rather than output order, provide correlation. For durable reconnectable event consumption, call `events.subscribe` with a `threadId`, an optional `afterSequence` cursor, and an optional bounded replay-batch `limit`.
 
 ## Development
 
@@ -327,6 +327,8 @@ npm run typecheck:test
 npm test
 npm run benchmark:offline
 npm run benchmark:extensions
+npm run benchmark:runtime
+npm run test:coverage:risk
 npm run build
 npm run check
 ```
@@ -336,6 +338,8 @@ npm run check
 `npm run benchmark:offline` runs a credential-free, deterministic harness-plumbing corpus through the real service and tools. Its versioned JSON report tracks completion, pass@1, multi-file and continuation scenarios, provider/tool recovery, parallel tool batches, mutation preservation, verification, usage/cost, compaction, and crash recovery. It does not measure model intelligence. See [Outcome benchmarks](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md) for metric definitions and limitations.
 
 `npm run benchmark:extensions` is a second credential-free verifier. It runs extension candidates through managed install, public discovery, activation, reload, and removal and reports pass@1/pass@3 with zero model calls.
+
+`npm run benchmark:runtime` measures eleven deterministic startup, large-package reload, small/large session resume, bounded cold-history paging, and cursor-paged RPC replay scenarios against generous freeze-regression ceilings. `npm run test:coverage:risk` aggregates subprocess-aware coverage and enforces separate line, branch, and function floors for the extension runtime, CLI, TUI controller, harness service, and session store. The paid `benchmark:compare` command is opt-in and gives two CLIs the same model, task files, and external verifier; it does not claim one harness is better without evidence. See [Outcome benchmarks](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md).
 
 The high-level component map is in [Architecture](docs/ARCHITECTURE.md). Practical operations are covered by the [cookbook](docs/cookbook.md), [local diagnostics](docs/diagnostics.md), [troubleshooting guide](docs/troubleshooting.md), and [platform notes](docs/platforms.md).
 

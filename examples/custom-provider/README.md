@@ -11,4 +11,4 @@ rigyn --provider gallery-offline --model gallery-offline-v1 --no-session --print
 rigyn remove custom-provider-example
 ```
 
-The final text is `Offline provider: hello`. Production providers must normalize their wire protocol into the same response, text, reasoning, tool-call, usage, end, and error events. Keep wire-specific parsing inside the package and keep credentials behind `api.auth`. The package targets extension manifest schema 1 and Rigyn 0.1.x.
+The final text is `Offline provider: hello`. Production providers must normalize their wire protocol into the same response, text, reasoning, tool-call, usage, end, and error events. Keep wire-specific parsing inside the package and keep credentials behind `api.auth`. The package targets extension manifest schema 1 and the public APIs documented for the installed Rigyn build.

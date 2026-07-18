@@ -11,14 +11,17 @@ import {
   checkReleaseMetadata,
   extractReleaseNotes,
 } from "../../scripts/check-release-metadata.mjs";
+import { runBoundedCommand } from "../../scripts/bounded-command.mjs";
 import {
   lifecycleProcessTreeTerminationPlan,
+  inside,
   managedCommand,
   posixLauncher,
   resolveNpmInvocation,
   terminateLifecycleProcessTree,
   windowsLauncher,
 } from "../../scripts/lifecycle-common.mjs";
+import { assertUpdateVersionPolicy } from "../../scripts/update-user.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -48,9 +51,23 @@ async function runNode(args, options = {}) {
   return result;
 }
 
+async function waitForFile(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || error.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
 test("release metadata policy matches the published package contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.1.7");
+  assert.equal(result.version, "0.2.0");
   assert.equal(result.subpathCount, 19);
   assert.equal(result.targetCount, 6);
   assert.ok(result.actionCount >= 6);
@@ -68,6 +85,25 @@ test("release note extraction rejects an undated or empty release", () => {
   assert.deepEqual(
     extractReleaseNotes("## [0.1.0] - 2026-07-12\r\n\r\n### Fixed\r\n\r\n- Change\r\n", "0.1.0"),
     { date: "2026-07-12", body: "### Fixed\n\n- Change" },
+  );
+});
+
+test("implicit self-update is monotonic while explicit package requests may downgrade", () => {
+  assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.2.0", false));
+  assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.3.0", false));
+  assert.throws(
+    () => assertUpdateVersionPolicy("0.2.0", "0.1.7", false),
+    /Refusing to replace Rigyn 0\.2\.0 with older 0\.1\.7/u,
+  );
+  assert.throws(
+    () => assertUpdateVersionPolicy("not-semver", "0.3.0", false),
+    /Installed Rigyn version is invalid/u,
+  );
+  assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.1.7", true));
+  assert.doesNotThrow(() => assertUpdateVersionPolicy("not-semver", "0.1.7", true));
+  assert.throws(
+    () => assertUpdateVersionPolicy("0.2.0", "not-semver", true),
+    /Downloaded Rigyn package version is invalid/u,
   );
 });
 
@@ -90,6 +126,12 @@ test("Windows npm invocation resolves npm-cli beside Node without a command shel
       args: [resolve(npmCli), "install", "archive.tgz"],
     },
   );
+});
+
+test("path containment rejects Windows cross-drive candidates deterministically", () => {
+  assert.equal(inside("C:\\Users\\alice\\.rigyn", "C:\\Users\\alice\\.rigyn\\current"), true);
+  assert.equal(inside("C:\\Users\\alice\\.rigyn", "C:\\Users\\alice\\source"), false);
+  assert.equal(inside("C:\\Users\\alice\\.rigyn", "D:\\Rigyn"), false);
 });
 
 test("Windows lifecycle termination uses a bounded absolute taskkill tree command", () => {
@@ -148,8 +190,9 @@ test("Windows lifecycle termination kills a spawned parent and grandchild", {
   ].join(";");
   const parentProgram = [
     `const { spawn } = require("node:child_process")`,
+    `const { writeFileSync } = require("node:fs")`,
     `const child = spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
-    `child.once("spawn", () => process.stdout.write("ready\\n"))`,
+    `child.once("spawn", () => writeFileSync(1, "ready\\n"))`,
     `setInterval(() => {}, 1_000)`,
   ].join(";");
   const parent = spawn(process.execPath, ["--eval", parentProgram], {
@@ -189,6 +232,181 @@ test("Windows lifecycle termination kills a spawned parent and grandchild", {
   await assert.rejects(access(survived), { code: "ENOENT" });
 });
 
+test("bounded release commands stop noisy subprocess trees at the output limit", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bounded-output-"));
+  const survived = join(root, "grandchild-survived");
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_200)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parentProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `const { writeFileSync } = require("node:fs")`,
+    `spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
+    `const chunk = Buffer.alloc(16 * 1024, 120)`,
+    `setInterval(() => writeFileSync(1, chunk), 1)`,
+  ].join(";");
+
+  await assert.rejects(
+    runBoundedCommand(process.execPath, ["--eval", parentProgram], {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeoutMs: 5_000,
+      maxOutputBytes: 64 * 1024,
+      outputPollMs: 5,
+      label: "noisy release fixture",
+    }),
+    /noisy release fixture output exceeded 65536 bytes/u,
+  );
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_400));
+  await assert.rejects(access(survived), { code: "ENOENT" });
+});
+
+test("bounded release commands clean up same-group children after a successful parent exit", {
+  skip: process.platform === "win32",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bounded-success-child-"));
+  const survived = join(root, "grandchild-survived");
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_200)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parentProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `const child = spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
+    `child.unref()`,
+  ].join(";");
+
+  await runBoundedCommand(process.execPath, ["--eval", parentProgram], {
+    cwd: PROJECT_ROOT,
+    env: process.env,
+    timeoutMs: 5_000,
+    maxOutputBytes: 64 * 1024,
+    outputPollMs: 5,
+    label: "successful release fixture",
+  });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_400));
+  await assert.rejects(access(survived), { code: "ENOENT" });
+});
+
+test("bounded release command timeouts stop the entire subprocess tree", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bounded-timeout-"));
+  const survived = join(root, "grandchild-survived");
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_200)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parentProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+
+  await assert.rejects(
+    runBoundedCommand(process.execPath, ["--eval", parentProgram], {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeoutMs: 300,
+      maxOutputBytes: 64 * 1024,
+      outputPollMs: 5,
+      label: "timed release fixture",
+    }),
+    /timed release fixture timed out after 300 ms/u,
+  );
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_400));
+  await assert.rejects(access(survived), { code: "ENOENT" });
+});
+
+test("bounded release command timeouts stop Linux descendants that escape the command process group", {
+  skip: process.platform !== "linux",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bounded-detached-timeout-"));
+  const survived = join(root, "grandchild-survived");
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_200)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const parentProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `const child = spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { detached: true, stdio: "ignore", windowsHide: true })`,
+    `child.unref()`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+
+  await assert.rejects(
+    runBoundedCommand(process.execPath, ["--eval", parentProgram], {
+      cwd: PROJECT_ROOT,
+      env: process.env,
+      timeoutMs: 300,
+      maxOutputBytes: 64 * 1024,
+      outputPollMs: 5,
+      label: "detached release fixture",
+    }),
+    /detached release fixture timed out after 300 ms/u,
+  );
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_400));
+  await assert.rejects(access(survived), { code: "ENOENT" });
+});
+
+test("bounded release commands forward parent termination and clean up their process group", {
+  skip: process.platform === "win32",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bounded-parent-signal-"));
+  const ready = join(root, "ready");
+  const survived = join(root, "grandchild-survived");
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const grandchildProgram = [
+    `const { writeFileSync } = require("node:fs")`,
+    `setTimeout(() => writeFileSync(${JSON.stringify(survived)}, "survived"), 1_200)`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const commandProgram = [
+    `const { spawn } = require("node:child_process")`,
+    `const { writeFileSync } = require("node:fs")`,
+    `spawn(process.execPath, ["--eval", ${JSON.stringify(grandchildProgram)}], { stdio: "ignore", windowsHide: true })`,
+    `writeFileSync(${JSON.stringify(ready)}, "ready")`,
+    `setInterval(() => {}, 1_000)`,
+  ].join(";");
+  const helperUrl = pathToFileURL(join(PROJECT_ROOT, "scripts", "bounded-command.mjs")).href;
+  const wrapperProgram = [
+    `import { runBoundedCommand } from ${JSON.stringify(helperUrl)}`,
+    `import { writeFileSync } from "node:fs"`,
+    `try { await runBoundedCommand(process.execPath, ["--eval", ${JSON.stringify(commandProgram)}], { cwd: ${JSON.stringify(PROJECT_ROOT)}, env: process.env, timeoutMs: 10_000, maxOutputBytes: 65_536, outputPollMs: 5, label: "signalled release fixture" }) } catch (error) { writeFileSync(2, (error instanceof Error ? error.message : String(error)) + "\\n"); process.exitCode = 1 }`,
+  ].join(";");
+  const wrapper = spawn(process.execPath, ["--input-type=module", "--eval", wrapperProgram], {
+    cwd: PROJECT_ROOT,
+    shell: false,
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  let diagnostic = "";
+  wrapper.stderr.on("data", (chunk) => { diagnostic += chunk.toString("utf8"); });
+  await waitForFile(ready).catch((error) => {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${diagnostic === "" ? "" : `: ${diagnostic}`}`);
+  });
+  assert.equal(wrapper.kill("SIGTERM"), true);
+  const result = await new Promise((resolveClose, reject) => {
+    const timeout = setTimeout(() => reject(new Error("signalled release wrapper did not exit")), 5_000);
+    wrapper.once("close", (code, signal) => {
+      clearTimeout(timeout);
+      resolveClose({ code, signal });
+    });
+    wrapper.once("error", reject);
+  });
+  assert.deepEqual(result, { code: 1, signal: null });
+  assert.match(diagnostic, /interrupted by SIGTERM/u);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 1_400));
+  await assert.rejects(access(survived), { code: "ENOENT" });
+});
+
 test("release staging refuses a markerless output without deleting it", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-release-output-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
@@ -215,8 +433,9 @@ test("lifecycle operations serialize across processes", async (context) => {
   const common = pathToFileURL(join(PROJECT_ROOT, "scripts", "lifecycle-common.mjs")).href;
   const program = [
     `import { withLifecycleLock } from ${JSON.stringify(common)}`,
+    `import { writeFileSync } from "node:fs"`,
     "const [root, name, delay] = process.argv.slice(1)",
-    "await withLifecycleLock(root, async () => { process.stdout.write(name + '\\n'); await new Promise((resolve) => setTimeout(resolve, Number(delay))) })",
+    "await withLifecycleLock(root, async () => { writeFileSync(1, name + '\\n'); await new Promise((resolve) => setTimeout(resolve, Number(delay))) })",
   ].join(";");
   const first = spawn(process.execPath, ["--input-type=module", "--eval", program, installRoot, "first", "400"], {
     cwd: PROJECT_ROOT,

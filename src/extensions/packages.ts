@@ -349,6 +349,142 @@ function selectResourceFiles(files: readonly string[], declarations: readonly st
   return [...selected].sort((left, right) => left.localeCompare(right));
 }
 
+const RUNTIME_SUFFIXES = [".ts", ".mts", ".js", ".mjs"] as const;
+
+function isRuntimeFile(path: string): boolean {
+  return !/\.d\.(?:ts|mts)$/u.test(path) && RUNTIME_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+
+function conventionRuntimeMatches(files: readonly string[], declaration: string): string[] {
+  const exact = declaration.replace(/^[!+-]/u, "");
+  if (/[*?\[\]{}]/u.test(exact)) {
+    return files.filter((file) => isRuntimeFile(file) && minimatch(file, exact, { dot: false, nocase: false }));
+  }
+  if (files.includes(exact) && isRuntimeFile(exact)) return [exact];
+
+  const prefix = `${exact.replace(/\/$/u, "")}/`;
+  const direct: string[] = [];
+  const nestedEntrypoints = new Map<string, Map<string, string>>();
+  for (const file of files) {
+    if (!file.startsWith(prefix) || !isRuntimeFile(file)) continue;
+    const relativePath = file.slice(prefix.length);
+    const segments = relativePath.split("/");
+    if (segments.length === 1) {
+      direct.push(file);
+      continue;
+    }
+    if (segments.length !== 2) continue;
+    const [directory, name] = segments;
+    if (directory === undefined || name === undefined) continue;
+    const suffix = RUNTIME_SUFFIXES.find((candidate) => name === `index${candidate}`);
+    if (suffix === undefined) continue;
+    const candidates = nestedEntrypoints.get(directory) ?? new Map<string, string>();
+    candidates.set(suffix, file);
+    nestedEntrypoints.set(directory, candidates);
+  }
+  for (const directory of [...nestedEntrypoints.keys()].sort((left, right) => left.localeCompare(right))) {
+    const candidates = nestedEntrypoints.get(directory);
+    const selected = RUNTIME_SUFFIXES.map((suffix) => candidates?.get(suffix)).find((candidate) => candidate !== undefined);
+    if (selected !== undefined) direct.push(selected);
+  }
+  return direct.sort((left, right) => left.localeCompare(right));
+}
+
+function selectConventionRuntimeFiles(files: readonly string[], declarations: readonly string[]): string[] {
+  const selected = new Set<string>();
+  for (const declaration of declarations) {
+    const mode = declaration[0] === "!" || declaration[0] === "-" ? "remove" : "add";
+    const exact = declaration.replace(/^[!+-]/u, "").replace(/\/$/u, "");
+    if (mode === "remove" && !/[*?\[\]{}]/u.test(exact)) {
+      for (const file of selected) {
+        if (file === exact || file.startsWith(`${exact}/`)) selected.delete(file);
+      }
+      continue;
+    }
+    for (const file of conventionRuntimeMatches(files, declaration)) {
+      if (mode === "remove") selected.delete(file);
+      else selected.add(file);
+    }
+  }
+  return [...selected].sort((left, right) => left.localeCompare(right));
+}
+
+interface ConventionSkillCandidate {
+  path: string;
+  manifestPath: string;
+}
+
+function conventionSkillCandidates(files: readonly string[], declaration: string): ConventionSkillCandidate[] {
+  const exact = declaration.replace(/^[!+-]/u, "");
+  if (/[*?\[\]{}]/u.test(exact)) {
+    return files
+      .filter((file) => file.endsWith(".md") && minimatch(file, exact, { dot: false, nocase: false }))
+      .map((manifestPath) => ({
+        path: manifestPath.endsWith("/SKILL.md") ? posix.dirname(manifestPath) : manifestPath,
+        manifestPath,
+      }));
+  }
+  if (files.includes(exact) && exact.endsWith(".md")) {
+    return [{ path: exact.endsWith("/SKILL.md") ? posix.dirname(exact) : exact, manifestPath: exact }];
+  }
+
+  const directory = exact.replace(/\/$/u, "");
+  const prefix = `${directory}/`;
+  const rootManifest = `${directory}/SKILL.md`;
+  if (files.includes(rootManifest)) return [{ path: directory, manifestPath: rootManifest }];
+
+  const selected: ConventionSkillCandidate[] = files
+    .filter((file) => {
+      if (!file.startsWith(prefix) || !file.endsWith(".md")) return false;
+      const relativePath = file.slice(prefix.length);
+      return !relativePath.includes("/") && relativePath !== "SKILL.md";
+    })
+    .map((manifestPath) => ({ path: manifestPath, manifestPath }));
+  const nestedManifests = files
+    .filter((file) => file.startsWith(prefix) && file.endsWith("/SKILL.md"))
+    .sort((left, right) => {
+      const depth = left.split("/").length - right.split("/").length;
+      return depth === 0 ? left.localeCompare(right) : depth;
+    });
+  const selectedDirectories: string[] = [];
+  for (const manifestPath of nestedManifests) {
+    const skillDirectory = posix.dirname(manifestPath);
+    if (selectedDirectories.some((parent) => skillDirectory.startsWith(`${parent}/`))) continue;
+    selectedDirectories.push(skillDirectory);
+    selected.push({ path: skillDirectory, manifestPath });
+  }
+  return selected;
+}
+
+function skillCandidateMatches(candidate: ConventionSkillCandidate, declaration: string): boolean {
+  const exact = declaration.replace(/^[!+-]/u, "").replace(/\/$/u, "");
+  if (/[*?\[\]{}]/u.test(exact)) {
+    return minimatch(candidate.path, exact, { dot: false, nocase: false })
+      || minimatch(candidate.manifestPath, exact, { dot: false, nocase: false });
+  }
+  return candidate.path === exact
+    || candidate.manifestPath === exact
+    || candidate.path.startsWith(`${exact}/`)
+    || candidate.manifestPath.startsWith(`${exact}/`);
+}
+
+function selectConventionSkillRoots(files: readonly string[], declarations: readonly string[]): Array<{ path: string }> {
+  const selected = new Map<string, ConventionSkillCandidate>();
+  for (const declaration of declarations) {
+    const remove = declaration[0] === "!" || declaration[0] === "-";
+    if (remove) {
+      for (const [path, candidate] of selected) {
+        if (skillCandidateMatches(candidate, declaration)) selected.delete(path);
+      }
+      continue;
+    }
+    for (const candidate of conventionSkillCandidates(files, declaration)) selected.set(candidate.path, candidate);
+  }
+  return [...selected.values()]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map(({ path }) => ({ path }));
+}
+
 async function conventionalDirectory(root: string, name: string): Promise<boolean> {
   try {
     const information = await lstat(join(root, name));
@@ -378,16 +514,9 @@ async function generateConventionManifest(root: string): Promise<{ bytes: Buffer
   const skillDeclarations = packagePaths(declared?.skills, "package.json rigyn.skills") ?? conventions.skills;
   const promptDeclarations = packagePaths(declared?.prompts, "package.json rigyn.prompts") ?? conventions.prompts;
   const themeDeclarations = packagePaths(declared?.themes, "package.json rigyn.themes") ?? conventions.themes;
-  const runtime = selectResourceFiles(files, extensionDeclarations, [".ts", ".mts", ".js", ".mjs"])
-    .filter((path) => !path.endsWith(".d.ts"))
+  const runtime = selectConventionRuntimeFiles(files, extensionDeclarations)
     .map((path) => ({ path }));
-  const skillRoots = skillDeclarations.flatMap((declaration) => {
-    const exact = declaration.replace(/^[!+-]/u, "");
-    if (declaration[0] === "!" || declaration[0] === "-") return [];
-    if (!/[*?\[\]{}]/u.test(exact) && files.some((file) => file.startsWith(`${exact}/`))) return [{ path: exact }];
-    return selectResourceFiles(files, [declaration], ["/SKILL.md", ".md"])
-      .map((path) => ({ path: path.endsWith("/SKILL.md") ? posix.dirname(path) : path }));
-  });
+  const skillRoots = selectConventionSkillRoots(files, skillDeclarations);
   const prompts = selectResourceFiles(files, promptDeclarations, [".md"]).map((path) => ({
     id: generatedPackageId(posix.basename(path, ".md")),
     path,

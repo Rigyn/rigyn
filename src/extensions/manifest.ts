@@ -166,6 +166,9 @@ function parseThemes(value: unknown): ExtensionThemeDeclaration[] {
 
 function parseRuntime(value: unknown): ExtensionRuntimeDeclaration[] {
   return unique(parsePaths(value, "contributions.runtime", 8).map((entry, index) => {
+    if (/\.d\.(?:ts|mts)$/u.test(entry.path)) {
+      throw new Error(`contributions.runtime[${index}].path must not be a TypeScript declaration file`);
+    }
     if (!/\.(?:ts|mts|js|mjs)$/u.test(entry.path)) {
       throw new Error(`contributions.runtime[${index}].path must end in .ts, .mts, .js, or .mjs`);
     }
@@ -200,7 +203,7 @@ export function parseExtensionManifest(value: unknown): ParsedExtensionManifest 
   if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new Error("extension manifest enabled must be a boolean");
   const contributions = object(input.contributions ?? {}, "contributions");
   allowed(contributions, ["skillRoots", "prompts", "commands", "themes", "runtime"], "contributions");
-  const skillRoots = parsePaths(contributions.skillRoots, "contributions.skillRoots", 32);
+  const skillRoots = parsePaths(contributions.skillRoots, "contributions.skillRoots", 128);
   const prompts = parsePrompts(contributions.prompts);
   const commands = parseCommands(contributions.commands);
   const themes = parseThemes(contributions.themes);

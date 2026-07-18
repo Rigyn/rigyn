@@ -210,15 +210,21 @@ function socketError(event: Event, fallback: string): TypeError {
 
 async function decodeWebSocketMessage(data: unknown): Promise<string> {
   if (typeof data === "string") return data;
-  if (data instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(data));
-  if (ArrayBuffer.isView(data)) {
-    return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-  }
-  if (data !== null && typeof data === "object" && "arrayBuffer" in data) {
+  let bytes: Uint8Array;
+  if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+  else if (ArrayBuffer.isView(data)) {
+    bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  } else if (data !== null && typeof data === "object" && "arrayBuffer" in data) {
     const buffer = await (data as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
-    return new TextDecoder().decode(new Uint8Array(buffer));
+    bytes = new Uint8Array(buffer);
+  } else {
+    throw new ProtocolError("OpenAI Codex WebSocket returned an unsupported message type");
   }
-  throw new ProtocolError("OpenAI Codex WebSocket returned an unsupported message type");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new ProtocolError("OpenAI Codex WebSocket message contained invalid UTF-8");
+  }
 }
 
 async function waitForWebSocketOpen(

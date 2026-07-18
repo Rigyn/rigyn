@@ -6,7 +6,7 @@ import type {
 const MAX_TEMPLATE_INPUT_BYTES = 64 * 1024;
 const MAX_TEMPLATE_RENDER_BYTES = 1024 * 1024;
 const PLACEHOLDER = /\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/gu;
-const ARGUMENT_PLACEHOLDER = /\{\{(?:input|args)\}\}|\$\{[1-9][0-9]*:-[^}]*\}|\$\{@:[1-9][0-9]*(?::[0-9]+)?\}|\$ARGUMENTS|\$@|\$[1-9][0-9]*/gu;
+const ARGUMENT_PLACEHOLDER = /\{\{(?:input|args)\}\}|\$\{(?:[0-9]+|ARGUMENTS|@):-[^}]*\}|\$\{@:[0-9]+(?::[0-9]+)?\}|\$ARGUMENTS|\$@|\$[0-9]+/gu;
 
 export function validateTemplatePlaceholders(template: string, allowed: ReadonlySet<string>, label: string): void {
   for (const match of template.matchAll(PLACEHOLDER)) {
@@ -72,15 +72,20 @@ function render(template: string, placeholder: "{{input}}" | "{{args}}", input: 
   const replacement = (token: string): string => {
     if (token === "{{input}}" || token === "{{args}}") return token === placeholder ? original : token;
     if (token === "$@" || token === "$ARGUMENTS") return all;
-    const slice = /^\$\{@:([1-9][0-9]*)(?::([0-9]+))?\}$/u.exec(token);
+    const fallback = /^\$\{([0-9]+|ARGUMENTS|@):-([^}]*)\}$/u.exec(token);
+    if (fallback !== null) {
+      const target = fallback[1];
+      if (target === "ARGUMENTS" || target === "@") return all || fallback[2] || "";
+      return args[Number(target) - 1] || fallback[2] || "";
+    }
+    const slice = /^\$\{@:([0-9]+)(?::([0-9]+))?\}$/u.exec(token);
     if (slice !== null) {
-      const start = Number(slice[1]) - 1;
+      const requestedStart = Number(slice[1]);
+      const start = requestedStart === 0 ? 0 : requestedStart - 1;
       const length = slice[2] === undefined ? undefined : Number(slice[2]);
       return args.slice(start, length === undefined ? undefined : start + length).join(" ");
     }
-    const fallback = /^\$\{([1-9][0-9]*):-([^}]*)\}$/u.exec(token);
-    if (fallback !== null) return args[Number(fallback[1]) - 1] || fallback[2] || "";
-    const position = /^\$([1-9][0-9]*)$/u.exec(token);
+    const position = /^\$([0-9]+)$/u.exec(token);
     return position === null ? token : args[Number(position[1]) - 1] ?? "";
   };
   const parts: string[] = [];

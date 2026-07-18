@@ -11,10 +11,10 @@ node --version
 npm --version
 ```
 
-Install the private per-user copy from the v0.1.7 GitHub release:
+Install the private per-user copy from the v0.2.0 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.7/rigyn-0.1.7.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.2.0/rigyn-0.2.0.tgz -- rigyn self-install
 rigyn --version
 ```
 
@@ -35,10 +35,10 @@ rigyn --version
 
 The application, dependencies, configuration, sessions, credentials, cache, and temporary files live under `~/.rigyn` by default. Set `RIGYN_INSTALL_DIR` only when a different self-contained root is required. The source checkout and npm's global package directory are not used at runtime.
 
-To verify before installation, download `rigyn-0.1.7.tgz` and `SHA256SUMS` from the same release, then run `sha256sum --check SHA256SUMS` (or `shasum -a 256 -c SHA256SUMS` on macOS). A verified local archive must be passed as an explicit package so npm does not mistake the archive path for a command:
+To verify before installation, download `rigyn-0.2.0.tgz` and `SHA256SUMS` from the same release, then run `sha256sum --check SHA256SUMS` (or `shasum -a 256 -c SHA256SUMS` on macOS). A verified local archive must be passed as an explicit package so npm does not mistake the archive path for a command:
 
 ```sh
-npm exec --yes --package=./rigyn-0.1.7.tgz -- rigyn self-install
+npm exec --yes --package=./rigyn-0.2.0.tgz -- rigyn self-install
 ```
 
 ## Linux
@@ -133,4 +133,4 @@ To remove the private installation and all installation-owned credentials and se
 rigyn uninstall --yes
 ```
 
-Install, self-update, and uninstall are serialized across processes. Update and uninstall refuse to mutate the installation while another Rigyn runtime is active; close the other terminal first. An interrupted install or uninstall is recovered from its transaction record on the next lifecycle command. Uninstall never removes the source checkout or arbitrary workspaces.
+Install, self-update, and uninstall are serialized across processes. Update and uninstall refuse to mutate the installation while another Rigyn runtime is active; close the other terminal first. The default self-update refuses to replace the installation with an older registry version; `RIGYN_UPDATE_SPEC` remains an explicit operator override for a reviewed exact version or archive. An interrupted install or uninstall is recovered from its transaction record on the next lifecycle command. Uninstall never removes the source checkout or arbitrary workspaces.

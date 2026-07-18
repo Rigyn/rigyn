@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import type { EventEnvelope } from "../../src/core/events.js";
 import { CURRENT_SCHEMA_VERSION, migrateDatabase, SessionStore } from "../../src/storage/index.js";
 
 const temporaryDirectories: string[] = [];
@@ -34,6 +35,51 @@ function temporaryDatabase(): string {
 function ids(namespace: string): (prefix: string) => string {
   let next = 0;
   return (prefix) => `${prefix}_${namespace}_${++next}`;
+}
+
+function countMaterializedRows<T>(store: SessionStore, operation: () => T): { value: T; rows: number } {
+  const database = store.database;
+  const originalPrepare = database.prepare;
+  let rows = 0;
+  database.prepare = ((sql: string) => {
+    const statement = originalPrepare.call(database, sql);
+    return new Proxy(statement, {
+      get(target, property) {
+        if (property === "all") {
+          return (...parameters: Parameters<typeof target.all>) => {
+            const result = target.all(...parameters);
+            rows += result.length;
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }) as typeof database.prepare;
+  try {
+    return { value: operation(), rows };
+  } finally {
+    database.prepare = originalPrepare;
+  }
+}
+
+function appendWarnings(store: SessionStore, threadId: string, count: number, branch?: string): EventEnvelope {
+  let last: EventEnvelope | undefined;
+  for (let offset = 0; offset < count; offset += 500) {
+    const appended = store.appendEvents({
+      threadId,
+      ...(branch === undefined ? {} : { branch }),
+      events: Array.from({ length: Math.min(500, count - offset) }, (_, index) => ({
+        type: "warning" as const,
+        code: `warning-${offset + index}`,
+        message: `warning-${offset + index}`,
+      })),
+    });
+    last = appended.at(-1);
+  }
+  if (last === undefined) throw new Error("appendWarnings requires a positive count");
+  return last;
 }
 
 test("file-backed stores keep the database and SQLite sidecars private", () => {
@@ -315,6 +361,142 @@ test("forking moves only the new branch head and preserves immutable ancestry", 
   store.close();
 });
 
+test("event pages exclude unreachable events after a deleted branch name is reused", () => {
+  const path = temporaryDatabase();
+  let store = new SessionStore(path, { idFactory: ids("branch-reuse") });
+  const thread = store.createThread({ threadId: "thread_branch_reuse" });
+  const root = store.appendEvent({
+    threadId: thread.threadId,
+    event: { type: "warning", code: "root", message: "root" },
+  });
+  store.forkBranch({ threadId: thread.threadId, newBranch: "experiment", atEventId: root.eventId });
+  store.appendEvent({
+    threadId: thread.threadId,
+    branch: "experiment",
+    event: { type: "warning", code: "unreachable", message: "old branch incarnation" },
+  });
+  store.deleteBranch(thread.threadId, "experiment");
+  store.forkBranch({ threadId: thread.threadId, newBranch: "experiment", atEventId: root.eventId });
+  const reachable = store.appendEvent({
+    threadId: thread.threadId,
+    branch: "experiment",
+    event: { type: "warning", code: "reachable", message: "new branch incarnation" },
+  });
+  store.close();
+
+  store = new SessionStore(path);
+  const paged: EventEnvelope[] = [];
+  let cursor = 0;
+  while (true) {
+    const page = store.listEventPage(thread.threadId, "experiment", { afterSequence: cursor, limit: 1 });
+    paged.push(...page.events);
+    cursor = page.nextSequence;
+    if (!page.hasMore) break;
+  }
+  assert.deepEqual(
+    paged.map((event) => event.eventId),
+    store.listEvents(thread.threadId, "experiment").map((event) => event.eventId),
+  );
+  assert.deepEqual(paged.map((event) => event.eventId), [root.eventId, reachable.eventId]);
+  store.close();
+});
+
+test("cold event paging materializes bounded rows for a large single branch", () => {
+  const path = temporaryDatabase();
+  let store = new SessionStore(path, { idFactory: ids("bounded-single") });
+  const thread = store.createThread({ threadId: "thread_bounded_single" });
+  const last = appendWarnings(store, thread.threadId, 10_000);
+  store.close();
+
+  store = new SessionStore(path);
+  const measured = countMaterializedRows(store, () => store.listEventPage(thread.threadId, "main", {
+    afterSequence: last.sequence - 1,
+    limit: 1,
+  }));
+  assert.deepEqual(measured.value.events.map((event) => event.eventId), [last.eventId]);
+  assert.ok(measured.rows <= 16, `cold page materialized ${measured.rows} rows`);
+  store.close();
+});
+
+test("cold event paging ignores large unrelated branch histories", () => {
+  const path = temporaryDatabase();
+  let store = new SessionStore(path, { idFactory: ids("bounded-branches") });
+  const thread = store.createThread({ threadId: "thread_bounded_branches" });
+  const root = store.appendEvent({
+    threadId: thread.threadId,
+    event: { type: "warning", code: "root", message: "root" },
+  });
+  store.forkBranch({ threadId: thread.threadId, newBranch: "target", atEventId: root.eventId });
+  const target = store.appendEvent({
+    threadId: thread.threadId,
+    branch: "target",
+    event: { type: "warning", code: "target", message: "target" },
+  });
+  for (let index = 0; index < 32; index += 1) {
+    const branch = `sibling-${index}`;
+    store.forkBranch({ threadId: thread.threadId, newBranch: branch, atEventId: root.eventId });
+    appendWarnings(store, thread.threadId, 200, branch);
+  }
+  store.close();
+
+  store = new SessionStore(path);
+  const measured = countMaterializedRows(store, () => store.listEventPage(thread.threadId, "target", {
+    afterSequence: root.sequence,
+    limit: 1,
+  }));
+  assert.deepEqual(measured.value.events.map((event) => event.eventId), [target.eventId]);
+  assert.ok(measured.rows <= 16, `cold branch page materialized ${measured.rows} rows`);
+  store.close();
+});
+
+test("cold progress paging validates in SQLite without decoding the complete branch", () => {
+  const path = temporaryDatabase();
+  let store = new SessionStore(path, { idFactory: ids("bounded-progress") });
+  const thread = store.createThread({ threadId: "thread_bounded_progress" });
+  let last: EventEnvelope | undefined;
+  for (let offset = 0; offset < 2_000; offset += 500) {
+    const appended = store.appendEvents({
+      threadId: thread.threadId,
+      events: Array.from({ length: 500 }, (_, index) => {
+        const sequence = offset + index;
+        return {
+          type: "tool_progress" as const,
+          callId: "call",
+          name: "shell",
+          index: 0,
+          sequence,
+          progress: {
+            type: "output" as const,
+            stream: "stdout" as const,
+            delta: "x",
+            stdoutBytes: sequence + 1,
+            stderrBytes: 0,
+          },
+        };
+      }),
+    });
+    last = appended.at(-1);
+  }
+  assert.notEqual(last, undefined);
+  store.close();
+
+  store = new SessionStore(path);
+  let canonicalReads = 0;
+  const listEvents = store.listEvents.bind(store);
+  store.listEvents = (threadId, branch) => {
+    canonicalReads += 1;
+    return listEvents(threadId, branch);
+  };
+  const measured = countMaterializedRows(store, () => store.listEventPage(thread.threadId, "main", {
+    afterSequence: last!.sequence - 1,
+    limit: 1,
+  }));
+  assert.deepEqual(measured.value.events.map((event) => event.eventId), [last!.eventId]);
+  assert.equal(canonicalReads, 0);
+  assert.ok(measured.rows <= 16, `cold progress page materialized ${measured.rows} rows`);
+  store.close();
+});
+
 test("event tails bound replay work by event count and encoded bytes", () => {
   const store = new SessionStore(temporaryDatabase(), { idFactory: ids("tail") });
   const thread = store.createThread({ threadId: "thread_tail" });
@@ -445,10 +627,25 @@ test("canonical messages and provider continuation state round-trip through even
       kind: "openai_responses" as const,
       previousResponseId: "response_one",
       outputItems: [{ type: "opaque", signature: "preserve" }],
+      routed: {
+        provider: "company" as const,
+        model: "public-model",
+        delegate: "openai" as const,
+        upstreamModel: "upstream-model",
+        protocolFamily: "openai-responses" as const,
+        scope: "00000000-0000-4000-8000-000000000000",
+      },
     },
   };
   store.appendEvent({ threadId: "thread_messages", event });
   assert.deepEqual(store.listEvents("thread_messages")[0]?.event, event);
+  const invalid = structuredClone(event);
+  invalid.message.id = "message_invalid_route_scope";
+  invalid.providerState.routed.scope = "not-a-route-scope";
+  assert.throws(
+    () => store.appendEvent({ threadId: "thread_messages", event: invalid }),
+    /Invalid event shape: message_appended/u,
+  );
   store.close();
 });
 
@@ -671,6 +868,238 @@ test("durable event replay rejects out-of-order tool progress", () => {
     ],
   });
   assert.throws(() => store.listEvents(run.threadId), /Out-of-order tool progress/u);
+  assert.throws(
+    () => store.listEventPage(run.threadId, "main", { afterSequence: 3, limit: 10 }),
+    /Out-of-order tool progress/u,
+  );
+  store.close();
+});
+
+test("paged replay rejects malformed progress fields on a cold cache", () => {
+  const path = temporaryDatabase();
+  let store = new SessionStore(path, { idFactory: ids("malformed-progress") });
+  const thread = store.createThread({ threadId: "thread_malformed_progress" });
+  const progress = store.appendEvent({
+    threadId: thread.threadId,
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 0,
+      progress: { type: "output", stream: "stdout", delta: "ok", stdoutBytes: 2, stderrBytes: 0 },
+    },
+  });
+  store.close();
+
+  const database = new DatabaseSync(path);
+  database.prepare(`
+    UPDATE events
+    SET payload_json = json_remove(payload_json, '$.callId')
+    WHERE event_id = ?
+  `).run(progress.eventId);
+  database.close();
+
+  store = new SessionStore(path);
+  assert.throws(
+    () => store.listEventPage(thread.threadId, "main", { afterSequence: progress.sequence, limit: 1 }),
+    /Invalid call_id|Out-of-order tool progress/u,
+  );
+  store.close();
+});
+
+test("paged progress cache evicts the least-recently-used branch and safely revalidates it", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("progress-lru") });
+  for (let index = 0; index < 65; index += 1) {
+    const threadId = `thread_progress_lru_${index}`;
+    store.createThread({ threadId });
+    store.appendEvent({
+      threadId,
+      event: {
+        type: "tool_progress",
+        callId: "call",
+        name: "shell",
+        index: 0,
+        sequence: 0,
+        progress: { type: "output", stream: "stdout", delta: "ok", stdoutBytes: 2, stderrBytes: 0 },
+      },
+    });
+  }
+  for (let index = 0; index < 64; index += 1) {
+    store.listEventPage(`thread_progress_lru_${index}`, "main", { limit: 1 });
+  }
+  store.listEventPage("thread_progress_lru_0", "main", { limit: 1 });
+  store.listEventPage("thread_progress_lru_64", "main", { limit: 1 });
+  store.database.prepare(`
+    UPDATE events
+    SET payload_json = json_set(payload_json, '$.sequence', 1)
+    WHERE thread_id = 'thread_progress_lru_1'
+  `).run();
+
+  assert.equal(store.listEventPage("thread_progress_lru_0", "main", { limit: 1 }).events.length, 1);
+  assert.throws(
+    () => store.listEventPage("thread_progress_lru_1", "main", { limit: 1 }),
+    /Out-of-order tool progress/u,
+  );
+  store.close();
+});
+
+test("oversized paged progress state is not retained and falls back to full validation", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("progress-cache-budget") });
+  const thread = store.createThread({ threadId: "thread_progress_cache_budget" });
+  for (let offset = 0; offset < 4_097; offset += 500) {
+    store.appendEvents({
+      threadId: thread.threadId,
+      events: Array.from({ length: Math.min(500, 4_097 - offset) }, (_, index) => ({
+        type: "tool_progress" as const,
+        callId: `call-${offset + index}`,
+        name: "shell",
+        index: offset + index,
+        sequence: 0,
+        progress: { type: "output" as const, stream: "stdout" as const, delta: "x", stdoutBytes: 1, stderrBytes: 0 },
+      })),
+    });
+  }
+  store.listEventPage(thread.threadId, "main", { afterSequence: 4_096, limit: 1 });
+  store.database.prepare(`
+    UPDATE events
+    SET payload_json = json_set(payload_json, '$.sequence', 1)
+    WHERE thread_id = ? AND sequence = 1
+  `).run(thread.threadId);
+  assert.throws(
+    () => store.listEventPage(thread.threadId, "main", { afterSequence: 4_096, limit: 1 }),
+    /Out-of-order tool progress/u,
+  );
+  store.close();
+});
+
+test("paged replay resets integrity state when a deleted thread id is reused", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: () => "event_reused_thread" });
+  store.createThread({ threadId: "thread_reused" });
+  store.appendEvent({
+    threadId: "thread_reused",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 0,
+      progress: { type: "output", stream: "stdout", delta: "ok", stdoutBytes: 2, stderrBytes: 0 },
+    },
+  });
+  assert.equal(store.listEventPage("thread_reused", "main", { limit: 1 }).events.length, 1);
+  store.deleteThread("thread_reused");
+
+  store.createThread({ threadId: "thread_reused" });
+  store.appendEvent({
+    threadId: "thread_reused",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 1,
+      progress: { type: "output", stream: "stdout", delta: "late", stdoutBytes: 4, stderrBytes: 0 },
+    },
+  });
+  assert.throws(
+    () => store.listEventPage("thread_reused", "main", { afterSequence: 1, limit: 1 }),
+    /Out-of-order tool progress/u,
+  );
+  store.close();
+});
+
+test("paged replay invalidates cached integrity across connection-local thread reuse", () => {
+  const path = temporaryDatabase();
+  const first = new SessionStore(path);
+  const second = new SessionStore(path);
+  first.createThread({ threadId: "thread_cross_connection_reuse" });
+  first.appendEvent({
+    threadId: "thread_cross_connection_reuse",
+    eventId: "event_cross_connection_reuse",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 0,
+      progress: { type: "output", stream: "stdout", delta: "ok", stdoutBytes: 2, stderrBytes: 0 },
+    },
+  });
+  assert.equal(first.listEventPage("thread_cross_connection_reuse", "main", { limit: 1 }).events.length, 1);
+
+  second.deleteThread("thread_cross_connection_reuse");
+  second.createThread({ threadId: "thread_cross_connection_reuse" });
+  second.appendEvent({
+    threadId: "thread_cross_connection_reuse",
+    eventId: "event_cross_connection_reuse",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 1,
+      progress: { type: "output", stream: "stdout", delta: "late", stdoutBytes: 4, stderrBytes: 0 },
+    },
+  });
+  assert.throws(
+    () => first.listEventPage("thread_cross_connection_reuse", "main", { limit: 1 }),
+    /Out-of-order tool progress/u,
+  );
+  second.close();
+  first.close();
+});
+
+test("paged progress validation checks only the descendant suffix as a branch head advances", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("progress-suffix") });
+  store.createThread({ threadId: "thread_progress_suffix" });
+  store.appendEvent({
+    threadId: "thread_progress_suffix",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 0,
+      progress: { type: "output", stream: "stdout", delta: "ok", stdoutBytes: 2, stderrBytes: 0 },
+    },
+  });
+  let canonicalReads = 0;
+  const listEvents = store.listEvents.bind(store);
+  store.listEvents = (threadId, branch) => {
+    canonicalReads += 1;
+    return listEvents(threadId, branch);
+  };
+  store.listEventPage("thread_progress_suffix", "main", { limit: 1 });
+
+  for (let index = 0; index < 10; index += 1) {
+    const warning = store.appendEvent({
+      threadId: "thread_progress_suffix",
+      event: { type: "warning", code: `warning-${index}`, message: `warning-${index}` },
+    });
+    assert.equal(
+      store.listEventPage("thread_progress_suffix", "main", { afterSequence: warning.sequence, limit: 1 }).events.length,
+      0,
+    );
+  }
+  assert.equal(canonicalReads, 0);
+
+  const corrupt = store.appendEvent({
+    threadId: "thread_progress_suffix",
+    event: {
+      type: "tool_progress",
+      callId: "call",
+      name: "shell",
+      index: 0,
+      sequence: 2,
+      progress: { type: "output", stream: "stdout", delta: "gap", stdoutBytes: 5, stderrBytes: 0 },
+    },
+  });
+  assert.throws(
+    () => store.listEventPage("thread_progress_suffix", "main", { afterSequence: corrupt.sequence, limit: 1 }),
+    /Out-of-order tool progress/u,
+  );
+  assert.equal(canonicalReads, 0);
   store.close();
 });
 
@@ -819,7 +1248,7 @@ test("artifacts enforce per-item and store quotas and export with content intact
   const exported = store.exportThread("thread_artifact").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(exported[0], {
     type: "format",
-    value: { format: "rigyn/session-jsonl", schemaVersion: 1 },
+    value: { format: "rigyn/session-jsonl", schemaVersion: 2 },
   });
   assert.equal(exported[1].type, "thread");
   assert.equal(exported.at(-1).value.content, Buffer.from("hello").toString("base64"));

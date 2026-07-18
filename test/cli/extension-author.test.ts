@@ -26,7 +26,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     description: "Author tooling fixture",
     type: "module",
     files: ["extension.json", "runtime"],
-    peerDependencies: { rigyn: ">=0.1.0 <0.2.0" },
+    peerDependencies: { rigyn: ">=0.1.0 <0.3.0" },
   }));
   await writeFile(join(root, "extension.json"), JSON.stringify({
     schemaVersion: 1,
@@ -34,7 +34,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     name: "Author tool fixture",
     version: "1.2.3",
     description: "Author tooling fixture",
-    compatibility: { hostVersion: ">=0.1.0 <0.2.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
     contributions: { runtime: [{ path: "runtime/index.mjs" }] },
   }));
   await writeFile(join(root, "runtime", "index.mjs"), `

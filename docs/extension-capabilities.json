@@ -83,6 +83,36 @@
       "tests": ["test/cli/runtime-reload.test.ts", "test/extensions/runtime.test.ts", "test/extensions/protocol-examples.test.ts"]
     },
     {
+      "id": "routed-provider-composition",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerProvider"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/custom-provider", "examples/brokered-provider"],
+      "tests": ["test/providers/routed.test.ts", "test/public-api/consumer.mts"]
+    },
+    {
+      "id": "provider-response-diagnostics",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md", "docs/providers.md"],
+      "examples": ["examples/custom-provider", "examples/tool-lifecycle"],
+      "tests": ["test/core/provider-diagnostics.test.ts", "test/extensions/runtime-lifecycle-integration.test.ts"]
+    },
+    {
+      "id": "audited-tool-input-transforms",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/tool-lifecycle"],
+      "tests": ["test/extensions/runtime-core-integration.test.ts", "test/extensions/runtime-tool-contract.test.ts"]
+    },
+    {
       "id": "lifecycle-and-shared-events",
       "status": "implemented",
       "authoring": true,
@@ -149,15 +179,15 @@
       "hosts": ["tui", "rpc"],
       "apiMembers": ["ui", "setWorkingMessage", "setWorkingVisible"],
       "docs": ["docs/tui.md", "docs/extensions.md"],
-      "examples": ["examples/session-notes", "examples/reference-package"],
-      "tests": ["test/interfaces/rpc-extension-ui.test.ts", "test/extensions/runtime-authoring.test.ts"]
+      "examples": ["examples/session-notes", "examples/approval-gate", "examples/reference-package"],
+      "tests": ["test/interfaces/rpc-extension-ui.test.ts", "test/extensions/runtime-authoring.test.ts", "test/extensions/package-gallery-examples.test.ts"]
     },
     {
       "id": "tui-input-components-and-theme",
       "status": "implemented",
       "authoring": true,
       "hosts": ["tui"],
-      "apiMembers": ["registerAutocompleteProvider", "registerEditorMiddleware", "getTheme", "setTheme", "custom", "showOverlay"],
+      "apiMembers": ["registerAutocompleteProvider", "registerEditorMiddleware", "registerEditorRenderer", "getTheme", "setTheme", "custom", "showOverlay"],
       "docs": ["docs/tui.md", "docs/extensions.md"],
       "examples": ["examples/custom-overlay.mjs", "examples/input-assist", "examples/reference-package"],
       "tests": ["test/extensions/runtime-authoring.test.ts", "test/tui/controller.test.ts"]
@@ -169,7 +199,7 @@
       "hosts": ["tui", "print", "json", "rpc", "embedding"],
       "apiMembers": ["getSession", "waitForIdle", "newSession", "forkSession", "getModel", "setModel", "setThinkingLevel", "compact", "abort", "runChild"],
       "docs": ["docs/extensions.md", "docs/sessions.md"],
-      "examples": ["examples/reference-package"],
+      "examples": ["examples/child-coordinator", "examples/reference-package"],
       "tests": ["test/extensions/runtime-controls.test.ts", "test/service/public-runtime.test.ts"]
     },
     {
@@ -254,13 +284,13 @@
     },
     {
       "id": "subagents",
-      "status": "intentionally-different",
-      "authoring": false,
+      "status": "implemented",
+      "authoring": true,
       "hosts": ["tui", "print", "json", "rpc", "embedding"],
       "apiMembers": ["runChild"],
       "docs": ["docs/extensions.md", "docs/extension-capabilities.md"],
-      "examples": [],
-      "tests": ["test/extensions/runtime-child-runs.test.ts", "test/extensions/capability-matrix.test.ts"]
+      "examples": ["examples/child-coordinator"],
+      "tests": ["test/extensions/runtime-child-runs.test.ts", "test/extensions/package-gallery-examples.test.ts", "test/extensions/capability-matrix.test.ts"]
     },
     {
       "id": "raw-provider-credential-and-wire-mutation",

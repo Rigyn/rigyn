@@ -19,7 +19,7 @@ function entry(overrides: Record<string, unknown> = {}) {
       version: "1.2.3",
       integrity: `sha512-${Buffer.from("archive").toString("base64")}`,
     },
-    compatibility: { hostVersion: ">=0.1.0 <0.2.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
     contributions: { runtime: 1, tools: 2, commands: 1, skills: 0, prompts: 0, themes: 0, providers: 0 },
     readme: "https://example.com/review-tools/readme",
     homepage: "https://example.com/review-tools",

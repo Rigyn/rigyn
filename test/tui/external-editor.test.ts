@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -54,6 +55,15 @@ test("external editor round-trips a private temporary prompt and cleans it up", 
   assert.equal(result, "edited by fixture\n");
   const editedPath = await readFile(marker, "utf8");
   await assert.rejects(access(editedPath), /ENOENT/u);
+});
+
+test("the external-editor fixture rejects a missing target without rewriting itself", async () => {
+  const fixture = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "external-editor.mjs");
+  const before = await readFile(fixture, "utf8");
+  const result = spawnSync(process.execPath, [fixture], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /missing editor path/u);
+  assert.equal(await readFile(fixture, "utf8"), before);
 });
 
 test("external editor cancellation kills its process tree and removes the temporary prompt", {

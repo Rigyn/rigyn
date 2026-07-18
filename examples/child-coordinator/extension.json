@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "child-coordinator-example",
+  "name": "Child coordinator example",
+  "version": "1.0.0",
+  "description": "Parallel in-process child runs with native progress and cancellation.",
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

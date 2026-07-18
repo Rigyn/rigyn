@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { discoverExtensions, LocalExtensionPackageManager } from "../../src/extensions/index.js";
+import { discoverSkills } from "../../src/context/index.js";
+import {
+  discoverExtensions,
+  LocalExtensionPackageManager,
+  parseExtensionManifest,
+} from "../../src/extensions/index.js";
 
 async function fixture(t: test.TestContext): Promise<{ root: string; source: string; installed: string }> {
   const root = await mkdtemp(join(tmpdir(), "harness-convention-package-"));
@@ -78,4 +83,126 @@ test("conventional extensions, skills, prompts, and themes directories need only
   assert.equal(catalog.bundle().skillRoots.length, 1);
   assert.deepEqual(catalog.bundle().prompts.map((entry) => entry.id), ["fix"]);
   assert.deepEqual(catalog.bundle().themes.map((entry) => entry.name), ["forest"]);
+});
+
+test("convention packages expose direct root Markdown skills through the active catalog", async (t) => {
+  const { source, installed } = await fixture(t);
+  await mkdir(join(source, "skills"), { recursive: true });
+  await writeFile(
+    join(source, "skills", "review.md"),
+    "---\nname: review\ndescription: Review a change.\n---\nReview it.\n",
+  );
+  await writeFile(join(source, "package.json"), JSON.stringify({ name: "markdown-skill-kit", version: "0.1.0" }));
+
+  const manager = new LocalExtensionPackageManager({ user: installed });
+  await manager.install(source);
+  const catalog = await discoverExtensions(manager.sources(true));
+  const skills = await discoverSkills(catalog.bundle().skillRoots);
+  assert.deepEqual(skills.map((entry) => entry.name), ["review"]);
+});
+
+test("convention skill declarations apply directory and direct-file exclusions before discovery", async (t) => {
+  const { source, installed } = await fixture(t);
+  await mkdir(join(source, "skills", "public"), { recursive: true });
+  await mkdir(join(source, "skills", "internal"), { recursive: true });
+  await writeFile(
+    join(source, "skills", "public", "SKILL.md"),
+    "---\nname: public\ndescription: Public skill.\n---\nUse it.\n",
+  );
+  await writeFile(
+    join(source, "skills", "internal", "SKILL.md"),
+    "---\nname: internal\ndescription: Internal skill.\n---\nDo not load it.\n",
+  );
+  await writeFile(
+    join(source, "skills", "public-root.md"),
+    "---\nname: public-root\ndescription: Public root skill.\n---\nUse it.\n",
+  );
+  await writeFile(
+    join(source, "skills", "private.md"),
+    "---\nname: private\ndescription: Private root skill.\n---\nDo not load it.\n",
+  );
+  await writeFile(join(source, "package.json"), JSON.stringify({
+    name: "filtered-skill-kit",
+    version: "0.1.0",
+    rigyn: {
+      skills: ["skills", "!skills/internal/**", "!skills/private.md"],
+    },
+  }));
+
+  const manager = new LocalExtensionPackageManager({ user: installed });
+  const result = await manager.install(source);
+  const generated = JSON.parse(await readFile(join(result.packageRoot, "extension.json"), "utf8")) as {
+    contributions: { skillRoots: Array<{ path: string }> };
+  };
+  assert.deepEqual(generated.contributions.skillRoots.map((entry) => entry.path), [
+    "skills/public",
+    "skills/public-root.md",
+  ]);
+  const catalog = await discoverExtensions(manager.sources(true));
+  const skills = await discoverSkills(catalog.bundle().skillRoots);
+  assert.deepEqual(skills.map((entry) => entry.name), ["public", "public-root"]);
+});
+
+test("convention runtime discovery activates entrypoints without treating nested helpers as extensions", async (t) => {
+  const { source, installed } = await fixture(t);
+  await mkdir(join(source, "extensions", "review"), { recursive: true });
+  await mkdir(join(source, "extensions", "helper-only"), { recursive: true });
+  await mkdir(join(source, "extensions", "deep", "nested"), { recursive: true });
+  await writeFile(join(source, "extensions", "direct.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "types.d.ts"), "export declare const fixture: boolean;\n");
+  await writeFile(join(source, "extensions", "types.d.mts"), "export declare const fixture: boolean;\n");
+  await writeFile(join(source, "extensions", "review", "index.ts"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "review", "index.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "review", "helper.mjs"), "export const helper = true;\n");
+  await writeFile(join(source, "extensions", "helper-only", "helper.mjs"), "export const helper = true;\n");
+  await writeFile(join(source, "extensions", "deep", "nested", "index.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "package.json"), JSON.stringify({ name: "entrypoint-kit", version: "0.1.0" }));
+
+  const manager = new LocalExtensionPackageManager({ user: installed });
+  const result = await manager.install(source);
+  const generated = JSON.parse(await readFile(join(result.packageRoot, "extension.json"), "utf8")) as {
+    contributions: { runtime: Array<{ path: string }> };
+  };
+  assert.deepEqual(generated.contributions.runtime.map((entry) => entry.path), [
+    "extensions/direct.mjs",
+    "extensions/review/index.ts",
+  ]);
+});
+
+test("explicit convention runtime globs retain intentional nested entries and exclusions", async (t) => {
+  const { source, installed } = await fixture(t);
+  await mkdir(join(source, "extensions", "review", "deep"), { recursive: true });
+  await mkdir(join(source, "extensions", "deep", "nested"), { recursive: true });
+  await writeFile(join(source, "extensions", "direct.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "review", "helper.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "review", "deep", "helper.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "deep", "nested", "index.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "package.json"), JSON.stringify({
+    name: "explicit-entrypoint-kit",
+    version: "0.1.0",
+    rigyn: {
+      extensions: ["extensions/**/*.mjs", "!extensions/review"],
+    },
+  }));
+
+  const manager = new LocalExtensionPackageManager({ user: installed });
+  const result = await manager.install(source);
+  const generated = JSON.parse(await readFile(join(result.packageRoot, "extension.json"), "utf8")) as {
+    contributions: { runtime: Array<{ path: string }> };
+  };
+  assert.deepEqual(generated.contributions.runtime.map((entry) => entry.path), [
+    "extensions/deep/nested/index.mjs",
+    "extensions/direct.mjs",
+  ]);
+});
+
+test("handwritten manifests reject TypeScript declaration files as runtime entries", () => {
+  for (const path of ["runtime/types.d.ts", "runtime/types.d.mts"]) {
+    assert.throws(() => parseExtensionManifest({
+      schemaVersion: 1,
+      id: "declaration-runtime",
+      name: "Declaration runtime",
+      contributions: { runtime: [{ path }] },
+    }), /declaration|runtime/u);
+  }
 });

@@ -219,6 +219,8 @@ export class EditTool implements HarnessTool {
     promptSnippet: "Apply one or more unique exact replacements to an existing file",
     promptGuidelines: [
       "Read enough surrounding context before edit, and make each oldText uniquely identify the intended existing text.",
+      "When one file needs several separate changes, include them as non-overlapping entries in one edit call; every oldText is matched against the original file.",
+      "Keep oldText as small as practical while still unique, and merge nearby replacements when their ranges would overlap.",
     ],
     inputSchema: schema,
   };

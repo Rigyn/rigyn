@@ -4,10 +4,22 @@ import {
 } from "rigyn/extensions";
 import {
   defineProviderAdapter,
+  defineRoutedProviderAdapter,
   type ProviderAdapterDefinition,
 } from "rigyn/providers";
 
 declare const api: RuntimeExtensionApi;
+
+api.registerEditorRenderer({
+  render(view) {
+    return {
+      lines: [{ spans: [{ text: view.text, role: "editor" }] }],
+      cursor: { row: 0, column: view.cursor },
+    };
+  },
+});
+
+api.on("tool_call", (event) => ({ input: event.input }));
 
 api.registerTool(defineRuntimeTool<{ text: string }>({
   name: "consumer_typed_tool",
@@ -33,4 +45,13 @@ const providerDefinition = {
   },
 } satisfies ProviderAdapterDefinition;
 
-api.registerProvider(defineProviderAdapter(providerDefinition));
+const authoredProvider = defineProviderAdapter(providerDefinition);
+api.registerProvider(defineRoutedProviderAdapter({
+  id: "consumer-routed-provider",
+  delegateOwnership: "owned",
+  routes: [{
+    model: "consumer-model",
+    protocolFamily: "openai-chat-completions",
+    adapter: authoredProvider,
+  }],
+}));

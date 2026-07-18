@@ -201,9 +201,9 @@ Application actions include `app.suspend`, `app.session.new`, `app.session.tree`
 Instructions load in deterministic order:
 
 1. the user-level `AGENTS.md`;
-2. from workspace root toward the current directory, one of `AGENTS.override.md` or `AGENTS.md` per directory.
+2. from workspace root toward the current directory, the first existing file in this order for each directory: `AGENTS.override.md`, `AGENTS.md`, then `CLAUDE.md`.
 
-An override wins over a normal instruction file in the same directory. `--no-context-files` disables automatic discovery for one invocation.
+Only one instruction file loads from each directory. An override wins over a normal instruction file, and `AGENTS.md` wins over the compatibility `CLAUDE.md` fallback in that same directory. `--no-context-files` disables automatic discovery for one invocation.
 
 Project trust gates project configuration and executable project resources. The startup chooser can remember trust or distrust for the exact workspace, trust its parent recursively, or make either decision for only the current launch. Saved exact decisions override inherited parent trust. Existing positive-only trust files are read safely and upgraded when the next decision is written.
 

@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, parse, relative, resolve, sep } from "node:path";
+import { basename, dirname, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { checkReleaseMetadata } from "./check-release-metadata.mjs";
-import { withLifecycleLock } from "./lifecycle-common.mjs";
+import { runBoundedCommand } from "./bounded-command.mjs";
+import { inside, resolveNpmInvocation, withLifecycleLock } from "./lifecycle-common.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const SENSITIVE_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const OUTPUT_MARKER = ".rigyn-release-output.json";
 const MAX_MARKER_BYTES = 16 * 1024;
@@ -30,14 +30,6 @@ function parseArguments(argv) {
   return { output };
 }
 
-function npmInvocation(args) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath !== undefined && npmExecPath !== "") {
-    return { command: process.execPath, args: [npmExecPath, ...args] };
-  }
-  return { command: process.platform === "win32" ? "npm.cmd" : "npm", args };
-}
-
 function releaseEnvironment() {
   const environment = {};
   for (const [name, value] of Object.entries(process.env)) {
@@ -55,58 +47,6 @@ function releaseEnvironment() {
   };
 }
 
-async function run(command, args, options) {
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  const stdout = [];
-  const stderr = [];
-  let total = 0;
-  let outputFailure;
-  const capture = (target, chunk) => {
-    if (outputFailure !== undefined) return;
-    total += chunk.byteLength;
-    if (total > MAX_OUTPUT_BYTES) {
-      outputFailure = new Error(`${options.label} output exceeded ${MAX_OUTPUT_BYTES} bytes`);
-      child.kill("SIGKILL");
-      return;
-    }
-    target.push(chunk);
-  };
-  child.stdout.on("data", (chunk) => capture(stdout, chunk));
-  child.stderr.on("data", (chunk) => capture(stderr, chunk));
-  const result = await new Promise((resolveResult, reject) => {
-    const timeout = setTimeout(() => {
-      outputFailure = new Error(`${options.label} timed out after ${options.timeoutMs} ms`);
-      child.kill("SIGKILL");
-    }, options.timeoutMs);
-    timeout.unref();
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code, signal) => {
-      clearTimeout(timeout);
-      resolveResult({ code, signal });
-    });
-  });
-  const output = {
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
-  };
-  if (outputFailure !== undefined) throw outputFailure;
-  if (result.code !== 0) {
-    throw new Error(
-      `${options.label} failed${result.code === null ? ` with signal ${result.signal ?? "unknown"}` : ` with exit ${result.code}`}\n${output.stderr.slice(-8192)}`,
-    );
-  }
-  return output;
-}
-
 async function existingPathType(path) {
   try {
     return await lstat(path);
@@ -114,11 +54,6 @@ async function existingPathType(path) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
     throw error;
   }
-}
-
-function inside(parent, candidate) {
-  const path = relative(parent, candidate);
-  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
 }
 
 async function physicalTarget(target) {
@@ -203,7 +138,7 @@ async function stage(output) {
   const staging = `${output}.staging-${process.pid}-${randomBytes(6).toString("hex")}`;
   await mkdir(staging, { recursive: true, mode: 0o700 });
   try {
-    const invocation = npmInvocation([
+    const invocation = await resolveNpmInvocation([
       "pack",
       "--json",
       "--ignore-scripts",
@@ -211,7 +146,7 @@ async function stage(output) {
       staging,
       PROJECT_ROOT,
     ]);
-    const packedOutput = await run(invocation.command, invocation.args, {
+    const packedOutput = await runBoundedCommand(invocation.command, invocation.args, {
       cwd: PROJECT_ROOT,
       env: releaseEnvironment(),
       timeoutMs: 120_000,
@@ -280,7 +215,7 @@ async function stage(output) {
       throw error;
     }
     if (hadOutput) await rm(previous, { recursive: true, force: true });
-    process.stdout.write(`Staged ${archiveFile} and release metadata in ${output}\n`);
+    writeFileSync(1, `Staged ${archiveFile} and release metadata in ${output}\n`);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
@@ -296,6 +231,6 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  writeFileSync(2, `${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }

@@ -9,6 +9,7 @@ import type {
   ProviderAdapter,
   ProviderId,
   ProviderRequest,
+  ProviderResponseDiagnostics,
 } from "../core/types.js";
 import { catalogId, catalogLimit } from "./catalog.js";
 import { requireBody } from "./lines.js";
@@ -36,6 +37,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -89,6 +91,7 @@ class GenerateContentAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const headers = new Headers(this.#transport.headers);
@@ -103,6 +106,7 @@ class GenerateContentAdapter implements ProviderAdapter {
         redirect: "error",
       });
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -131,7 +135,7 @@ class GenerateContentAdapter implements ProviderAdapter {
         responseModel = asString(chunk.modelVersion) ?? asString(chunk.model_version) ?? responseModel;
         if (!started) {
           started = true;
-          const start: AdapterEvent = { type: "response_start", model: responseModel };
+          const start: AdapterEvent = { type: "response_start", model: responseModel, diagnostics };
           if (responseId !== undefined) start.responseId = responseId;
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
@@ -233,7 +237,7 @@ class GenerateContentAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

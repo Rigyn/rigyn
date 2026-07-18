@@ -150,6 +150,22 @@ test("root manifests stop recursion while manifest-free directories are searched
   assert.equal(result.diagnostics.length, 0);
 });
 
+test("native skill roots discover direct Markdown skills while compatibility roots can opt out", async () => {
+  const root = directory("harness-skill-root-markdown-");
+  writeFileSync(join(root, "review.md"), manifest("review", "A direct Markdown skill."));
+  skill(root, join("nested", "helper"), manifest("helper", "A nested directory skill."));
+
+  const native = await discoverSkillsDetailed([
+    { path: root, scope: "user", trusted: true },
+  ]);
+  assert.deepEqual(native.skills.map((entry) => entry.name), ["helper", "review"]);
+
+  const compatibility = await discoverSkillsDetailed([
+    { path: root, scope: "user", trusted: true, rootMarkdown: false },
+  ]);
+  assert.deepEqual(compatibility.skills.map((entry) => entry.name), ["helper"]);
+});
+
 test("recursive skill discovery applies layered ignore files and nested negation", async () => {
   const root = directory("harness-skill-ignore-");
   skill(root, "visible", manifest("visible", "A visible skill."));

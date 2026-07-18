@@ -50,6 +50,25 @@ test("instructions load user then root-to-cwd with nearest override and provenan
   assert.doesNotMatch(renderInstructions(discovered), /ordinary nested rules/);
 });
 
+test("CLAUDE.md is a fallback when a directory has no AGENTS instruction file", async () => {
+  const root = directory("harness-claude-instructions-");
+  const nested = join(root, "nested");
+  mkdirSync(nested);
+  writeFileSync(join(root, "CLAUDE.md"), "compatible root rules");
+  writeFileSync(join(nested, "CLAUDE.md"), "shadowed compatible rules");
+  writeFileSync(join(nested, "AGENTS.md"), "native nested rules");
+
+  const discovered = await discoverInstructions({
+    workspaceRoot: root,
+    cwd: nested,
+    trusted: true,
+  });
+  assert.deepEqual(discovered.entries.map((entry) => entry.text), [
+    "compatible root rules",
+    "native nested rules",
+  ]);
+});
+
 test("global user instructions load before workspace files and file loading can be disabled per run", async () => {
   const root = directory("harness-global-instructions-");
   const config = directory("harness-global-config-");

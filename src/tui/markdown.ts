@@ -650,15 +650,24 @@ function codeLine(source: string, fence: FenceState): BlockSpans {
   return { spans, role: "muted" };
 }
 
-function wrappedLines(prefix: string, spans: readonly MarkdownSpan[], width: number, role: ThemeRole): MarkdownRenderedLine[] {
+function wrappedLines(
+  prefix: string,
+  spans: readonly MarkdownSpan[],
+  width: number,
+  role: ThemeRole,
+  prefixRole?: ThemeRole,
+): MarkdownRenderedLine[] {
   const available = Math.max(1, width - cellWidth(prefix));
   const lines: MarkdownRenderedLine[] = [];
   let current: MarkdownSpan[] = [];
   let used = 0;
   let hasContent = false;
+  let firstWrappedLine = true;
+  const continuationPrefix = " ".repeat(cellWidth(prefix));
   const reset = () => {
     current = [];
-    appendSpan(current, prefix);
+    appendSpan(current, firstWrappedLine ? prefix : continuationPrefix, prefixRole);
+    firstWrappedLine = false;
     used = 0;
     hasContent = false;
   };
@@ -675,16 +684,67 @@ function wrappedLines(prefix: string, spans: readonly MarkdownSpan[], width: num
     }
     reset();
   };
-  reset();
-  for (const span of spans) {
-    for (const grapheme of splitGraphemes(span.text)) {
-      const next = graphemeWidth(grapheme);
-      if (used > 0 && used + next > available) flush();
-      if (next > available) continue;
-      appendSpan(current, grapheme, span.role, span.hyperlink);
-      used += next;
+  const appendGraphemes = (graphemes: readonly StyledGrapheme[]) => {
+    for (const grapheme of graphemes) {
+      if (used > 0 && used + grapheme.width > available) flush();
+      if (grapheme.width > available) continue;
+      appendSpan(current, grapheme.text, grapheme.role, grapheme.hyperlink);
+      used += grapheme.width;
       hasContent = true;
     }
+  };
+  reset();
+
+  interface StyledGrapheme {
+    text: string;
+    width: number;
+    whitespace: boolean;
+    role?: ThemeRole;
+    hyperlink?: string;
+  }
+
+  const tokens: StyledGrapheme[][] = [];
+  for (const span of spans) {
+    for (const grapheme of splitGraphemes(span.text)) {
+      const styled: StyledGrapheme = {
+        text: grapheme,
+        width: graphemeWidth(grapheme),
+        whitespace: /^\s$/u.test(grapheme),
+        ...(span.role === undefined ? {} : { role: span.role }),
+        ...(span.hyperlink === undefined ? {} : { hyperlink: span.hyperlink }),
+      };
+      const token = tokens.at(-1);
+      if (token === undefined || token[0]?.whitespace !== styled.whitespace) tokens.push([styled]);
+      else token.push(styled);
+    }
+  }
+
+  let pendingWhitespace: readonly StyledGrapheme[] | undefined;
+  for (const token of tokens) {
+    const whitespace = token[0]?.whitespace === true;
+    const tokenWidth = token.reduce((total, grapheme) => total + grapheme.width, 0);
+    if (whitespace) {
+      if (used === 0) appendGraphemes(token);
+      else pendingWhitespace = token;
+      continue;
+    }
+    const pendingWidth = pendingWhitespace?.reduce((total, grapheme) => total + grapheme.width, 0) ?? 0;
+    if (tokenWidth <= available) {
+      if (used > 0 && used + pendingWidth + tokenWidth > available) {
+        if (pendingWhitespace !== undefined && used + pendingWidth <= available) appendGraphemes(pendingWhitespace);
+        flush();
+      }
+      else if (pendingWhitespace !== undefined) appendGraphemes(pendingWhitespace);
+      pendingWhitespace = undefined;
+      appendGraphemes(token);
+      continue;
+    }
+    if (used > 0) {
+      if (pendingWhitespace !== undefined && used + pendingWidth <= available) appendGraphemes(pendingWhitespace);
+      flush();
+    }
+    pendingWhitespace = undefined;
+    appendGraphemes(token);
   }
   if (hasContent || lines.length === 0) flush();
   return lines;
@@ -695,6 +755,7 @@ export function renderMarkdownMessageLines(
   value: string,
   width: number,
   fallbackRole: ThemeRole,
+  prefixRole?: ThemeRole,
 ): MarkdownRenderedLine[] {
   const safeWidth = Math.max(1, Math.min(500, Number.isSafeInteger(width) ? width : 80));
   const safePrefix = truncateCells(sanitizeTerminalText(prefix).replaceAll("\n", " "), Math.max(0, safeWidth - 1), "");
@@ -735,7 +796,7 @@ export function renderMarkdownMessageLines(
     }
 
     const selectedPrefix = first ? safePrefix : indentation;
-    lines.push(...wrappedLines(selectedPrefix, parsed.spans, safeWidth, parsed.role ?? fallbackRole));
+    lines.push(...wrappedLines(selectedPrefix, parsed.spans, safeWidth, parsed.role ?? fallbackRole, prefixRole));
     first = false;
     if (lines.length > MAX_MARKDOWN_RENDERED_LINES * 2) {
       lines.splice(0, lines.length - MAX_MARKDOWN_RENDERED_LINES);
@@ -751,4 +812,19 @@ export function renderMarkdownMessageLines(
     if (marker !== undefined) lines[0] = marker;
   }
   return lines;
+}
+
+export function renderSyntaxCodeLines(
+  prefix: string,
+  value: string,
+  width: number,
+  languageHint: string,
+): MarkdownRenderedLine[] {
+  const safeWidth = Math.max(1, Math.min(500, Number.isSafeInteger(width) ? width : 80));
+  const safePrefix = truncateCells(sanitizeTerminalText(prefix).replaceAll("\n", " "), Math.max(0, safeWidth - 1), "");
+  const language = languageFromInfo(languageHint);
+  if (language === undefined || language === "diff") return [];
+  const state: SyntaxState = { blockCommentEnd: undefined, multilineQuote: undefined };
+  return sanitizeTerminalText(value).split("\n").flatMap((source) =>
+    wrappedLines(safePrefix, highlightCode(source, language, state), safeWidth, "code"));
 }

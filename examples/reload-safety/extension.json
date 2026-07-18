@@ -4,7 +4,7 @@
   "name": "Reload safety example",
   "version": "0.1.0",
   "description": "A minimal probe for candidate-first reload and generation disposal.",
-  "compatibility": { "hostVersion": ">=0.1.0 <0.2.0" },
+  "compatibility": { "hostVersion": ">=0.1.0 <0.3.0" },
   "contributions": {
     "runtime": [{ "path": "runtime/index.mjs" }]
   }

@@ -25,10 +25,10 @@ node --version
 npm --version
 ```
 
-Install a private per-user copy from the v0.1.7 GitHub release:
+Install a private per-user copy from the v0.2.0 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.1.7/rigyn-0.1.7.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.2.0/rigyn-0.2.0.tgz -- rigyn self-install
 rigyn --version
 ```
 

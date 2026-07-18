@@ -8,6 +8,7 @@ import type {
   NormalizedUsage,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
 } from "../core/types.js";
 import type { GeminiConfig } from "./gemini.js";
 import { normalizeImageSource, requireImageUrlProtocol } from "./images.js";
@@ -36,6 +37,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
 } from "./transport.js";
@@ -86,6 +88,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const headers = new Headers(this.#config.headers);
@@ -101,6 +104,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
         redirect: "error",
       });
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -147,7 +151,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
           responseModel = asString(interaction.model) ?? responseModel;
           status = asString(interaction.status) ?? status;
           started = true;
-          const start: AdapterEvent = { type: "response_start", model: responseModel };
+          const start: AdapterEvent = { type: "response_start", model: responseModel, diagnostics };
           if (interactionId !== undefined) start.responseId = interactionId;
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
@@ -326,7 +330,7 @@ export class GeminiInteractionsAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

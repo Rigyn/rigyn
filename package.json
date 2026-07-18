@@ -1,6 +1,6 @@
 {
   "name": "rigyn",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
   "license": "MIT",
@@ -121,8 +121,10 @@
     "node": "^24.15.0 || >=26.0.0"
   },
   "scripts": {
+    "benchmark:compare": "tsx benchmarks/compare-live.ts",
     "benchmark:extensions": "tsx benchmarks/extension-authoring.ts",
     "benchmark:offline": "tsx benchmarks/offline.ts",
+    "benchmark:runtime": "tsx benchmarks/runtime-performance.ts",
     "build": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node --eval \"require('node:fs').chmodSync('dist/bin/rigyn.js', 0o755)\"",
     "check": "npm run check:dependencies && npm run check:release && npm run typecheck && npm run typecheck:test && npm run test && npm run test:release && npm run test:consumer && npm run test:dist && npm run test:pack",
     "check:dependencies": "node scripts/check-dependency-policy.mjs",
@@ -142,19 +144,20 @@
     "test:live": "node --env-file-if-exists=.env.local --env-file-if-exists=.env --import ./test/setup.mjs --import tsx --test --test-concurrency=1 test/live/provider-smoke.live.test.ts",
     "test:release": "node --import ./test/setup.mjs --test test/release/release-metadata.test.mjs",
     "test:consumer": "tsc -p test/public-api/tsconfig.json",
-    "test:dist": "node --import ./test/setup.mjs --test test/public-api-dist.test.mjs",
+    "test:dist": "node --import ./test/setup.mjs --test test/public-api-dist.test.mjs test/public-api-subpaths.test.mjs",
     "test:pack": "node --import ./test/setup.mjs --test test/release/packed-artifact.test.mjs",
+    "test:coverage:risk": "tsx benchmarks/risk-coverage.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "0.111.0",
+    "@anthropic-ai/sdk": "0.112.3",
     "@vscode/ripgrep": "1.18.0",
     "bmp-js": "0.1.0",
     "ignore": "7.0.6",
     "jsonc-parser": "3.3.1",
     "minimatch": "10.2.5",
-    "openai": "6.47.0",
+    "openai": "6.48.0",
     "semver": "7.8.5",
     "sharp": "0.35.3",
     "tsx": "4.23.1",
@@ -164,6 +167,8 @@
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/semver": "7.7.1",
+    "c8": "12.0.0",
+    "monocart-coverage-reports": "2.12.12",
     "typescript": "7.0.2"
   }
 }

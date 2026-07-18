@@ -4,6 +4,38 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.2.0] - 2026-07-18
+
+### Added
+
+- Added exact per-model routed-provider composition across the supported protocol families, with explicit metadata and fail-closed continuation-state isolation instead of model-name guessing.
+- Added bounded extension editor rendering, schema-revalidated tool-input transforms with durable extension attribution, and redacted provider-response diagnostics containing response/request IDs, status, and allowlisted headers.
+- Added exclusive-cursor RPC history pages and snapshot-bounded subscription replay for very large sessions, replacing eager history materialization with a bounded default page.
+- Added a session-oriented embedding facade and `/context` prompt-composition provenance without exposing stores, registries, credentials, or prompt bodies.
+- Added deterministic startup/reload/resume performance guards, an opt-in same-task two-harness comparison runner, and independent CI coverage floors for the five highest-risk modules.
+
+### Breaking
+
+- `thread.events` now always returns a bounded `RpcEventPage`; callers must follow `nextCursor` while `hasMore` is true instead of relying on the former eager event-array response.
+
+### Changed
+
+- Updated the exact-pinned OpenAI and Anthropic provider SDK transports to 6.48.0 and 0.112.3 after focused contract and live-provider verification.
+- Runtime resources now commit or roll back as one immutable generation, extension session access passes through a workspace/branch-scoped facade, and RPC dispatch uses a typed complete method registry.
+- Managed extension runtime imports now resolve only `rigyn/extensions`, `rigyn/providers`, and `rigyn/tui` through the active host, preventing a separately installed package from loading a second host instance.
+- Restored the released inline transcript, composer, user-row, and picker geometry while keeping reasoning and picker help width-bounded and presenting completed tool output through compact transparent status rails without an expansion shortcut.
+- Session storage now upgrades to schema 18. Schema 17 preserves indexed branch incarnations for exact cursor paging, and schema 18 atomically classifies host-owned runtime-child sessions without exporting that internal ownership marker. The migration is transactional, but a database opened by 0.2.0 cannot be reopened by 0.1.x; back up the state database first if rollback to an older release may be required.
+- Portable JSONL archives now use schema version 2 and identify each event's branch incarnation. The importer continues to accept schema version 1 and headerless legacy archives.
+
+### Fixed
+
+- Preserved deleted-and-recreated same-name branch history across JSONL export/import without making archived events reachable from the active branch.
+- Bounded RPC replay/live handoff and client callback queues, made unsubscribe idempotent and draining, and kept reconnect cursors exact across oversized events, writer failures, and stop races.
+- Applied the same portable redaction to RPC history, replay, and live events, and paged extension transcript reads directly from stable storage snapshots instead of materializing long branches.
+- Cancelled hung resource-catalog readers during reload and close while retaining transferred run leases, so stale generation work cannot block disposal or expire an active run handoff.
+- Bounded release-command output and cleanup on Node 26, including timeout wakeup, residual process groups, Linux detached descendants, and parent-signal forwarding.
+- Made the default agent prompt treat failed verification as unfinished work and require inspection, correction, and a successful rerun before claiming completion.
+
 ## [0.1.7] - 2026-07-17
 
 ### Fixed

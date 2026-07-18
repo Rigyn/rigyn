@@ -26,6 +26,8 @@ export interface SkillRoot {
   scope: "user" | "workspace";
   trusted: boolean;
   extensionId?: string;
+  /** Discover direct Markdown skill files when this path is a directory. */
+  rootMarkdown?: boolean;
 }
 
 export interface SkillMetadata {
@@ -579,6 +581,26 @@ export async function discoverSkillsDetailed(
         if (manifestIsFile && !ignoredBy(scopes, localManifest, false)) {
           await addManifest(directory, expectedName, manifestPath);
           return;
+        }
+      }
+
+      if (localDirectory === "" && root.rootMarkdown !== false) {
+        for (const entry of entries) {
+          if (entry.name === "SKILL.md" || entry.name.startsWith(".") || !entry.name.endsWith(".md")) continue;
+          const candidate = resolve(directory, entry.name);
+          const localManifest = portablePath(entry.name);
+          if (ignoredBy(scopes, localManifest, false)) continue;
+          let manifestPath: string;
+          try {
+            manifestPath = await boundary.readable(candidate);
+            if (!(await stat(manifestPath)).isFile()) continue;
+          } catch (error) {
+            if (isNotFound(error)) continue;
+            throw new HarnessError("CONTEXT_SKILL_BOUNDARY", `Skill ${entry.name} escapes its root`, {
+              cause: error,
+            });
+          }
+          await addManifest(directory, basename(entry.name, extname(entry.name)), manifestPath);
         }
       }
 

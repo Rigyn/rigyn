@@ -48,13 +48,14 @@ async function assertProtectedDirectory(path: string): Promise<void> {
   }
   let selected = path;
   const root = parse(path).root;
+  const filesystemOwner = (await lstat(root)).uid;
   while (selected !== root) {
     const parent = dirname(selected);
     const information = await lstat(parent);
     if (!information.isDirectory() || information.isSymbolicLink()) {
       throw new Error(`Process lock ancestor must be a real directory: ${parent}`);
     }
-    const trustedOwner = information.uid === currentUid || information.uid === 0;
+    const trustedOwner = information.uid === currentUid || information.uid === 0 || information.uid === filesystemOwner;
     const ownerCanReplace = !trustedOwner && (information.mode & 0o200) !== 0;
     const sharedWritable = (information.mode & 0o022) !== 0;
     const stickyProtectsChild = (information.mode & 0o1000) !== 0

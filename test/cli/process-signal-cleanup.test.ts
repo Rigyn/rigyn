@@ -50,6 +50,25 @@ async function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{ c
   });
 }
 
+async function linuxChildPids(pid: number): Promise<number[]> {
+  const contents = await readFile(`/proc/${pid}/task/${pid}/children`, "utf8");
+  return contents.trim() === "" ? [] : contents.trim().split(/\s+/u).map(Number);
+}
+
+async function waitForPidExit(pid: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
+
 async function signalFixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "harness-process-signal-"));
   const workspace = join(root, "workspace");
@@ -342,6 +361,57 @@ test("RPC SIGTERM bounds a provider request that never observes cancellation", {
   assert.equal(child.kill("SIGTERM"), true);
   assert.deepEqual(await waitForExit(child), { code: 143, signal: null });
   await waitForFile(fixture.disposed);
+});
+
+test("Node 26 RPC startup does not create its stdin relay before runtime loading succeeds", {
+  skip: process.platform !== "linux" || Number(process.versions.node.split(".", 1)[0]) < 26,
+}, async (t) => {
+  const fixture = await signalFixture(t);
+  const activationStarted = join(fixture.root, "delayed-activation-started");
+  const extension = join(fixture.workspace, "delayed-startup-extension.mjs");
+  const blockedDatabaseParent = join(fixture.root, "blocked-database-parent");
+  await writeFile(blockedDatabaseParent, "not a directory");
+  const configDirectory = join(fixture.configHome, "rigyn");
+  await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(join(configDirectory, "config.jsonc"), `${JSON.stringify({
+    databasePath: join(blockedDatabaseParent, "sessions.sqlite"),
+  })}\n`, { mode: 0o600 });
+  await writeFile(extension, `
+    import { writeFileSync } from "node:fs";
+    export default function activate() {
+      writeFileSync(${JSON.stringify(activationStarted)}, "started");
+      const deadline = Date.now() + 500;
+      while (Date.now() < deadline) {}
+    }
+  `);
+  const child = fixture.spawnHarness([
+    "rpc",
+    "--extension", extension,
+    "--no-extensions",
+    "--workspace", fixture.workspace,
+  ], "pipe");
+  await waitForFile(activationStarted);
+  assert.deepEqual(await linuxChildPids(child.pid!), []);
+  assert.deepEqual(await waitForExit(child), { code: 1, signal: null });
+  assert.match(fixture.output(child), /Directory creation path has a symbolic or non-canonical existing ancestor/u);
+});
+
+test("Node 26 RPC stdin relay exits when its parent is killed", {
+  skip: process.platform !== "linux" || Number(process.versions.node.split(".", 1)[0]) < 26,
+}, async (t) => {
+  const fixture = await signalFixture(t);
+  const child = fixture.spawnHarness([
+    "rpc",
+    "--no-extensions",
+    "--workspace", fixture.workspace,
+  ], "pipe");
+  child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" })}\n`);
+  await waitForOutput(() => fixture.output(child), '"id":1');
+  const descendants = await linuxChildPids(child.pid!);
+  assert.equal(descendants.length, 1, `expected one RPC stdin relay, received ${descendants.join(", ")}`);
+  assert.equal(child.kill("SIGKILL"), true);
+  assert.deepEqual(await waitForExit(child), { code: null, signal: "SIGKILL" });
+  await Promise.all(descendants.map(async (pid) => await waitForPidExit(pid)));
 });
 
 test("a repeated termination signal force-exits with the conventional status when disposal is broken", {

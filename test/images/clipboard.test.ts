@@ -145,7 +145,7 @@ test("command runner enforces output and time bounds without a shell", async () 
   const environment = { PATH: process.env.PATH };
   const limited = await runClipboardCommand({
     command: process.execPath,
-    args: ["-e", "process.stdout.write(Buffer.alloc(1024))"],
+    args: ["-e", "require('node:fs').writeFileSync(1, Buffer.alloc(1024))"],
     environment,
     timeoutMs: 2_000,
     maxOutputBytes: 16,

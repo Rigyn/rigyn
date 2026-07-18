@@ -21,6 +21,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { managedCommand, posixLauncher, windowsLauncher } from "../../scripts/lifecycle-common.mjs";
+import { runBoundedCommand } from "../../scripts/bounded-command.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -150,68 +151,10 @@ function npmInvocation(args) {
 
 async function runCommand(command, args, options) {
   const invocation = commandInvocation(command, args, { environment: options.env });
-  const child = spawn(invocation.command, invocation.args, {
-    cwd: options.cwd,
-    env: options.env,
-    detached: process.platform !== "win32",
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
+  return await runBoundedCommand(invocation.command, invocation.args, {
+    ...options,
+    maxOutputBytes: MAX_OUTPUT_BYTES,
   });
-  const stdout = [];
-  const stderr = [];
-  let stdoutBytes = 0;
-  let stderrBytes = 0;
-  let outputFailure;
-  const stop = () => {
-    stopProcessTree(child);
-  };
-  const capture = (target, chunk, stream) => {
-    if (outputFailure !== undefined) return;
-    if (stream === "stdout") stdoutBytes += chunk.byteLength;
-    else stderrBytes += chunk.byteLength;
-    if (stdoutBytes + stderrBytes > MAX_OUTPUT_BYTES) {
-      outputFailure = new Error(`${options.label} output exceeded ${MAX_OUTPUT_BYTES} bytes`);
-      stop();
-      return;
-    }
-    target.push(chunk);
-  };
-  child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
-  child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
-
-  const result = await new Promise((resolveResult, reject) => {
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      outputFailure = new Error(`${options.label} timed out after ${options.timeoutMs} ms`);
-      stop();
-    }, options.timeoutMs);
-    timeout.unref();
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolveResult({ code, signal });
-    });
-  });
-  const output = {
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
-  };
-  if (outputFailure !== undefined) throw outputFailure;
-  if (result.code !== 0) {
-    throw new Error(
-      `${options.label} failed${result.code === null ? ` with signal ${result.signal ?? "unknown"}` : ` with exit ${result.code}`}\n${output.stderr.slice(-8192)}`,
-    );
-  }
-  return output;
 }
 
 async function runNpm(args, options) {
@@ -360,6 +303,10 @@ function assertSafePackageFiles(files) {
     "examples/dynamic-resources/SKILL.md",
     "examples/custom-overlay.mjs",
     "examples/brokered-provider/runtime/index.mjs",
+    "examples/child-coordinator/extension.json",
+    "examples/child-coordinator/runtime/index.mjs",
+    "examples/approval-gate/extension.json",
+    "examples/approval-gate/runtime/index.mjs",
     "examples/shared-events/runtime/sender.mjs",
     "examples/state-migration/runtime/index.mjs",
     "examples/reload-safety/runtime/index.mjs",
@@ -455,7 +402,7 @@ test("packed artifact installs into a blank home and completes an offline extens
   };
   const bootstrapEnvironment = {
     ...installerEnvironment,
-    npm_config_offline: "false",
+    npm_config_offline: "true",
   };
   assert.equal(
     installerEnvironment.npm_execpath,

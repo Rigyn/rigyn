@@ -9,7 +9,7 @@ import {
 } from "./components.js";
 import type { Theme, ThemeRole } from "./theme.js";
 import { style } from "./theme.js";
-import { renderMarkdownMessageLines, type MarkdownSpan } from "./markdown.js";
+import { renderMarkdownMessageLines, renderSyntaxCodeLines, type MarkdownSpan } from "./markdown.js";
 import {
   MAX_TERMINAL_IMAGE_AGGREGATE_BYTES,
   MAX_TERMINAL_IMAGE_COUNT,
@@ -101,13 +101,6 @@ function collapsedReasoningSummary(value: string): string {
     .trim();
 }
 
-function toolRole(entry: TranscriptEntry): ThemeRole {
-  if (entry.status === "running") return "toolRunning";
-  if (entry.status === "completed") return "toolSuccess";
-  if (entry.status === "failed" || entry.status === "in_doubt") return "toolError";
-  return "toolPending";
-}
-
 function durationText(milliseconds: number): string {
   if (milliseconds < 1_000) return `${milliseconds}ms`;
   const seconds = Math.floor(milliseconds / 1_000);
@@ -160,16 +153,21 @@ function toolStatusText(entry: TranscriptEntry): string | undefined {
   if (entry.title === "shell" || entry.title === "bash") return shellStatus(entry, metadata);
   if (entry.status === "failed") return "failed";
   if (entry.status !== "completed") return undefined;
+  const durationMs = metadata?.durationMs;
+  const duration = typeof durationMs === "number" && Number.isSafeInteger(durationMs) && durationMs >= 0
+    ? durationText(durationMs)
+    : undefined;
+  const final = (value: string) => [value, duration].filter((part): part is string => part !== undefined).join(" · ");
 
   if (entry.title === "read") {
     const mediaType = metadata?.mediaType;
     if (typeof mediaType === "string" && mediaType !== "") {
       const width = metadataInteger(metadata, "width");
       const height = metadataInteger(metadata, "height");
-      return width === undefined || height === undefined ? mediaType : `${mediaType} · ${width}×${height}`;
+      return final(width === undefined || height === undefined ? mediaType : `${mediaType} · ${width}×${height}`);
     }
     const shownLines = metadataInteger(metadata, "shownLines");
-    if (shownLines !== undefined) return `${quantity(shownLines, "line")} read${metadata?.truncated === true ? " · limited" : ""}`;
+    if (shownLines !== undefined) return final(`${quantity(shownLines, "line")} read${metadata?.truncated === true ? " · limited" : ""}`);
   }
   const count = metadataInteger(metadata, "count");
   if (count !== undefined) {
@@ -180,13 +178,13 @@ function toolStatusText(entry: TranscriptEntry): string | undefined {
         : entry.title === "ls"
           ? quantity(count, "entry", "entries")
           : undefined;
-    if (label !== undefined) return `${label}${metadata?.truncated === true ? " · limited" : ""}`;
+    if (label !== undefined) return final(`${label}${metadata?.truncated === true ? " · limited" : ""}`);
   }
   const replacements = metadataInteger(metadata, "replacements");
-  if (entry.title === "edit" && replacements !== undefined) return quantity(replacements, "replacement");
+  if (entry.title === "edit" && replacements !== undefined) return final(quantity(replacements, "replacement"));
   const bytes = metadataInteger(metadata, "bytes");
-  if (entry.title === "write" && bytes !== undefined) return `${quantity(bytes, "byte")} written`;
-  return "done";
+  if (entry.title === "write" && bytes !== undefined) return final(`${quantity(bytes, "byte")} written`);
+  return final("done");
 }
 
 function toolDisplayName(value: string | undefined): string {
@@ -217,6 +215,7 @@ function boundedSpans(spans: readonly RuntimeUiSpan[], width: number): RuntimeUi
 }
 
 function toolHeaderLine(entry: TranscriptEntry, width: number, theme: Theme): RenderedLine {
+  const unicode = theme.glyphs.horizontal === "─";
   const glyph = entry.status === "completed"
     ? theme.glyphs.success
     : entry.status === "failed"
@@ -224,21 +223,56 @@ function toolHeaderLine(entry: TranscriptEntry, width: number, theme: Theme): Re
       : entry.status === "in_doubt"
         ? "!"
         : entry.status === "running"
-          ? theme.glyphs.pending
-          : theme.glyphs.tool;
+          ? (unicode ? "●" : "*")
+          : (unicode ? "○" : "o");
+  const glyphRole: ThemeRole = entry.status === "completed"
+    ? "success"
+    : entry.status === "failed"
+      ? "error"
+      : entry.status === "in_doubt"
+        ? "warning"
+        : entry.status === "running"
+          ? "working"
+          : "muted";
   const status = toolStatusText(entry);
-  const badge = toolFileBadge(entry);
+  const badge = width < 32 ? undefined : toolFileBadge(entry);
   const summary = entry.summary === undefined ? "" : sanitizeTerminalText(entry.summary).replaceAll("\n", " ").trim();
   const detail = [badge, summary].filter((part): part is string => part !== undefined && part !== "").join(" ");
+  const rail = `${unicode ? "│" : "|"} `;
+  const glyphText = `${glyph} `;
+  const name = toolDisplayName(entry.title);
+  const compactStatus = entry.status === "running"
+    ? entry.toolData?.progress?.elapsedMs === undefined ? "running" : durationText(entry.toolData.progress.elapsedMs)
+    : entry.title === "shell" || entry.title === "bash"
+      ? status?.replace(/^failed · /u, "").replace(/^done · /u, "")
+      : entry.status === "pending"
+        ? "queued"
+      : entry.status === "in_doubt"
+          ? "unknown"
+          : entry.status === "failed"
+            ? "failed"
+            : entry.status === "completed" && width >= 32
+              ? status?.replace(/(\d+ lines?) read/u, "$1")
+              : undefined;
+  const fixedWidth = cellWidth(rail) + cellWidth(glyphText) + cellWidth(name);
+  const fullStatus = status === undefined ? "" : ` · ${status}`;
+  const completeDetailWidth = detail === "" ? 0 : cellWidth(` · ${detail}`);
+  const selectedStatus = fixedWidth + cellWidth(fullStatus) + completeDetailWidth <= width
+    ? fullStatus
+    : compactStatus === undefined ? "" : ` · ${compactStatus}`;
+  const remaining = Math.max(0, width - fixedWidth - cellWidth(selectedStatus));
+  const selectedDetail = detail === "" || remaining < 4 ? "" : truncateCells(` · ${detail}`, remaining);
+  const spans: RuntimeUiSpan[] = [
+    { text: rail, role: "muted" },
+    { text: glyphText, role: glyphRole },
+    { text: name, role: "title" },
+    ...(selectedDetail === "" ? [] : [{ text: selectedDetail, role: "muted" as const }]),
+    ...(selectedStatus === "" ? [] : [{ text: selectedStatus, role: entry.status === "failed" ? "error" as const : "muted" as const }]),
+  ];
   return {
     text: "",
-    role: toolRole(entry),
-    spans: boundedSpans([
-      { text: `${glyph} `, role: toolRole(entry) },
-      { text: toolDisplayName(entry.title), role: "title" },
-      ...(detail === "" ? [] : [{ text: ` · ${detail}`, role: "muted" as const }]),
-      ...(status === undefined ? [] : [{ text: ` · ${status}`, role: entry.status === "failed" ? "error" as const : "muted" as const }]),
-    ], width),
+    role: "muted",
+    spans: boundedSpans(spans, width),
   };
 }
 
@@ -260,11 +294,69 @@ function wrappedToolLines(
   });
 }
 
+function liveToolLines(entry: TranscriptEntry, width: number): RenderedLine[] | undefined {
+  if (entry.status !== "running") return undefined;
+  const partial = entry.toolData?.partialResult;
+  if (partial !== undefined) {
+    const role: ThemeRole = partial.isError ? "error" : "code";
+    return [
+      { text: `   partial result${partial.truncated === true ? " · limited" : ""}`, role },
+      ...wrappedToolLines(partial.content, width, role),
+    ];
+  }
+  const progress = entry.toolData?.progress;
+  if (progress === undefined) return undefined;
+  const channels = [
+    { label: "stdout", text: progress.stdout, bytes: progress.stdoutBytes, role: "code" as const },
+    { label: "stderr", text: progress.stderr, bytes: progress.stderrBytes, role: "warning" as const },
+  ].filter((channel) => channel.text !== "");
+  const perChannel = channels.length > 1 ? 1 : 4;
+  const lines = channels.flatMap((channel): RenderedLine[] => {
+    const rendered = wrappedToolLines(channel.text, width, channel.role);
+    const output = rendered.slice(-perChannel);
+    return [
+      { text: `   ${channel.label} · ${quantity(channel.bytes, "byte")}${output.length < rendered.length ? " · tail" : ""}`, role: channel.role },
+      ...output,
+    ];
+  });
+  if (progress.truncated) lines.push({ text: "   live output · limited", role: "warning" });
+  return lines;
+}
+
+function boundedToolLines(
+  lines: readonly RenderedLine[],
+  tail: boolean,
+  limit: number,
+  width: number,
+  theme: Theme,
+): RenderedLine[] {
+  if (lines.length <= limit) return [...lines];
+  const visible = tail ? lines.slice(-limit) : lines.slice(0, limit);
+  const remaining = lines.length - visible.length;
+  const omission = theme.glyphs.pending === "." ? "..." : "…";
+  const marker = truncateCells(`${omission} +${remaining} ${tail ? "earlier" : "more"} rows`, Math.max(1, width - 6));
+  return tail
+    ? [{ text: marker, role: "muted" }, ...visible]
+    : [...visible, { text: marker, role: "muted" }];
+}
+
+function syntaxReadLines(entry: TranscriptEntry, width: number): RenderedLine[] | undefined {
+  if (entry.title !== "read" || entry.status === "running" || entry.text === "") return undefined;
+  const input = entry.toolData?.input;
+  if (input === null || typeof input !== "object" || Array.isArray(input) || typeof input.path !== "string") return undefined;
+  const languageHint = extname(input.path).slice(1);
+  if (languageHint === "") return undefined;
+  const lines = renderSyntaxCodeLines("   ", entry.text, Math.max(1, width - 2), languageHint);
+  return lines.length === 0 ? undefined : lines;
+}
+
 function branchedToolLines(lines: readonly RenderedLine[], theme: Theme): RenderedLine[] {
   const unicode = theme.glyphs.horizontal === "─";
-  return lines.map((line, index) => ({
+  const rail = `${unicode ? "│" : "|"} `;
+  return lines.map((line) => ({
     ...line,
-    text: `  ${unicode ? (index === lines.length - 1 ? "└" : "│") : (index === lines.length - 1 ? "\\" : "|")} ${line.text.startsWith("   ") ? line.text.slice(3) : line.text}`,
+    text: line.spans === undefined ? `${rail}${line.text}` : line.text,
+    ...(line.spans === undefined ? {} : { spans: [{ text: rail, role: "muted" as const }, ...line.spans] }),
     fill: false,
   }));
 }
@@ -283,6 +375,29 @@ function structuralLines(value: RuntimeUiBlock | undefined, width: number): Rend
   }
 }
 
+function structuralEditorBlock(
+  value: RuntimeUiBlock | undefined,
+  width: number,
+  maximumLines: number,
+): EditorBlock | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const block = sanitizeRuntimeUiBlock(value, { width, maxLines: maximumLines });
+    if (block.cursor === undefined || block.lines.length === 0) return undefined;
+    return {
+      lines: block.lines.map((line) => ({
+        text: line.spans.map((span) => span.text).join(""),
+        role: "accent",
+        spans: line.spans,
+        ...(line.fill === undefined ? {} : { fill: line.fill }),
+      })),
+      cursor: block.cursor,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function hangingLines(prefix: string, value: string, width: number, role: ThemeRole): RenderedLine[] {
   const safePrefix = truncateCells(prefix, Math.max(1, width - 1));
   const available = Math.max(1, width - cellWidth(safePrefix));
@@ -293,7 +408,23 @@ function hangingLines(prefix: string, value: string, width: number, role: ThemeR
   }));
 }
 
-function userMessageLines(value: string, width: number): RenderedLine[] {
+function userMessageLines(value: string, width: number, theme: Theme): RenderedLine[] {
+  const unicode = theme.glyphs.horizontal === "─";
+  const label = ` You ${unicode ? "›" : ">"} `;
+  const content = wrapCells(value, Math.max(1, width - cellWidth(label) - 1));
+  const padding = { text: "", role: "userMessage" as const, fill: true };
+  return [
+    padding,
+    ...content.map((line, index): RenderedLine => ({
+      text: `${index === 0 ? label : " ".repeat(cellWidth(label))}${line}`,
+      role: "userMessage",
+      fill: true,
+    })),
+    padding,
+  ];
+}
+
+function legacyUserMessageLines(value: string, width: number): RenderedLine[] {
   const padding = { text: "", role: "userMessage" as const, fill: true };
   const content = wrapCells(value, Math.max(1, width - 2)).map((line) => ({
     text: ` ${line}`,
@@ -320,6 +451,7 @@ function transcriptLines(
   toolRenderBlocks?: ReadonlyMap<string, ToolRenderSlots>,
   sessionRenderBlocks?: ReadonlyMap<string, RuntimeUiBlock>,
   semanticZones = false,
+  messageMarkers = false,
   imageOptions: {
     resolveImage?: TranscriptRenderOptions["resolveImage"] | undefined;
     maxImageRows?: number | undefined;
@@ -369,7 +501,10 @@ function transcriptLines(
       return [...separator, ...startupLines(entry.expanded === true ? entry.text : entry.compactText ?? entry.text, width)];
     }
     if (entry.kind === "user") {
-      const lines = [...(entry.text === "" ? [] : userMessageLines(entry.text, width)), ...renderedImages(entry)];
+      const lines = [
+        ...(entry.text === "" ? [] : messageMarkers ? userMessageLines(entry.text, width, theme) : legacyUserMessageLines(entry.text, width)),
+        ...renderedImages(entry),
+      ];
       return [...separator, ...withSemanticZone(lines)];
     }
     if (entry.kind === "reasoning" && entry.expanded !== true) {
@@ -381,7 +516,16 @@ function transcriptLines(
       )];
     }
     if (entry.kind === "assistant" || entry.kind === "reasoning") {
-      const lines = [...(entry.text === "" ? [] : renderMarkdownMessageLines(prefix, entry.text, width, role)), ...renderedImages(entry)];
+      const messagePrefix = prefix;
+      const lines = [
+        ...(entry.text === "" ? [] : renderMarkdownMessageLines(
+          messagePrefix,
+          entry.text,
+          width,
+          role,
+        )),
+        ...renderedImages(entry),
+      ];
       const toolBearing = entry.hasToolCalls === true || entries[index + 1]?.kind === "tool";
       return [...separator, ...(entry.kind === "assistant" && !toolBearing ? withSemanticZone(lines) : lines)];
     }
@@ -399,40 +543,16 @@ function transcriptLines(
     if (entry.kind !== "tool") return [...separator, ...hangingLines(prefix, entry.text, width, role), ...renderedImages(entry)];
     const headerLine = toolHeaderLine(entry, width, theme);
     const failed = entry.status === "failed" || entry.status === "in_doubt";
-    const output = entry.text === ""
+    const output = liveToolLines(entry, Math.max(1, width - 5)) ?? syntaxReadLines(entry, width) ?? (entry.text === ""
       ? []
-      : wrappedToolLines(entry.text, Math.max(1, width - 4), failed ? "error" : entry.status === "running" ? "toolRunning" : "code");
+      : wrappedToolLines(entry.text, Math.max(1, width - 5), failed ? "error" : entry.status === "running" ? "toolRunning" : "code"));
     const input = entry.inputPreview === undefined || entry.inputPreview === ""
       ? []
-      : wrappedToolLines(entry.inputPreview, Math.max(1, width - 4), toolInputRole);
-    const body = failed
-      ? [...output, ...input]
-      : [...input, ...output];
-    let resultLines: RenderedLine[];
-    if (body.length === 0) resultLines = [];
-    else if (entry.expanded) resultLines = body;
-    else {
-      const tail = entry.title === "shell" || entry.title === "bash";
-      const limit = tail
-        ? 6
-        : entry.title === "read"
-          ? 6
-          : entry.title === "edit" || entry.title === "write" || entry.title === "apply_patch"
-            ? 8
-            : 5;
-      const visible = tail ? body.slice(-limit) : body.slice(0, limit);
-      const remaining = body.length - visible.length;
-      const omission = theme.glyphs.pending === "." ? "..." : "…";
-      resultLines = [
-        ...(remaining === 0 || !tail
-          ? []
-          : [{ text: `${omission} (${remaining} earlier lines)`, role: "muted" as const }]),
-        ...visible,
-        ...(remaining === 0 || tail
-          ? []
-          : [{ text: `${omission} (${remaining} more lines)`, role: "muted" as const }]),
-      ];
-    }
+      : wrappedToolLines(entry.inputPreview, Math.max(1, width - 5), toolInputRole);
+    const outputLines = entry.status === "running"
+      ? boundedToolLines(output, true, 6, width, theme)
+      : output;
+    const body = failed ? [...outputLines, ...input] : [...input, ...outputLines];
     const custom = entry.callId === undefined ? undefined : toolRenderBlocks?.get(entry.callId);
     const customCall = structuralLines(custom?.call, width);
     const customResult = structuralLines(custom?.result, width);
@@ -440,7 +560,7 @@ function transcriptLines(
       return [
         ...separator,
         ...(customCall ?? [headerLine]),
-        ...(customResult ?? branchedToolLines(resultLines, theme)),
+        ...(customResult ?? branchedToolLines(body, theme)),
         ...renderedImages(entry),
       ];
     }
@@ -449,7 +569,7 @@ function transcriptLines(
       ...separator,
       border,
       headerLine,
-      ...branchedToolLines(resultLines, theme),
+      ...branchedToolLines(body, theme),
       border,
       ...renderedImages(entry),
     ];
@@ -472,6 +592,7 @@ function editorBlock(
   let column = cellWidth(prefix);
   let cursorRow = 0;
   let cursorColumn = column;
+  const indentation = cellWidth(continuation);
 
   const nextLine = () => {
     lines.push(continuation);
@@ -479,22 +600,48 @@ function editorBlock(
     column = cellWidth(continuation);
   };
 
-  for (let index = 0; index <= graphemes.length; index += 1) {
+  for (let index = 0; index < graphemes.length; index += 1) {
+    const grapheme = graphemes[index] ?? "";
+    const previous = graphemes[index - 1];
+    const startsWord = grapheme !== "\n" && !/^\s$/u.test(grapheme)
+      && (index === 0 || previous === "\n" || /^\s$/u.test(previous ?? ""));
+    if (startsWord && column > indentation) {
+      let wordWidth = 0;
+      for (let offset = index; offset < graphemes.length; offset += 1) {
+        const selected = graphemes[offset] ?? "";
+        if (selected === "\n" || /^\s$/u.test(selected)) break;
+        wordWidth += graphemeWidth(selected);
+      }
+      if (column + wordWidth > width) {
+        const current = lines[row] ?? "";
+        const trimmed = current.replace(/ +$/u, "");
+        column -= cellWidth(current) - cellWidth(trimmed);
+        lines[row] = trimmed;
+        nextLine();
+      }
+    }
     if (index === cursor) {
       if (column >= width) nextLine();
       cursorRow = row;
       cursorColumn = column;
     }
-    if (index === graphemes.length) break;
-    const grapheme = graphemes[index] ?? "";
     if (grapheme === "\n") {
       nextLine();
       continue;
     }
     const next = graphemeWidth(grapheme);
+    if (grapheme === " " && column + next > width) {
+      nextLine();
+      continue;
+    }
     if (column > cellWidth(continuation) && column + next > width) nextLine();
     lines[row] = `${lines[row] ?? ""}${grapheme}`;
     column += next;
+  }
+  if (cursor === graphemes.length) {
+    if (column >= width) nextLine();
+    cursorRow = row;
+    cursorColumn = column;
   }
 
   const start = Math.max(0, Math.min(cursorRow - maximumLines + 1, lines.length - maximumLines));
@@ -508,62 +655,189 @@ function editorBlock(
   };
 }
 
+interface OverlayRender {
+  lines: RenderedLine[];
+  cursor: { row: number; column: number };
+}
+
+function tailCells(value: string, maximum: number): string {
+  if (maximum <= 0) return "";
+  const safe = sanitizeTerminalText(value).replaceAll("\n", " ");
+  if (cellWidth(safe) <= maximum) return safe;
+  const selected: string[] = [];
+  let width = 0;
+  const graphemes = splitGraphemes(safe);
+  for (let index = graphemes.length - 1; index >= 0; index -= 1) {
+    const grapheme = graphemes[index]!;
+    const next = graphemeWidth(grapheme);
+    if (width + next > maximum) break;
+    selected.push(grapheme);
+    width += next;
+  }
+  return selected.reverse().join("");
+}
+
+function pickerItemText(item: PickerItem, maximum: number, selected: boolean): string {
+  const detail = item.detail === undefined ? "" : ` — ${item.detail}`;
+  const complete = `${item.label}${detail}`;
+  if (!selected || item.tree === undefined || cellWidth(complete) <= maximum) return truncateCells(complete, maximum);
+  const active = item.tree.active ? item.label.startsWith("●") ? "● " : "* " : "  ";
+  const available = Math.max(0, maximum - cellWidth(active) - 1);
+  return `${active}…${tailCells(item.label, available)}`;
+}
+
+function deckFrame(
+  overlay: NonNullable<TuiViewState["overlay"]>,
+  content: readonly RenderedLine[],
+  cursor: { row: number; column: number },
+  width: number,
+  height: number,
+  border: string,
+): OverlayRender {
+  if (width < 4 || height < 2) return {
+    lines: content.slice(0, Math.max(1, height)).map((line) => ({ ...line, text: truncateCells(line.text, width) })),
+    cursor: { row: Math.max(0, Math.min(height - 1, cursor.row)), column: Math.max(0, Math.min(width - 1, cursor.column)) },
+  };
+  const innerWidth = width;
+  const count = overlay.items.length === 0 ? "0" : `${overlay.selected + 1}/${overlay.items.length}`;
+  const title = sanitizeTerminalText(overlay.title).replaceAll("\n", " ");
+  const label = truncateCells(`[ ${title} · ${count} ]`, Math.max(1, innerWidth - 3));
+  const top: RenderedLine = {
+    text: `${border.repeat(2)} ${label} ${border.repeat(Math.max(0, innerWidth - cellWidth(label) - 4))}`,
+    role: "accent",
+  };
+  const selected = content.slice(0, Math.max(0, height - 2)).map((line): RenderedLine => ({
+    text: padCells(line.text, innerWidth),
+    role: line.role,
+    fill: true,
+  }));
+  const bottom: RenderedLine = { text: border.repeat(innerWidth), role: "accent" };
+  const lines = [top, ...selected, bottom].slice(0, height);
+  return {
+    lines,
+    cursor: {
+      row: Math.max(0, Math.min(lines.length - 1, cursor.row + 1)),
+      column: Math.max(0, Math.min(width - 1, cursor.column)),
+    },
+  };
+}
+
+function deckSeparator(): RenderedLine {
+  return { text: "", role: "muted" };
+}
+
+function deckStatus(overlay: NonNullable<TuiViewState["overlay"]>, width: number): RenderedLine[] {
+  const states = overlay.states?.filter((state) => state.trim() !== "").join(" · ") ?? "";
+  return [states, overlay.status ?? ""]
+    .filter((value) => value !== "")
+    .flatMap((value) => wrapCells(value, width).map((text): RenderedLine => ({ text, role: "muted" })));
+}
+
+function actionLines(
+  overlay: NonNullable<TuiViewState["overlay"]>,
+  width: number,
+  fallback: string,
+  maximumLines = 5,
+): RenderedLine[] {
+  const hints = overlay.hints === undefined || overlay.hints.length === 0 ? [fallback] : [...overlay.hints];
+  const parts = hints.flatMap((hint) => hint.split(/\s+·\s+/u))
+    .map((part) => part.trim()
+      .replace(/\bUp\/Down\b/gu, "↑/↓")
+      .replace(/\bLeft\/Right\b/gu, "←/→")
+      .replace(/\bAlt\+Up\/Alt\+Down\b/gu, "Alt+↑/↓")
+      .replace(/\bCtrl\+Up\/Ctrl\+Down\b/gu, "Ctrl+↑/↓"))
+    .filter(Boolean);
+  const rows: string[] = [];
+  for (const part of parts) {
+    const current = rows.at(-1);
+    const candidate = current === undefined ? part : `${current} · ${part}`;
+    if (current !== undefined && cellWidth(` ${candidate}`) <= width) rows[rows.length - 1] = candidate;
+    else rows.push(part);
+  }
+  if (rows.length > maximumLines) {
+    if (maximumLines === 1) {
+      const primary = parts.find((part) => /\b(?:change|select|open|save|delete|next)\b/iu.test(part));
+      const dismissal = parts.find((part) => /\b(?:cancel|close)\b/iu.test(part));
+      if (primary !== undefined && dismissal !== undefined && primary !== dismissal) {
+        const compactPrimary = primary.replace(/Enter\/Space\/Right to change/giu, "Enter/Space change");
+        const suffix = ` · ${dismissal}`;
+        const primaryWidth = width - 1 - cellWidth(suffix);
+        if (primaryWidth > 0) rows.splice(0, rows.length, `${truncateCells(compactPrimary, primaryWidth)}${suffix}`);
+      }
+    }
+  }
+  if (rows.length > maximumLines) {
+    const dismissal = rows.findLast((row) => /\b(?:cancel|close)\b/iu.test(row));
+    const candidates = rows.filter((row) => row !== dismissal);
+    const preferred = candidates.filter((row) => /\b(?:navigate|page|change|toggle|select|open|save|delete|next)\b/iu.test(row));
+    const keep = Math.max(0, maximumLines - (dismissal === undefined ? 0 : 1));
+    const chosen = [...preferred, ...candidates.filter((row) => !preferred.includes(row))].slice(0, keep);
+    rows.splice(0, rows.length, ...chosen, ...(dismissal === undefined ? [] : [dismissal]));
+  }
+  return rows.map((text): RenderedLine => ({ text: truncateCells(` ${text}`, width), role: "muted" }));
+}
+
 function overlayLines(
   overlay: NonNullable<TuiViewState["overlay"]>,
   width: number,
   height: number,
   border = "─",
-): { lines: RenderedLine[]; cursor: { row: number; column: number } } {
-  const queryPrefix = overlay.queryLabel ?? "search> ";
-  const queryWidth = Math.max(1, width - cellWidth(queryPrefix));
-  const query = truncateCells(overlay.query.replaceAll("\n", " "), queryWidth);
-  const searchable = overlay.query !== "" || overlay.items.length > 10;
-  const top: RenderedLine[] = [
-    { text: border.repeat(width), role: "accent" },
-    { text: ` ${truncateCells(overlay.title, Math.max(1, width - 2))}:`, role: "accent" },
-  ];
-  if (overlay.status !== undefined) top.push({ text: truncateCells(overlay.status, width), role: "warning" });
-  const queryRow = searchable ? top.length : 1;
-  if (searchable) top.push({ text: `${queryPrefix}${query}`, role: "accent" });
-
-  const fullAction = " ↑↓ navigate · Enter select · Esc/Ctrl+C cancel";
-  const action = {
-    text: cellWidth(fullAction) <= width ? fullAction : truncateCells(" Enter select · Esc cancel", width),
-    role: "muted" as const,
-  };
-  const bottom: RenderedLine[] = [action, { text: border.repeat(width), role: "accent" }];
-  const contentRoom = Math.max(1, height - top.length - bottom.length);
-  const hints = (overlay.hints ?? []).flatMap((hint) => {
-    const selected = hint.split(/\s+·\s+/u).filter((part) => !/^(?:↑\/?↓ navigate|Enter select|Esc(?:\/Ctrl\+C)? cancel)$/iu.test(part.trim()));
-    return selected.length === 0 ? [] : [{ text: truncateCells(selected.join(" · "), width), role: "muted" as const }];
-  });
-  const hintCount = Math.min(hints.length, Math.max(0, contentRoom - 1));
-  const visible = Math.max(1, contentRoom - hintCount);
+): OverlayRender {
+  const innerWidth = width;
+  const innerHeight = Math.max(1, height - 2);
+  const queryPrefix = "SEARCH  ";
+  const query = truncateCells(overlay.query.replaceAll("\n", " "), Math.max(1, innerWidth - cellWidth(queryPrefix)));
+  const top: RenderedLine[] = deckStatus(overlay, innerWidth);
+  const queryRow = top.length;
+  top.push({ text: `${queryPrefix}${query}`, role: "accent" });
+  const selectedItem = overlay.items[overlay.selected];
+  const detail = selectedItem?.description ?? selectedItem?.detail;
+  const showRegions = innerHeight >= 7;
+  const actions = actionLines(
+    overlay,
+    innerWidth,
+    "Up/Down navigate · Enter select · Esc cancel",
+    Math.min(5, Math.max(1, innerHeight - top.length - (showRegions ? 2 : 0) - 1)),
+  );
+  const detailLines = detail === undefined || innerHeight < 8
+    ? []
+    : wrapCells(`DETAIL  ${detail}`, innerWidth).slice(0, 2).map((text): RenderedLine => ({ text, role: "muted" }));
+  const dividerCount = showRegions ? 2 + (detailLines.length > 0 ? 1 : 0) : 0;
+  const contentRoom = Math.max(1, innerHeight - top.length - actions.length - detailLines.length - dividerCount);
   const content: RenderedLine[] = [];
   if (overlay.items.length === 0) {
-    content.push(...wrapCells(`  ${overlay.emptyMessage ?? "No matches"}`, width).slice(0, visible).map((text) => ({
+    content.push(...wrapCells(` ${overlay.emptyMessage ?? "No matches"}`, innerWidth).slice(0, contentRoom).map((text) => ({
       text,
       role: "muted" as const,
     })));
   } else {
-    const start = Math.max(0, Math.min(overlay.selected - visible + 1, overlay.items.length - visible));
-    for (const [offset, item] of overlay.items.slice(start, start + visible).entries()) {
+    const start = Math.max(0, Math.min(overlay.selected - contentRoom + 1, overlay.items.length - contentRoom));
+    for (const [offset, item] of overlay.items.slice(start, start + contentRoom).entries()) {
       const index = start + offset;
-      const marker = index === overlay.selected ? ">" : " ";
-      const detail = item.detail === undefined ? "" : ` — ${item.detail}`;
+      const selected = index === overlay.selected;
+      const { detail: _detail, ...labelItem } = item;
       content.push({
-        text: `${marker} ${truncateCells(`${item.label}${detail}`, Math.max(1, width - 2))}`,
-        role: index === overlay.selected ? "selection" : "muted",
+        text: `${selected ? (border === "─" ? "›" : ">") : " "} ${pickerItemText(labelItem, Math.max(1, innerWidth - 2), selected)}`,
+        role: selected ? "selection" : "muted",
       });
     }
   }
-  const lines = [...top, ...hints.slice(0, hintCount), ...content, ...bottom];
-  return {
-    lines: lines.slice(0, height),
-    cursor: searchable
-      ? { row: queryRow, column: Math.min(width - 1, cellWidth(queryPrefix) + cellWidth(query)) }
-      : { row: Math.min(height - 1, queryRow), column: 1 },
-  };
+  const body = [
+    ...top,
+    ...(showRegions ? [deckSeparator()] : []),
+    ...content,
+    ...(detailLines.length === 0 ? [] : [deckSeparator(), ...detailLines]),
+    ...(showRegions ? [deckSeparator()] : []),
+    ...actions,
+  ];
+  return deckFrame(
+    overlay,
+    body,
+    { row: queryRow, column: Math.min(innerWidth - 1, cellWidth(queryPrefix) + cellWidth(query)) },
+    width,
+    height,
+    border,
+  );
 }
 
 function settingsOverlayLines(
@@ -571,52 +845,58 @@ function settingsOverlayLines(
   width: number,
   height: number,
   border: string,
-): { lines: RenderedLine[]; cursor: { row: number; column: number } } {
-  const queryPrefix = overlay.queryLabel ?? "> ";
-  const query = truncateCells(overlay.query.replaceAll("\n", " "), Math.max(1, width - cellWidth(queryPrefix)));
-  const top: RenderedLine[] = [
-    { text: border.repeat(width), role: "accent" },
-    { text: `${queryPrefix}${query}`, role: "accent" },
-  ];
-  if (overlay.status !== undefined) top.push({ text: truncateCells(overlay.status, width), role: "warning" });
-  const fullHelp = `  ${overlay.hints?.at(-1) ?? "Enter/Space change · Esc close"}`;
-  const help = cellWidth(fullHelp) <= width ? fullHelp : " Enter change · Esc close";
-  const bottom: RenderedLine[] = [
-    { text: truncateCells(help, width), role: "muted" },
-    { text: border.repeat(width), role: "accent" },
-  ];
-  const contentRoom = Math.max(1, height - top.length - bottom.length);
+): OverlayRender {
+  const innerWidth = width;
+  const innerHeight = Math.max(1, height - 2);
+  const queryPrefix = "SEARCH  ";
+  const query = truncateCells(overlay.query.replaceAll("\n", " "), Math.max(1, innerWidth - cellWidth(queryPrefix)));
+  const top: RenderedLine[] = deckStatus(overlay, innerWidth);
+  const queryRow = top.length;
+  top.push({ text: `${queryPrefix}${query}`, role: "accent" });
+  const showRegions = innerHeight >= 7;
+  const actions = actionLines(
+    overlay,
+    innerWidth,
+    "Enter/Space change · Esc close",
+    Math.min(5, Math.max(1, innerHeight - top.length - (showRegions ? 2 : 0) - Math.min(2, Math.max(1, overlay.items.length)))),
+  );
+  const descriptionRoom = overlay.selectedDescription === undefined || innerHeight < 8 ? 0 : Math.min(2, Math.max(0, innerHeight - top.length - actions.length - 4));
+  const dividerCount = showRegions ? 2 + (descriptionRoom > 0 ? 1 : 0) : 0;
+  const contentRoom = Math.max(1, innerHeight - top.length - actions.length - descriptionRoom - dividerCount);
   const visible = Math.max(1, Math.min(10, contentRoom));
   const start = Math.max(0, Math.min(overlay.selected - visible + 1, overlay.items.length - visible));
   const shown = overlay.items.slice(start, start + visible);
-  const labelWidth = Math.min(Math.max(12, width - 10), Math.max(12, ...shown.map((item) => cellWidth(item.label))));
+  const labelWidth = Math.min(Math.max(12, innerWidth - 10), Math.max(12, ...shown.map((item) => cellWidth(item.label))));
   const content: RenderedLine[] = [];
-  if (shown.length === 0) content.push({ text: "  No matching settings", role: "muted" });
+  if (shown.length === 0) content.push({ text: " No matching settings", role: "muted" });
   for (const [offset, item] of shown.entries()) {
     const index = start + offset;
     const marker = index === overlay.selected ? "→" : " ";
     const label = padCells(truncateCells(item.label, labelWidth), labelWidth);
     content.push({
-      text: truncateCells(`${marker} ${label}  ${item.detail ?? ""}`, width),
+      text: truncateCells(`${marker} ${label}  ${item.detail ?? ""}`, innerWidth),
       role: index === overlay.selected ? "selection" : "muted",
     });
   }
-  let remaining = Math.max(0, contentRoom - content.length);
-  if (remaining > 0) {
-    content.push({ text: `  (${overlay.items.length === 0 ? 0 : overlay.selected + 1}/${overlay.items.length})`, role: "muted" });
-    remaining -= 1;
-  }
-  if (remaining > 0 && overlay.selectedDescription !== undefined) {
-    content.push(...wrapCells(`  ${overlay.selectedDescription}`, width).slice(0, Math.min(2, remaining)).map((text) => ({
+  if (descriptionRoom > 0 && overlay.selectedDescription !== undefined) {
+    content.push(...wrapCells(`DETAIL  ${overlay.selectedDescription}`, innerWidth).slice(0, descriptionRoom).map((text) => ({
       text,
       role: "muted" as const,
     })));
   }
-  const lines = [...top, ...content, ...bottom];
-  return {
-    lines: lines.slice(0, height),
-    cursor: { row: 1, column: Math.min(width - 1, cellWidth(queryPrefix) + cellWidth(query)) },
-  };
+  const selectedContent = content.slice(0, shown.length === 0 ? 1 : shown.length);
+  const details = content.slice(selectedContent.length);
+  return deckFrame(overlay, [
+    ...top,
+    ...(showRegions ? [deckSeparator()] : []),
+    ...selectedContent,
+    ...(details.length === 0 ? [] : [deckSeparator(), ...details]),
+    ...(showRegions ? [deckSeparator()] : []),
+    ...actions,
+  ], {
+    row: queryRow,
+    column: Math.min(innerWidth - 1, cellWidth(queryPrefix) + cellWidth(query)),
+  }, width, height, border);
 }
 
 function modelOverlayLines(
@@ -624,49 +904,58 @@ function modelOverlayLines(
   width: number,
   height: number,
   border: string,
-): { lines: RenderedLine[]; cursor: { row: number; column: number } } {
-  const queryPrefix = "> ";
-  const query = truncateCells(overlay.query.replaceAll("\n", " "), Math.max(1, width - 2));
-  const top: RenderedLine[] = [{ text: border.repeat(width), role: "accent" }];
-  if (overlay.status !== undefined) top.push({ text: truncateCells(overlay.status, width), role: "warning" });
+): OverlayRender {
+  const innerWidth = width;
+  const innerHeight = Math.max(1, height - 2);
+  const queryPrefix = "SEARCH  ";
+  const query = truncateCells(overlay.query.replaceAll("\n", " "), Math.max(1, innerWidth - 2));
+  const top: RenderedLine[] = deckStatus(overlay, innerWidth);
   const queryRow = top.length;
   top.push({ text: `${queryPrefix}${query}`, role: "accent" });
-  const fullHelp = overlay.items.length === 0 ? " Esc cancel" : " ↑↓ navigate · Enter select · Esc cancel";
-  const help = cellWidth(fullHelp) <= width ? fullHelp : " Enter select · Esc cancel";
-  const bottom: RenderedLine[] = [
-    { text: truncateCells(help, width), role: "muted" },
-    { text: border.repeat(width), role: "accent" },
-  ];
-  const contentRoom = Math.max(1, height - top.length - bottom.length);
-  const visible = Math.max(1, Math.min(10, contentRoom));
-  const start = Math.max(0, Math.min(overlay.selected - visible + 1, overlay.items.length - visible));
+  const selected = overlay.items[overlay.selected];
+  const showRegions = innerHeight >= 7;
+  const actions = actionLines(
+    overlay,
+    innerWidth,
+    "Up/Down navigate · Enter select · Esc cancel",
+    Math.min(5, Math.max(1, innerHeight - top.length - (showRegions ? 2 : 0) - 1)),
+  );
+  const detailRoom = selected?.detail === undefined || innerHeight < 8 ? 0 : Math.min(2, Math.max(0, innerHeight - top.length - actions.length - 4));
+  const dividerCount = showRegions ? 2 + (detailRoom > 0 ? 1 : 0) : 0;
+  const contentRoom = Math.max(1, innerHeight - top.length - actions.length - detailRoom - dividerCount);
+  const start = Math.max(0, Math.min(overlay.selected - contentRoom + 1, overlay.items.length - contentRoom));
   const content: RenderedLine[] = [];
   if (overlay.items.length === 0) {
-    content.push(...wrapCells(`  ${overlay.emptyMessage ?? "No matching models"}`, width).slice(0, contentRoom).map((text) => ({
+    content.push(...wrapCells(` ${overlay.emptyMessage ?? "No matching models"}`, innerWidth).slice(0, contentRoom).map((text) => ({
       text,
       role: "muted" as const,
     })));
   }
-  for (const [offset, item] of overlay.items.slice(start, start + visible).entries()) {
+  for (const [offset, item] of overlay.items.slice(start, start + contentRoom).entries()) {
     const index = start + offset;
     content.push({
-      text: `${index === overlay.selected ? "→" : " "} ${truncateCells(item.label, Math.max(1, width - 2))}`,
+      text: `${index === overlay.selected ? (border === "─" ? "›" : ">") : " "} ${truncateCells(item.label, Math.max(1, innerWidth - 2))}`,
       role: index === overlay.selected ? "selection" : "muted",
     });
   }
-  const selected = overlay.items[overlay.selected];
-  const remaining = Math.max(0, contentRoom - content.length);
-  if (selected?.detail !== undefined && remaining > 0) {
-    content.push(...wrapCells(`  ${selected.detail}`, width).slice(0, Math.min(2, remaining)).map((text) => ({
+  const details: RenderedLine[] = [];
+  if (detailRoom > 0 && selected?.detail !== undefined) {
+    details.push(...wrapCells(`DETAIL  ${selected.detail}`, innerWidth).slice(0, detailRoom).map((text) => ({
       text,
       role: "muted" as const,
     })));
   }
-  const lines = [...top, ...content, ...bottom];
-  return {
-    lines: lines.slice(0, height),
-    cursor: { row: queryRow, column: Math.min(width - 1, cellWidth(queryPrefix) + cellWidth(query)) },
-  };
+  return deckFrame(overlay, [
+    ...top,
+    ...(showRegions ? [deckSeparator()] : []),
+    ...content,
+    ...(details.length === 0 ? [] : [deckSeparator(), ...details]),
+    ...(showRegions ? [deckSeparator()] : []),
+    ...actions,
+  ], {
+    row: queryRow,
+    column: Math.min(innerWidth - 1, cellWidth(queryPrefix) + cellWidth(query)),
+  }, width, height, border);
 }
 
 function inlineCommandLines(
@@ -712,29 +1001,41 @@ function footerWorkspace(workspace: string): string {
   return fromHome === "" ? "~" : `~${sep}${fromHome}`;
 }
 
-function footerStats(view: TuiViewState): string {
+function footerStatChips(view: TuiViewState): { tokens: string[]; cost?: string; context?: string } {
   const usage = view.usage?.total;
-  const parts: string[] = [];
-  if ((usage?.inputTokens ?? 0) > 0) parts.push(`↑${formatFooterTokens(usage!.inputTokens!)}`);
-  if ((usage?.outputTokens ?? 0) > 0) parts.push(`↓${formatFooterTokens(usage!.outputTokens!)}`);
-  if ((usage?.cacheReadTokens ?? 0) > 0) parts.push(`R${formatFooterTokens(usage!.cacheReadTokens!)}`);
-  if ((usage?.cacheWriteTokens ?? 0) > 0) parts.push(`W${formatFooterTokens(usage!.cacheWriteTokens!)}`);
+  const tokens: string[] = [];
+  if ((usage?.inputTokens ?? 0) > 0) tokens.push(`in ${formatFooterTokens(usage!.inputTokens!)}`);
+  if ((usage?.outputTokens ?? 0) > 0) tokens.push(`out ${formatFooterTokens(usage!.outputTokens!)}`);
+  if ((usage?.cacheReadTokens ?? 0) > 0) tokens.push(`cache ${formatFooterTokens(usage!.cacheReadTokens!)}`);
+  if ((usage?.cacheWriteTokens ?? 0) > 0) tokens.push(`cache+ ${formatFooterTokens(usage!.cacheWriteTokens!)}`);
   if (
     ((usage?.cacheReadTokens ?? 0) > 0 || (usage?.cacheWriteTokens ?? 0) > 0)
     && view.usage?.latestCacheHitRate !== undefined
-  ) parts.push(`CH${view.usage.latestCacheHitRate.toFixed(1)}%`);
-  const numericCost = usage?.cost === undefined ? 0 : Number(usage.cost);
-  if ((Number.isFinite(numericCost) && numericCost > 0) || view.context.subscription === true) {
-    parts.push(`$${(Number.isFinite(numericCost) ? numericCost : 0).toFixed(3)}${view.context.subscription === true ? " (sub)" : ""}`);
+  ) {
+    const cacheIndex = tokens.findLastIndex((token) => token.startsWith("cache"));
+    const hit = `${Math.round(view.usage.latestCacheHitRate)}%`;
+    if (cacheIndex >= 0) tokens[cacheIndex] = `${tokens[cacheIndex]} (${hit})`;
+    else tokens.push(`hit ${hit}`);
   }
+  const numericCost = usage?.cost === undefined ? 0 : Number(usage.cost);
+  const cost = (Number.isFinite(numericCost) && numericCost > 0) || view.context.subscription === true
+    ? `$${(Number.isFinite(numericCost) ? numericCost : 0).toFixed(3)}${view.context.subscription === true ? " sub" : ""}`
+    : undefined;
   const contextWindow = view.context.contextWindowTokens ?? 0;
+  let context: string | undefined;
   if (contextWindow > 0) {
     const percent = view.context.contextTokens === undefined
       ? "?"
       : Math.min(999, view.context.contextTokens / contextWindow * 100).toFixed(1);
-    parts.push(`${percent}%/${formatFooterTokens(contextWindow)}${view.context.autoCompaction === false ? "" : " (auto)"}`);
+    const ratio = view.context.contextTokens === undefined ? 0 : Math.max(0, Math.min(1, view.context.contextTokens / contextWindow));
+    const filled = Math.round(ratio * 4);
+    context = `ctx [${"#".repeat(filled)}${"-".repeat(4 - filled)}] ${percent}%/${formatFooterTokens(contextWindow)}${view.context.autoCompaction === false ? "" : " auto"}`;
   }
-  return parts.join(" ");
+  return {
+    tokens,
+    ...(cost === undefined ? {} : { cost }),
+    ...(context === undefined ? {} : { context }),
+  };
 }
 
 function activityText(view: TuiViewState): string | undefined {
@@ -753,30 +1054,43 @@ function activityText(view: TuiViewState): string | undefined {
     .join(" · ");
 }
 
-function contextLines(view: TuiViewState, width: number): RenderedLine[] {
-  const status = view.context.status ?? (view.context.active ? "streaming" : "idle");
-  const stats = footerStats(view);
-  const modelName = view.context.model === undefined
-    ? view.context.provider === undefined ? "no-model" : `(${view.context.provider})`
-    : view.context.provider !== undefined && (view.context.availableProviderCount ?? 0) > 1
-      ? `(${view.context.provider}) ${view.context.model}`
-      : view.context.model;
-  const withThinking = (name: string) => view.context.thinkingSupported === true
-    ? `${name} • ${view.context.thinking === undefined || view.context.thinking === "off" ? "thinking off" : view.context.thinking}`
-    : name;
-  let right = withThinking(modelName);
-  const left = status === "failed" ? ["failed", stats].filter(Boolean).join(" ") : stats;
-  const availableRight = Math.max(0, width - cellWidth(left) - 2);
-  if (view.context.model !== undefined && modelName !== view.context.model && cellWidth(right) > availableRight) {
-    right = withThinking(view.context.model);
-  }
-  const renderedRight = truncateCells(right, availableRight);
-  const padding = renderedRight === "" ? "" : " ".repeat(Math.max(2, width - cellWidth(left) - cellWidth(renderedRight)));
-  const details = truncateCells(`${left}${padding}${renderedRight}`, width);
-  const location = [
+function contextLocation(view: TuiViewState): string {
+  return [
     view.context.workspace === undefined ? undefined : footerWorkspace(view.context.workspace),
     view.context.sessionName,
   ].filter((value): value is string => value !== undefined && value !== "").join(" • ");
+}
+
+function headerModel(view: TuiViewState): string {
+  const model = view.context.model === undefined
+    ? view.context.provider === undefined ? "no model" : `(${view.context.provider})`
+    : view.context.provider !== undefined && (view.context.availableProviderCount ?? 0) > 1
+      ? `(${view.context.provider}) ${view.context.model}`
+      : view.context.model;
+  if (view.context.thinkingSupported !== true) return model;
+  const thinking = view.context.thinking === undefined || view.context.thinking === "off" ? "thinking off" : view.context.thinking;
+  return `${model} · ${thinking}`;
+}
+
+function firstFitting(values: readonly string[], width: number): string {
+  return values.find((value) => value !== "" && cellWidth(value) <= width) ?? "";
+}
+
+function contextLines(view: TuiViewState, width: number): RenderedLine[] {
+  const status = view.context.status ?? (view.context.active ? "streaming" : "idle");
+  const statChips = footerStatChips(view);
+  const failed = status === "failed" ? ["failed"] : [];
+  const withoutHit = statChips.tokens.map((chip) => chip.replace(/ \(\d+%\)$/u, "")).filter((chip) => !chip.startsWith("hit "));
+  const coreTokens = withoutHit.filter((chip) => chip.startsWith("in ") || chip.startsWith("out "));
+  const tokenCandidates = [statChips.tokens, withoutHit, coreTokens]
+    .map((chips) => [...failed, ...chips].join(" · "));
+  const compactContext = statChips.context?.replace(/ctx \[[#-]+\] /u, "ctx ");
+  const contextCandidates = [
+    [statChips.cost, statChips.context],
+    [statChips.cost, compactContext],
+    [compactContext],
+    [statChips.cost],
+  ].map((chips) => chips.filter((value): value is string => value !== undefined && value !== "").join(" · "));
   const contextRatio = (view.context.contextWindowTokens ?? 0) <= 0 || view.context.contextTokens === undefined
     ? 0
     : view.context.contextTokens / view.context.contextWindowTokens!;
@@ -786,18 +1100,54 @@ function contextLines(view: TuiViewState, width: number): RenderedLine[] {
       ? "error"
       : contextRatio >= 0.7
         ? "warning"
-        : "muted";
+      : "muted";
+  const activity = activityText(view);
+  const location = sanitizeTerminalText(contextLocation(view));
+  let model = sanitizeTerminalText(headerModel(view));
+  if (view.context.model !== undefined && cellWidth(model) > width) {
+    const selected = view.context.thinkingSupported === true
+      ? `${view.context.model} · ${view.context.thinking === undefined || view.context.thinking === "off" ? "thinking off" : view.context.thinking}`
+      : view.context.model;
+    model = sanitizeTerminalText(selected);
+  }
+  const extensionStatus = view.context.extensionStatus === undefined
+    ? ""
+    : sanitizeTerminalText(view.context.extensionStatus);
+  if (width < 64) {
+    const tokens = firstFitting(tokenCandidates, width);
+    const context = firstFitting(contextCandidates, width);
+    const metrics = [tokens, context].filter((value) => value !== "").join(" · ");
+    const metricLines = metrics === ""
+      ? []
+      : cellWidth(metrics) <= width ? [metrics] : [tokens, context].filter((value) => value !== "");
+    return [
+      ...(activity === undefined
+        ? []
+        : [{ text: truncateCells(` ${activity}`, width), role: "working" as const }]),
+      ...(location === "" ? [] : [{ text: truncateCells(` ${location}`, width), role: "muted" as const }]),
+      { text: truncateCells(model, width), role: detailsRole },
+      ...metricLines.map((text): RenderedLine => ({ text, role: detailsRole })),
+      ...(extensionStatus === "" ? [] : [{ text: truncateCells(extensionStatus, width), role: "muted" as const }]),
+    ];
+  }
+  const separator = " · ";
+  const combinations = tokenCandidates.flatMap((tokens) => contextCandidates.map((context) =>
+    [tokens, context].filter((value) => value !== "").join(separator)));
+  const metricBudget = Math.max(0, width - cellWidth(model) - 2);
+  const selected = firstFitting(combinations, metricBudget)
+    || firstFitting([...tokenCandidates, ...contextCandidates], metricBudget);
+  const renderedModel = truncateCells(model, Math.max(1, width - cellWidth(selected) - (selected === "" ? 0 : 2)));
+  const padding = selected === "" || renderedModel === ""
+    ? ""
+    : " ".repeat(Math.max(2, width - cellWidth(selected) - cellWidth(renderedModel)));
+  const details = truncateCells(`${selected}${padding}${renderedModel}`, width);
   return [
-    ...(activityText(view) === undefined
+    ...(activity === undefined
       ? []
-      : [{ text: truncateCells(` ${activityText(view)!}`, width), role: "working" as const }]),
-    ...(location === ""
-      ? []
-      : [{ text: truncateCells(` ${sanitizeTerminalText(location)}`, width), role: "muted" as const }]),
-    { text: truncateCells(details, width), role: detailsRole },
-    ...(view.context.extensionStatus === undefined || view.context.extensionStatus === ""
-      ? []
-      : [{ text: truncateCells(sanitizeTerminalText(view.context.extensionStatus), width), role: "muted" as const }]),
+      : [{ text: truncateCells(` ${activity}`, width), role: "working" as const }]),
+    ...(location === "" ? [] : [{ text: truncateCells(` ${location}`, width), role: "muted" as const }]),
+    ...(details === "" ? [] : [{ text: details, role: detailsRole }]),
+    ...(extensionStatus === "" ? [] : [{ text: truncateCells(extensionStatus, width), role: "muted" as const }]),
   ];
 }
 
@@ -846,6 +1196,7 @@ export function renderTranscriptFrame(
     options.toolRenderBlocks,
     options.sessionRenderBlocks,
     options.semanticZones === true,
+    false,
     options,
   );
   const text = lines.map((line) => {
@@ -1051,12 +1402,14 @@ export function renderFrame(
       text: ` ${line}`,
       role: "muted" as const,
     }))).slice(-4);
-  const editor = editorBlock(
+  const editorWidth = Math.max(1, width - 1);
+  const editorHeight = Math.min(6, Math.max(2, Math.floor(maximumHeight / 3)));
+  const editor = structuralEditorBlock(view.editorBlock, editorWidth, editorHeight) ?? editorBlock(
     view.editorText,
     view.editorCursor,
-    view.inputMode === "follow_up" ? "follow" : view.inputLabel,
-    Math.max(1, width - 1),
-    Math.min(6, Math.max(2, Math.floor(maximumHeight / 3))),
+    view.inputLabel,
+    editorWidth,
+    editorHeight,
   );
   const widgetLines: RenderedLine[] = (view.context.widgets ?? []).slice(-4).flatMap((widget) =>
     wrapCells(widget, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
@@ -1069,7 +1422,7 @@ export function renderFrame(
       ? "success"
       : view.context.thinking === "medium"
         ? "accent"
-      : "warning";
+        : "warning";
   const inputImageLines: RenderedLine[] = (view.inputImages?.length ?? 0) === 0
     ? []
     : [{
@@ -1098,27 +1451,19 @@ export function renderFrame(
     1,
     maximumHeight - extensionHeaderLines.length - footer.length - extensionFooterLines.length - editorLines.length,
   );
+  const headerOffset = extensionHeaderLines.length;
   let middle: RenderedLine[];
   let cursor = {
-    row: extensionHeaderLines.length + middleHeight + widgetLines.length + 1 + inputImageLines.length + editor.cursor.row,
+    row: headerOffset + middleHeight + widgetLines.length + 1 + inputImageLines.length + editor.cursor.row,
     column: editor.cursor.column,
   };
   let overlayCursor = false;
 
-  if (view.overlay !== undefined && view.overlay.inline !== true) {
-    const overlay = view.overlay.settings === true
-      ? settingsOverlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal)
-      : view.overlay.pickerKind === "model"
-        ? modelOverlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal)
-        : overlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal);
-    middle = overlay.lines;
-    cursor = { row: extensionHeaderLines.length + overlay.cursor.row, column: overlay.cursor.column };
-    overlayCursor = true;
-  } else if (view.runtimeComponent !== undefined) {
+  if (view.runtimeComponent !== undefined) {
     const block = sanitizeRuntimeUiBlock(view.runtimeComponent, { width });
     middle = structuralLines(block, width)?.slice(0, middleHeight) ?? [];
     cursor = {
-      row: extensionHeaderLines.length + Math.min(Math.max(0, middle.length - 1), block.cursor?.row ?? 0),
+      row: headerOffset + Math.min(Math.max(0, middle.length - 1), block.cursor?.row ?? 0),
       column: Math.min(width - 1, block.cursor?.column ?? 0),
     };
     overlayCursor = true;
@@ -1143,7 +1488,7 @@ export function renderFrame(
       });
     }
     const all = [
-      ...transcriptLines(view.transcript, width, theme, options.toolRenderBlocks, options.sessionRenderBlocks, false, options),
+      ...transcriptLines(view.transcript, width, theme, options.toolRenderBlocks, options.sessionRenderBlocks, false, true, options),
       ...(view.notice === undefined
         ? []
         : [{
@@ -1164,8 +1509,25 @@ export function renderFrame(
   if (options.compact !== true) while (middle.length < middleHeight) middle.unshift({ text: "", role: "muted" });
   if (overlayCursor && options.compact !== true) cursor.row += padding;
   if (middle.length > middleHeight) middle = middle.slice(0, middleHeight);
+  if (view.overlay !== undefined && view.overlay.inline !== true) {
+    const deck = view.overlay.settings === true
+      ? settingsOverlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal)
+      : view.overlay.pickerKind === "model"
+        ? modelOverlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal)
+        : overlayLines(view.overlay, width, middleHeight, theme.glyphs.horizontal);
+    const deckPadding = options.compact === true ? 0 : Math.max(0, middleHeight - deck.lines.length);
+    middle = [
+      ...Array.from({ length: deckPadding }, (): RenderedLine => ({ text: "", role: "muted" })),
+      ...deck.lines,
+    ];
+    cursor = {
+      row: headerOffset + deckPadding + deck.cursor.row,
+      column: deck.cursor.column,
+    };
+    overlayCursor = true;
+  }
   if (options.compact === true && !overlayCursor) {
-    cursor.row = extensionHeaderLines.length + middle.length + widgetLines.length + 1 + inputImageLines.length + editor.cursor.row;
+    cursor.row = headerOffset + middle.length + widgetLines.length + 1 + inputImageLines.length + editor.cursor.row;
   }
   const lines = [...extensionHeaderLines, ...middle, ...editorLines, ...extensionFooterLines, ...footer];
   const height = options.compact === true

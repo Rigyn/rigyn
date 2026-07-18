@@ -8,10 +8,11 @@ test("one termination signal forces a process out of cleanup that never settles"
 }, async (context) => {
   const moduleUrl = pathToFileURL(new URL("../../src/process/graceful-termination.ts", import.meta.url).pathname).href;
   const source = `
+    import { writeFileSync } from "node:fs";
     import { withGracefulTermination } from ${JSON.stringify(moduleUrl)};
     await withGracefulTermination(async () => {
       setInterval(() => {}, 1000);
-      process.stdout.write("ready\\n");
+      writeFileSync(1, "ready\\n");
       await new Promise(() => {});
     }, { forceExitAfterMs: 50 });
   `;

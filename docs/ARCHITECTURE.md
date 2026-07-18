@@ -32,7 +32,7 @@ Startup resolves platform paths and canonicalizes the workspace before loading a
 7. skills, prompts, themes, and instruction roots;
 8. tool registrations and extension listeners.
 
-`/reload` builds and validates a candidate generation first. Only a successful candidate replaces the current generation; then the old extension code and network transport are disposed. Session store identity is stable across reload, and a database-path change is rejected until restart.
+`/reload` builds and validates a candidate generation first. The service freezes its provider, tool, skill, extension, trust, compaction, retry, and child-run resources into one immutable generation and changes one pointer only after validation. A failed commit restores the previous pointer; then a successful swap disposes the old extension code and network transport. Session store identity is stable across reload, and a database-path change is rejected until restart.
 
 ## Core agent
 
@@ -92,7 +92,7 @@ SQLite stores threads, runs, immutable events, branches, artifacts, and durable 
 
 The service persists transition events around provider and tool boundaries. Recovery can therefore distinguish never-started work from work whose side effects are unknown. Unknown tool outcomes are surfaced; they are not automatically replayed.
 
-Sessions are workspace-bound but share one indexed store by default. Forks and tree navigation move branch heads without rewriting ancestry. Extension-owned state and messages are namespaced and schema-versioned within the same event graph.
+Sessions are workspace-bound but share one indexed store by default. Service-level metadata and transcript queries, lifecycle and branch commands, durable input queues, tree and clone operations, and run/artifact inspection pass through a lazy workspace-and-branch-scoped facade before touching storage. The runner's conversation/event sink, artifact writer, and runtime-owner lease/recovery protocols retain direct store ownership because they are storage infrastructure rather than user-session access. Forks and tree navigation move branch heads without rewriting ancestry. Extension-owned state and messages are namespaced and schema-versioned within the same event graph.
 
 ## Extensions and packages
 
@@ -108,7 +108,7 @@ Input decoding handles bracketed paste, wide Unicode, mouse-free navigation, que
 
 ## Public API and RPC
 
-The package exports its existing auth, configuration, context, core, extension, image, interface, network, process, prompt, provider, service, storage, testing, tool, and TUI layers through explicit ESM subpaths with declarations. These are module boundaries within one package, not separately versioned packages. RPC uses one JSON object per line and exposes the same session, run, auth, model, and resource operations as the service. Notifications carry normalized durable or streaming events. The `rigyn/interfaces` subpath includes the exhaustive method/notification type maps and a Node.js client with request correlation, local wait cancellation, durable event-subscription helpers, and optional subprocess ownership; [the RPC reference](rpc.md) is mechanically checked against the dispatcher contract.
+The package exports its existing auth, configuration, context, core, extension, image, interface, network, process, prompt, provider, service, storage, testing, tool, and TUI layers through explicit ESM subpaths with declarations. These are module boundaries within one package, not separately versioned packages. RPC uses one JSON object per line and exposes the same session, run, auth, model, and resource operations as the service. A typed complete method registry owns dispatch; unknown names never fall through. Durable history supports exclusive-cursor pages, and subscription replay freezes a branch-head snapshot and advances in bounded batches before handing off ordered live events. Notifications carry normalized durable or streaming events. The `rigyn/interfaces` subpath includes the exhaustive method/notification type maps and a Node.js client with request correlation, local wait cancellation, durable event-subscription helpers, and optional subprocess ownership; [the RPC reference](rpc.md) is mechanically checked against the dispatcher contract.
 
 The package is a Node.js 24.15+/26+ local-runtime library. None of its entry points is a browser contract, even when an entry point includes structurally portable types. Browser front ends remain separate clients and communicate with the local process through RPC or a private localhost extension bridge.
 
@@ -116,4 +116,4 @@ The package is a Node.js 24.15+/26+ local-runtime library. None of its entry poi
 
 The test suite combines focused unit tests with SQLite crash recovery, provider wire fixtures, extension reload and package transactions, TUI component tests, PTY terminal scenarios, public API compilation, built-distribution execution, and an isolated packed-artifact install. Release checks run against built JavaScript rather than only TypeScript source.
 
-The deterministic [offline outcome benchmark](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md) complements correctness tests by exercising real service, tool, compaction, and recovery paths while reporting completion, pass@1, attempts, retries, normalized usage/cost, and safety signals in a versioned machine-readable format.
+The deterministic [benchmark suite](https://github.com/Rigyn/rigyn/blob/main/benchmarks/README.md) complements correctness tests with offline outcome checks and startup/reload/resume regression guards. A separate opt-in same-task runner compares two CLIs with one model and verifier without making unsupported superiority claims. CI also enforces independent line, branch, and function floors for the five highest-risk modules rather than one misleading repository-wide percentage.

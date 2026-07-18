@@ -14,9 +14,9 @@ test("extension host compatibility uses semantic-version ranges and produces act
   assert.equal(parseExtensionManifest({
     schemaVersion: 1,
     id: "compatible",
-    compatibility: { hostVersion: ">=0.1.0 <0.2.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
     contributions: {},
-  }).hostVersionRange, ">=0.1.0 <0.2.0");
+  }).hostVersionRange, ">=0.1.0 <0.3.0");
   assert.throws(() => parseExtensionManifest({
     schemaVersion: 1,
     id: "invalid-range",
@@ -26,7 +26,7 @@ test("extension host compatibility uses semantic-version ranges and produces act
 
   const root = await mkdtemp(join(tmpdir(), "harness-package-compatibility-"));
   t.after(async () => await rm(root, { recursive: true, force: true }));
-  for (const [id, range] of [["compatible", ">=0.1.0 <0.2.0"], ["future", ">=9.0.0"]] as const) {
+  for (const [id, range] of [["compatible", ">=0.1.0 <0.3.0"], ["future", ">=9.0.0"]] as const) {
     const extension = join(root, id);
     await mkdir(extension);
     await writeFile(join(extension, "extension.json"), JSON.stringify({
@@ -38,11 +38,11 @@ test("extension host compatibility uses semantic-version ranges and produces act
   }
   const catalog = await discoverExtensions([{ path: root, scope: "user", trusted: true }]);
   assert.equal(catalog.list().find((entry) => entry.id === "compatible")?.status, "active");
-  assert.equal(catalog.list().find((entry) => entry.id === "compatible")?.hostVersionRange, ">=0.1.0 <0.2.0");
+  assert.equal(catalog.list().find((entry) => entry.id === "compatible")?.hostVersionRange, ">=0.1.0 <0.3.0");
   assert.equal(catalog.list().find((entry) => entry.id === "future")?.status, "invalid");
   assert.match(
     catalog.doctor().diagnostics.find((entry) => entry.extensionId === "future")?.message ?? "",
-    /requires Rigyn >=9\.0\.0; current version is 0\.1\.7/u,
+    /requires Rigyn >=9\.0\.0; current version is 0\.2\.0/u,
   );
 });
 

@@ -1,12 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { LoadedRuntime } from "../cli/runtime.js";
-import type { QueueMode } from "../core/agent.js";
+import type { AgentRunResult, QueueMode } from "../core/agent.js";
 import type { EventEnvelope } from "../core/events.js";
 import type { NormalizedUsage, ProviderId } from "../core/types.js";
 import { normalizedContextTokens, normalizedTotalTokens } from "../core/usage.js";
 import type { RuntimeInputEvent, RuntimeInputResult } from "../extensions/runtime.js";
+import type { HarnessRun } from "../service/harness.js";
 import { exportThreadHtml, exportThreadMarkdown } from "../service/session-transfer.js";
+import { sessionExportEnvelope } from "../storage/session-export.js";
 import { RIGYN_VERSION } from "../version.js";
 import {
   RPC_EXTENSION_UI_LIMITS,
@@ -15,7 +17,16 @@ import {
   type RpcExtensionUiRequest,
 } from "./rpc-extension-ui.js";
 import { DEFAULT_RPC_MAX_LINE_BYTES, type RpcRequest } from "./rpc.js";
-import { RPC_ERROR_CODES } from "./rpc-protocol.js";
+import {
+  RPC_ERROR_CODES,
+  RPC_METHOD_NAMES,
+  type RpcEventSubscriptionResult,
+  type RpcExtensionCommandResult,
+  type RpcMethod,
+  type RpcMethodResult,
+  type RpcOversizedEvent,
+  type RpcQueueBlockedItem,
+} from "./rpc-protocol.js";
 import {
   optionalOutboundImages,
   parseQueuedRunInput,
@@ -29,6 +40,14 @@ const RPC_MAX_TRANSFORMED_INPUT_BYTES = 1024 * 1024;
 const RPC_MAX_LAST_ASSISTANT_TEXT_BYTES = 8 * 1024 * 1024;
 const RPC_MAX_INLINE_EXPORT_BYTES = 2 * 1024 * 1024;
 const RPC_MAX_QUEUE_RESPONSE_BYTES = DEFAULT_RPC_MAX_LINE_BYTES - 4 * 1024;
+export const RPC_EVENT_PAGE_DEFAULT_LIMIT = 256;
+export const RPC_EVENT_PAGE_MAX_LIMIT = 1_024;
+export const RPC_EVENT_PAGE_MAX_SERIALIZED_BYTES = 8 * 1024 * 1024;
+const RPC_EVENT_PAGE_METADATA_RESERVE_BYTES = 4 * 1024;
+export const RPC_EVENT_MAX_SERIALIZED_BYTES =
+  RPC_EVENT_PAGE_MAX_SERIALIZED_BYTES - RPC_EVENT_PAGE_METADATA_RESERVE_BYTES;
+export const RPC_SUBSCRIPTION_PENDING_MAX_EVENTS = 1_024;
+export const RPC_SUBSCRIPTION_PENDING_MAX_BYTES = RPC_EVENT_PAGE_MAX_SERIALIZED_BYTES;
 
 export const RIGYN_RPC_CAPABILITIES = {
   sessions: true,
@@ -50,6 +69,26 @@ export const RIGYN_RPC_CAPABILITIES = {
   },
   events: true,
   subscriptions: true,
+  eventPagination: {
+    cursor: "exclusive-sequence",
+    defaultLimit: RPC_EVENT_PAGE_DEFAULT_LIMIT,
+    maxLimit: RPC_EVENT_PAGE_MAX_LIMIT,
+    maxSerializedBytes: RPC_EVENT_PAGE_MAX_SERIALIZED_BYTES,
+    maxSerializedEventBytes: RPC_EVENT_MAX_SERIALIZED_BYTES,
+    oversizedSingleEvent: "blocked",
+    alwaysPaged: true,
+  },
+  subscriptionReplay: {
+    boundedBatches: true,
+    snapshotAtSubscribe: true,
+    defaultLimit: RPC_EVENT_PAGE_DEFAULT_LIMIT,
+    maxLimit: RPC_EVENT_PAGE_MAX_LIMIT,
+    maxSerializedEventBytes: RPC_EVENT_MAX_SERIALIZED_BYTES,
+    oversizedSingleEvent: "events.error",
+    maxPendingLiveEvents: RPC_SUBSCRIPTION_PENDING_MAX_EVENTS,
+    maxPendingLiveBytes: RPC_SUBSCRIPTION_PENDING_MAX_BYTES,
+    deliveryFailure: "events.error",
+  },
   reconnect: true,
   manualCompaction: true,
   runtimeExtensions: {
@@ -174,7 +213,7 @@ interface RunningOperation {
   branch: string;
   kind: "run" | "compaction";
   selection: { provider: ProviderId; model: string; reasoningEffort?: string };
-  promise: Promise<unknown>;
+  promise: Promise<HarnessRun | AgentRunResult>;
 }
 
 interface RpcQueueLease {
@@ -191,13 +230,41 @@ interface Subscription {
   branch: string;
   cursor: number;
   replaying: boolean;
-  pendingLive: EventEnvelope[];
+  pendingLive: Array<{ event: EventEnvelope; bytes: number }>;
+  pendingLiveBytes: number;
+  deliveryRunning: boolean;
+  stopReason?: { reason: string; blocked?: RpcOversizedEvent };
+}
+
+interface EventReplayPage {
+  events: EventEnvelope[];
+  nextSequence: number;
+  hasMore: boolean;
+  snapshotSequence: number;
+  blocked?: RpcOversizedEvent;
 }
 
 interface ExtensionCommandOperation {
   peerId: string;
   controller: AbortController;
   settled: Promise<void>;
+}
+
+interface RpcMethodHandlerContext {
+  peer: RpcRuntimePeer;
+  input: Record<string, unknown>;
+}
+
+type RpcMethodHandler<K extends RpcMethod> = (
+  context: RpcMethodHandlerContext,
+) => RpcMethodResult<K> | Promise<RpcMethodResult<K>>;
+
+type RpcMethodHandlerRegistry = { [K in RpcMethod]: RpcMethodHandler<K> };
+
+const RPC_METHOD_NAME_SET: ReadonlySet<string> = new Set(RPC_METHOD_NAMES);
+
+function isRpcMethod(value: string): value is RpcMethod {
+  return RPC_METHOD_NAME_SET.has(value);
 }
 
 function params(value: unknown): Record<string, unknown> {
@@ -226,6 +293,72 @@ function optionalCursor(value: unknown): number {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("afterSequence must be a non-negative integer");
   return value as number;
+}
+
+function eventPageLimit(value: unknown): number {
+  const limit = optionalNumber(value, "limit") ?? RPC_EVENT_PAGE_DEFAULT_LIMIT;
+  if (limit > RPC_EVENT_PAGE_MAX_LIMIT) throw new Error(`limit must not exceed ${RPC_EVENT_PAGE_MAX_LIMIT}`);
+  return limit;
+}
+
+function serializedEventBytes(event: EventEnvelope): number {
+  return Buffer.byteLength(JSON.stringify(event), "utf8");
+}
+
+function rpcEventEnvelope(envelope: EventEnvelope): EventEnvelope {
+  const projected = sessionExportEnvelope(envelope);
+  if (
+    projected.event.type === "warning" &&
+    projected.event.code === "session_export_private_event_omitted"
+  ) {
+    return {
+      ...projected,
+      event: {
+        type: "warning",
+        code: "rpc_private_event_omitted",
+        message: "Provider-private reasoning trace omitted from RPC output",
+      },
+    };
+  }
+  return projected;
+}
+
+function oversizedEvent(event: EventEnvelope, serializedBytes: number): RpcOversizedEvent {
+  return {
+    reason: "event_exceeds_serialized_byte_limit",
+    sequence: event.sequence,
+    serializedBytes,
+    maximumBytes: RPC_EVENT_MAX_SERIALIZED_BYTES,
+    resumeAfterSequence: event.sequence,
+  };
+}
+
+function boundedEventPage(
+  page: Omit<EventReplayPage, "blocked">,
+  afterSequence: number,
+): EventReplayPage {
+  const events: EventEnvelope[] = [];
+  let retainedBytes = 0;
+  let blocked: RpcOversizedEvent | undefined;
+  for (const storedEvent of page.events) {
+    const event = rpcEventEnvelope(storedEvent);
+    const bytes = serializedEventBytes(event);
+    if (bytes > RPC_EVENT_MAX_SERIALIZED_BYTES) {
+      blocked = oversizedEvent(event, bytes);
+      break;
+    }
+    const delimiterBytes = events.length === 0 ? 0 : 1;
+    if (retainedBytes + delimiterBytes + bytes > RPC_EVENT_MAX_SERIALIZED_BYTES) break;
+    events.push(event);
+    retainedBytes += delimiterBytes + bytes;
+  }
+  return {
+    events,
+    nextSequence: events.at(-1)?.sequence ?? afterSequence,
+    hasMore: page.hasMore || events.length < page.events.length,
+    snapshotSequence: page.snapshotSequence,
+    ...(blocked === undefined ? {} : { blocked }),
+  };
 }
 
 function optionalOffset(value: unknown): number {
@@ -273,7 +406,7 @@ function queuedMessageMetadata(value: {
   mode: "steer" | "follow_up";
   text: string;
   images?: readonly { mediaType: string; data?: string; url?: string }[];
-}): Record<string, unknown> {
+}): RpcQueueBlockedItem["item"] {
   return {
     mode: value.mode,
     textBytes: Buffer.byteLength(value.text, "utf8"),
@@ -371,6 +504,7 @@ export class RpcRuntimeDispatcher {
   readonly #inputTails = new Map<string, Promise<void>>();
   readonly #initialExtensionUiSent = new Set<string>();
   readonly #startedAt = Date.now();
+  readonly #methodHandlers: RpcMethodHandlerRegistry;
   readonly #extensionSessionUnsubscribe: (() => void) | undefined;
   #closing = false;
 
@@ -409,6 +543,7 @@ export class RpcRuntimeDispatcher {
         }
       });
     }
+    this.#methodHandlers = this.#createMethodHandlers();
   }
 
   connect(peer: RpcRuntimePeer): void {
@@ -422,7 +557,10 @@ export class RpcRuntimeDispatcher {
     this.#initialExtensionUiSent.delete(peerId);
     this.#extensionUi.disconnect(peerId);
     for (const [id, subscription] of this.#subscriptions) {
-      if (subscription.peerId === peerId) this.#subscriptions.delete(id);
+      if (subscription.peerId !== peerId) continue;
+      subscription.pendingLive = [];
+      subscription.pendingLiveBytes = 0;
+      this.#subscriptions.delete(id);
     }
     for (const [threadId, operation] of this.#running) {
       if (operation.ownerId === peerId) this.#runtime.service.cancel(threadId, "RPC client disconnected");
@@ -445,15 +583,25 @@ export class RpcRuntimeDispatcher {
     this.connect(peer);
     const input = params(request.params);
     if (this.#closing && !["health", "run.wait"].includes(request.method)) throw new Error("RPC dispatcher is shutting down");
-    switch (request.method) {
-      case "initialize":
+    if (!isRpcMethod(request.method)) throw methodNotFound(request.method);
+    return await this.#invokeMethod(request.method, { peer, input });
+  }
+
+  async #invokeMethod<K extends RpcMethod>(method: K, context: RpcMethodHandlerContext): Promise<RpcMethodResult<K>> {
+    return await this.#methodHandlers[method](context);
+  }
+
+  #createMethodHandlers(): RpcMethodHandlerRegistry {
+    return {
+      "initialize": ({ peer }) => {
         this.#sendInitialExtensionUi(peer.id);
         return {
           name: "rigyn",
           version: RIGYN_RPC_VERSION,
           capabilities: RIGYN_RPC_CAPABILITIES,
         };
-      case "health":
+      },
+      "health": () => {
         return {
           status: this.#closing ? "draining" : "ok",
           version: RIGYN_RPC_VERSION,
@@ -461,37 +609,55 @@ export class RpcRuntimeDispatcher {
           clients: this.#peers.size,
           activeRuns: this.#running.size,
         };
-      case "version":
+      },
+      "version": () => {
         return { name: "rigyn", version: RIGYN_RPC_VERSION };
-      case "capabilities":
+      },
+      "capabilities": () => {
         return RIGYN_RPC_CAPABILITIES;
-      case "thread.create":
+      },
+      "thread.create": async ({ input }) => {
         return await this.#runtime.service.createSession({
           ...(optionalString(input.name, "name") === undefined ? {} : { name: input.name as string }),
           ...(optionalString(input.parentThreadId, "parentThreadId") === undefined ? {} : { parentThreadId: input.parentThreadId as string }),
           ...(optionalString(input.parentRunId, "parentRunId") === undefined ? {} : { parentRunId: input.parentRunId as string }),
         });
-      case "thread.list":
+      },
+      "thread.list": () => {
         return this.#runtime.store.listThreads({ workspaceRoot: this.#runtime.workspace });
-      case "thread.get": {
+      },
+      "thread.get": ({ input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         return {
           thread: this.#runtime.store.getThread(threadId),
           runs: this.#runtime.store.listRuns(threadId),
         };
-      }
-      case "thread.events":
-        return this.#runtime.store.listEvents(
-          this.#workspaceThread(requiredString(input.threadId, "threadId")),
-          optionalString(input.branch, "branch"),
-        );
-      case "thread.state":
+      },
+      "thread.events": ({ input }) => {
+        const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+        const branch = optionalString(input.branch, "branch");
+        const afterSequence = optionalCursor(input.afterSequence);
+        const page = boundedEventPage(this.#runtime.store.listEventPage(threadId, branch, {
+          afterSequence,
+          limit: eventPageLimit(input.limit),
+        }), afterSequence);
+        return {
+          events: page.events,
+          nextCursor: page.nextSequence,
+          hasMore: page.hasMore,
+          ...(page.blocked === undefined ? {} : { blocked: page.blocked }),
+        };
+      },
+      "thread.state": ({ input }) => {
         return this.#threadState(input);
-      case "thread.stats":
+      },
+      "thread.stats": async ({ input }) => {
         return await this.#threadStatistics(input);
-      case "thread.lastAssistantText":
+      },
+      "thread.lastAssistantText": ({ input }) => {
         return this.#lastAssistantText(input);
-      case "thread.fork": {
+      },
+      "thread.fork": async ({ input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         const thread = this.#runtime.store.getThread(threadId);
         const fromBranch = optionalString(input.fromBranch, "fromBranch") ?? thread.defaultBranch;
@@ -505,20 +671,23 @@ export class RpcRuntimeDispatcher {
           newBranch: requiredString(input.newBranch, "newBranch"),
           ...(this.#runtime.generationSignal === undefined ? {} : { signal: this.#runtime.generationSignal }),
         });
-        return result.cancelled ? { cancelled: true } : result.branch;
-      }
-      case "thread.name":
+        if (result.cancelled) return { cancelled: true };
+        if (result.branch === undefined) throw new Error("Branch navigation completed without a branch");
+        return result.branch;
+      },
+      "thread.name": async ({ input }) => {
         return await this.#runtime.service.setSessionName({
           threadId: this.#workspaceThread(requiredString(input.threadId, "threadId")),
           name: requiredString(input.name, "name"),
         });
-      case "thread.delete": {
+      },
+      "thread.delete": async ({ input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         await this.#endExtensionSession(threadId);
         await this.#runtime.service.deleteSession(threadId);
         return { deleted: true };
-      }
-      case "thread.export": {
+      },
+      "thread.export": ({ input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         const format = threadExportFormat(input.format);
         const branch = optionalString(input.branch, "branch");
@@ -533,8 +702,8 @@ export class RpcRuntimeDispatcher {
             ? exportThreadMarkdown(this.#runtime.store, threadId, branch)
             : exportThreadHtml(this.#runtime.store, threadId, branch));
         return { format, ...exported };
-      }
-      case "thread.compact": {
+      },
+      "thread.compact": async ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         if (this.#running.has(threadId)) throw new Error(`Thread already has an RPC-owned run: ${threadId}`);
         const branch = optionalString(input.branch, "branch") ?? this.#runtime.store.getThread(threadId).defaultBranch;
@@ -585,24 +754,29 @@ export class RpcRuntimeDispatcher {
           promise: operation,
         });
         return await operation;
-      }
-      case "events.subscribe":
+      },
+      "events.subscribe": ({ peer, input }) => {
         return this.#subscribe(peer, input);
-      case "events.unsubscribe": {
+      },
+      "events.unsubscribe": ({ peer, input }) => {
         const subscriptionId = requiredString(input.subscriptionId, "subscriptionId");
         const subscription = this.#subscriptions.get(subscriptionId);
-        if (subscription === undefined || subscription.peerId !== peer.id) throw new Error(`Unknown subscription ${subscriptionId}`);
-        this.#subscriptions.delete(subscriptionId);
+        if (subscription?.peerId === peer.id) {
+          subscription.pendingLive = [];
+          subscription.pendingLiveBytes = 0;
+          this.#subscriptions.delete(subscriptionId);
+        }
         return { unsubscribed: true };
-      }
-      case "run.start":
+      },
+      "run.start": async ({ peer, input }) => {
         return await this.#startRun(peer, input);
-      case "run.wait": {
+      },
+      "run.wait": async ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         const operation = this.#ownedOperation(peer, threadId);
         return await operation.promise;
-      }
-      case "run.cancel": {
+      },
+      "run.cancel": ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         this.#ownedOperation(peer, threadId);
         this.#runtime.service.cancel(
@@ -610,12 +784,14 @@ export class RpcRuntimeDispatcher {
           optionalString(input.reason, "reason"),
         );
         return { accepted: true };
-      }
-      case "run.steer":
+      },
+      "run.steer": async ({ peer, input }) => {
         return await this.#queueRunInput(peer, input, "steer");
-      case "run.followUp":
+      },
+      "run.followUp": async ({ peer, input }) => {
         return await this.#queueRunInput(peer, input, "follow_up");
-      case "run.queue": {
+      },
+      "run.queue": ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         const operation = this.#running.get(threadId);
         if (operation !== undefined && operation.ownerId !== peer.id) throw new Error(`No RPC-owned run for ${threadId}`);
@@ -628,7 +804,7 @@ export class RpcRuntimeDispatcher {
         const available = this.#runtime.service.queuedMessages(threadId, branch);
         const messages: typeof available = [];
         let wireBytes = 512;
-        let blocked: Record<string, unknown> | undefined;
+        let blocked: RpcQueueBlockedItem | undefined;
         for (const message of available.slice(offset, offset + limit)) {
           const itemBytes = queuedMessageWireBytes(message);
           if (messages.length === 0 && wireBytes + itemBytes > RPC_MAX_QUEUE_RESPONSE_BYTES) {
@@ -655,8 +831,8 @@ export class RpcRuntimeDispatcher {
             : { recovery: { branch, count: recoverableCount, automaticReplay: false } }),
           ...(quarantinedCount === 0 ? {} : { quarantinedCount }),
         };
-      }
-      case "run.dequeue": {
+      },
+      "run.dequeue": ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         const operation = this.#running.get(threadId);
         if (operation !== undefined && operation.ownerId !== peer.id) throw new Error(`No RPC-owned run for ${threadId}`);
@@ -690,25 +866,17 @@ export class RpcRuntimeDispatcher {
             ? {}
             : { recovery: { branch, count: remainingRecoverable, automaticReplay: false } }),
         };
-      }
-      case "run.dequeue.ack":
-      case "run.dequeue.release": {
-        const leaseId = requiredString(input.leaseId, "leaseId");
-        const lease = this.#queueLeases.get(leaseId);
-        if (lease === undefined || lease.ownerId !== peer.id) throw new Error(`Unknown RPC queue lease ${leaseId}`);
-        if (request.method === "run.dequeue.ack") this.#runtime.service.acknowledgeQueueLease(lease);
-        else this.#runtime.service.releaseQueueLease(lease);
-        this.#queueLeases.delete(leaseId);
-        return { accepted: true };
-      }
-      case "run.queueModes.get": {
+      },
+      "run.dequeue.ack": ({ peer, input }) => this.#settleQueueLease(peer, input, "acknowledge"),
+      "run.dequeue.release": ({ peer, input }) => this.#settleQueueLease(peer, input, "release"),
+      "run.queueModes.get": ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         this.#ownedOperation(peer, threadId);
         const modes = this.#runtime.service.queueModes(threadId);
         if (modes === undefined) throw new Error(`No RPC-owned run for ${threadId}`);
         return modes;
-      }
-      case "run.queueModes.set": {
+      },
+      "run.queueModes.set": ({ peer, input }) => {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         this.#ownedOperation(peer, threadId);
         const steeringMode = queueMode(input.steeringMode, "steeringMode");
@@ -720,25 +888,26 @@ export class RpcRuntimeDispatcher {
           ...(steeringMode === undefined ? {} : { steeringMode }),
           ...(followUpMode === undefined ? {} : { followUpMode }),
         });
-      }
-      case "models.list": {
+      },
+      "models.list": async ({ input }) => {
         const provider = optionalString(input.provider, "provider");
         return await this.#runtime.providers.listModels(
           provider,
           AbortSignal.timeout(30_000),
           { refresh: optionalBoolean(input.refresh, "refresh") ?? true },
         );
-      }
-      case "models.status":
+      },
+      "models.status": async ({ input }) => {
         return await this.#runtime.providers.catalogStatus(optionalString(input.provider, "provider"));
-      case "models.refresh": {
+      },
+      "models.refresh": async ({ input }) => {
         const provider = optionalString(input.provider, "provider");
         const signal = AbortSignal.timeout(30_000);
         return provider === undefined
           ? await this.#runtime.providers.refreshAllModels(signal)
           : await this.#runtime.providers.refreshModels(provider, signal);
-      }
-      case "models.resolve":
+      },
+      "models.resolve": async ({ input }) => {
         return await this.#runtime.providers.resolveModelReference(
           requiredString(input.reference, "reference"),
           AbortSignal.timeout(30_000),
@@ -750,25 +919,29 @@ export class RpcRuntimeDispatcher {
               : { reasoningEffort: boundedText(input.reasoningEffort, "reasoningEffort", RPC_MAX_REASONING_EFFORT_BYTES, false) }),
           },
         );
-      case "auth.status": {
+      },
+      "auth.status": async ({ input }) => {
         const auth = this.#providerAuth();
         const provider = input.provider === undefined
           ? undefined
           : boundedText(input.provider, "provider", 512, false);
         return provider === undefined ? await auth.states() : await auth.state(provider);
-      }
-      case "auth.profiles":
+      },
+      "auth.profiles": async ({ input }) => {
         return await this.#providerAuth().profileState(boundedText(input.provider, "provider", 512, false));
-      case "auth.select":
+      },
+      "auth.select": async ({ input }) => {
         return await this.#providerAuth().selectProfile(
           boundedText(input.provider, "provider", 512, false),
           boundedText(input.profile, "profile", 64, false),
         );
-      case "auth.fallback":
+      },
+      "auth.fallback": async ({ input }) => {
         return await this.#providerAuth().selectFallback(
           boundedText(input.provider, "provider", 512, false),
         );
-      case "auth.set": {
+      },
+      "auth.set": async ({ input }) => {
         const auth = this.#providerAuth();
         const provider = boundedText(input.provider, "provider", 512, false);
         const kind = boundedText(input.kind, "kind", 16, false);
@@ -789,8 +962,8 @@ export class RpcRuntimeDispatcher {
             : { kind, provider: credentialId, accessToken: secret, ...(accountId === undefined ? {} : { accountId }) },
           { ...(profile === undefined ? {} : { profile }), select: true },
         );
-      }
-      case "auth.delete": {
+      },
+      "auth.delete": async ({ peer, input }) => {
         const auth = this.#providerAuth();
         const provider = boundedText(input.provider, "provider", 512, false);
         const profile = input.profile === undefined
@@ -810,10 +983,11 @@ export class RpcRuntimeDispatcher {
             ? await auth.logout(provider, options)
             : await auth.deleteProfile(provider, profile, options);
         });
-      }
-      case "resources.list":
+      },
+      "resources.list": async () => {
         return await this.#runtime.service.resourceCatalog(AbortSignal.timeout(5_000));
-      case "commands.list": {
+      },
+      "commands.list": async () => {
         const catalog = await this.#runtime.service.resourceCatalog(AbortSignal.timeout(5_000));
         return {
           builtins: catalog.commands.builtins,
@@ -828,30 +1002,35 @@ export class RpcRuntimeDispatcher {
             disableModelInvocation: skill.disableModelInvocation,
           })),
         };
-      }
-      case "extension.command.list":
+      },
+      "extension.command.list": () => {
         return (this.#runtime.runtimeExtensions?.commands() ?? []).map(({ sourcePath: _sourcePath, ...command }) => command);
-      case "extension.command.run":
+      },
+      "extension.command.run": async ({ peer, input }) => {
         return await this.#runExtensionCommand(peer, input);
-      case "extension.command.cancel": {
+      },
+      "extension.command.cancel": ({ peer, input }) => {
         const operationId = boundedText(input.operationId, "operationId", 256, false);
         const operation = this.#extensionCommands.get(operationId);
         if (operation === undefined || operation.peerId !== peer.id) throw new Error(`Unknown extension command operation ${operationId}`);
         operation.controller.abort(new Error("Extension command cancelled by RPC client"));
         return { accepted: true };
-      }
-      case "extension.ui.respond":
+      },
+      "extension.ui.respond": ({ peer, input }) => {
         this.#extensionUi.resolve(peer.id, parseRpcExtensionUiResponse(input));
         return { accepted: true };
-      case "extension.ui.editorText.update":
+      },
+      "extension.ui.editorText.update": ({ peer, input }) => {
         this.#extensionUi.updateEditorText(
           peer.id,
           boundedText(input.value, "value", RPC_EXTENSION_UI_LIMITS.maxEditorBytes),
         );
         return { accepted: true };
-      case "extension.ui.editorText.get":
+      },
+      "extension.ui.editorText.get": ({ peer }) => {
         return { value: this.#extensionUi.editorText(peer.id) };
-      case "shutdown":
+      },
+      "shutdown": () => {
         this.#closing = true;
         for (const threadId of this.#running.keys()) this.#runtime.service.cancel(threadId, "RPC shutdown");
         for (const operation of this.#extensionCommands.values()) {
@@ -862,9 +1041,22 @@ export class RpcRuntimeDispatcher {
         }
         setImmediate(() => this.#requestShutdown?.());
         return { shuttingDown: true };
-      default:
-        throw methodNotFound(request.method);
-    }
+      },
+    } satisfies RpcMethodHandlerRegistry;
+  }
+
+  #settleQueueLease(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+    action: "acknowledge" | "release",
+  ): { accepted: true } {
+    const leaseId = requiredString(input.leaseId, "leaseId");
+    const lease = this.#queueLeases.get(leaseId);
+    if (lease === undefined || lease.ownerId !== peer.id) throw new Error(`Unknown RPC queue lease ${leaseId}`);
+    if (action === "acknowledge") this.#runtime.service.acknowledgeQueueLease(lease);
+    else this.#runtime.service.releaseQueueLease(lease);
+    this.#queueLeases.delete(leaseId);
+    return { accepted: true };
   }
 
   async close(reason = "RPC dispatcher closed", graceMs = 5_000): Promise<void> {
@@ -943,7 +1135,7 @@ export class RpcRuntimeDispatcher {
     }
   }
 
-  async #runExtensionCommand(peer: RpcRuntimePeer, input: Record<string, unknown>): Promise<unknown> {
+  async #runExtensionCommand(peer: RpcRuntimePeer, input: Record<string, unknown>): Promise<RpcExtensionCommandResult> {
     const extensions = this.#runtime.runtimeExtensions;
     if (
       extensions === undefined ||
@@ -1252,87 +1444,102 @@ export class RpcRuntimeDispatcher {
       branch: requestedBranch,
       ...parsedRunOptions
     } = parseRunStartInput(input);
-    const resolvedSelection = await this.#runtime.service.resolveModelSelection(parsedRunOptions.model, {
-      allowUnknownModel: true,
-      ...(parsedRunOptions.provider === undefined ? {} : { provider: parsedRunOptions.provider }),
-      ...(parsedRunOptions.reasoningEffort === undefined ? {} : { reasoningEffort: parsedRunOptions.reasoningEffort }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const {
-      provider: _provider,
-      model: _model,
-      reasoningEffort: _reasoningEffort,
-      ...remainingRunOptions
-    } = parsedRunOptions;
-    const runOptions = {
-      ...remainingRunOptions,
-      provider: resolvedSelection.provider,
-      model: resolvedSelection.model,
-      ...(resolvedSelection.reasoningEffort === undefined ? {} : { reasoningEffort: resolvedSelection.reasoningEffort }),
-    };
-    const threadId = requestedThreadId ?? (await this.#runtime.service.createSession()).threadId;
-    if (requestedThreadId !== undefined) this.#workspaceThread(threadId);
-    const branch = requestedBranch ?? this.#runtime.store.getThread(threadId).defaultBranch;
-    await this.#ensureExtensionSession(peer, threadId, branch);
-    return await this.#serializeThreadInput(peer.id, threadId, async (signal) => {
-      if (this.#running.has(threadId)) throw new Error(`Thread already has an RPC-owned run: ${threadId}`);
-      let selectedOptions = runOptions;
-      if (runOptions.manualCompaction !== true) {
-        const reduced = await this.#reduceRpcInput({
-          text: runOptions.prompt,
-          ...(runOptions.images === undefined ? {} : { images: runOptions.images }),
-          source: "rpc",
-        }, signal);
-        if (reduced.action === "handled") return { threadId, handled: true };
-        if (reduced.action === "transform") {
-          const transformed = parseQueuedRunInput({
-            threadId,
-            message: reduced.text,
-            ...(reduced.images === undefined ? {} : { images: reduced.images }),
-          });
-          const { prompt: _prompt, images: _images, ...rest } = runOptions;
-          selectedOptions = {
-            ...rest,
-            prompt: transformed.message,
-            ...(transformed.images === undefined ? {} : { images: transformed.images }),
-          };
-        }
-      }
-      signal.throwIfAborted();
-      const operation = this.#runtime.service.run({
-        ...selectedOptions,
-        threadId,
-        branch,
-        onEvent: async (event) => {
-          this.#publish(peer.id, branch, event);
-          await this.#dispatchExtensionEvent(peer, event);
-        },
-      }).then(
-        async (result) => {
-          await this.#notify(peer.id, "run.finished", result);
-          return result;
-        },
-        async (error) => {
-          await this.#notify(peer.id, "run.failed", {
-            threadId,
-            message: defaultSecretRedactor.redact(error instanceof Error ? error.message : String(error)),
-          });
-          throw error;
-        },
-      ).finally(() => this.#running.delete(threadId));
-      void operation.catch(() => undefined);
-      this.#running.set(threadId, {
-        ownerId: peer.id,
-        branch,
-        kind: selectedOptions.manualCompaction === true ? "compaction" : "run",
-        selection: {
-          provider: selectedOptions.provider,
-          model: selectedOptions.model,
-          ...(selectedOptions.reasoningEffort === undefined ? {} : { reasoningEffort: selectedOptions.reasoningEffort }),
-        },
-        promise: operation,
+    return await this.#withPeerSignal(peer.id, async (peerSignal) => {
+      const retainedSelection = await this.#runtime.service.resolveModelSelection(parsedRunOptions.model, {
+        allowUnknownModel: true,
+        ...(parsedRunOptions.provider === undefined ? {} : { provider: parsedRunOptions.provider }),
+        ...(parsedRunOptions.reasoningEffort === undefined ? {} : { reasoningEffort: parsedRunOptions.reasoningEffort }),
+        signal: peerSignal,
+        lookupSignal: AbortSignal.timeout(30_000),
+        retainGeneration: true,
       });
-      return { threadId };
+      const resolvedSelection = retainedSelection.selection;
+      try {
+        const {
+          provider: _provider,
+          model: _model,
+          reasoningEffort: _reasoningEffort,
+          ...remainingRunOptions
+        } = parsedRunOptions;
+        const runOptions = {
+          ...remainingRunOptions,
+          provider: resolvedSelection.provider,
+          model: resolvedSelection.model,
+          ...(resolvedSelection.reasoningEffort === undefined ? {} : { reasoningEffort: resolvedSelection.reasoningEffort }),
+        };
+        const threadId = requestedThreadId ?? (await this.#runtime.service.createSession({
+          signal: retainedSelection.signal,
+        })).threadId;
+        if (requestedThreadId !== undefined) this.#workspaceThread(threadId);
+        const branch = requestedBranch ?? this.#runtime.store.getThread(threadId).defaultBranch;
+        await this.#waitForAbort(this.#ensureExtensionSession(peer, threadId, branch), retainedSelection.signal);
+        retainedSelection.signal.throwIfAborted();
+        return await this.#waitForAbort(this.#serializeThreadInput(peer.id, threadId, async (signal) => {
+          const handoffSignal = AbortSignal.any([signal, retainedSelection.signal]);
+          if (this.#running.has(threadId)) throw new Error(`Thread already has an RPC-owned run: ${threadId}`);
+          let selectedOptions = runOptions;
+          if (runOptions.manualCompaction !== true) {
+            const reduced = await this.#reduceRpcInput({
+              text: runOptions.prompt,
+              ...(runOptions.images === undefined ? {} : { images: runOptions.images }),
+              source: "rpc",
+            }, handoffSignal);
+            if (reduced.action === "handled") return { threadId, handled: true };
+            if (reduced.action === "transform") {
+              const transformed = parseQueuedRunInput({
+                threadId,
+                message: reduced.text,
+                ...(reduced.images === undefined ? {} : { images: reduced.images }),
+              });
+              const { prompt: _prompt, images: _images, ...rest } = runOptions;
+              selectedOptions = {
+                ...rest,
+                prompt: transformed.message,
+                ...(transformed.images === undefined ? {} : { images: transformed.images }),
+              };
+            }
+          }
+          handoffSignal.throwIfAborted();
+          const operation = this.#runtime.service.run({
+            ...selectedOptions,
+            threadId,
+            branch,
+            onEvent: async (event) => {
+              this.#publish(peer.id, branch, event);
+              await this.#dispatchExtensionEvent(peer, event);
+            },
+          });
+          const trackedOperation = operation.then(
+            async (result) => {
+              await this.#notify(peer.id, "run.finished", result);
+              return result;
+            },
+            async (error) => {
+              await this.#notify(peer.id, "run.failed", {
+                threadId,
+                message: defaultSecretRedactor.redact(error instanceof Error ? error.message : String(error)),
+              });
+              throw error;
+            },
+          ).finally(() => this.#running.delete(threadId));
+          void trackedOperation.catch(() => undefined);
+          this.#running.set(threadId, {
+            ownerId: peer.id,
+            branch,
+            kind: selectedOptions.manualCompaction === true ? "compaction" : "run",
+            selection: {
+              provider: selectedOptions.provider,
+              model: selectedOptions.model,
+              ...(selectedOptions.reasoningEffort === undefined ? {} : { reasoningEffort: selectedOptions.reasoningEffort }),
+            },
+            promise: trackedOperation,
+          });
+          retainedSelection.release();
+          return { threadId };
+        }), retainedSelection.signal);
+      } finally {
+        retainedSelection.release();
+      }
     });
   }
 
@@ -1368,70 +1575,214 @@ export class RpcRuntimeDispatcher {
     }));
   }
 
-  #subscribe(peer: RpcRuntimePeer, input: Record<string, unknown>): { subscriptionId: string; replayedThrough: number } {
+  #subscribe(peer: RpcRuntimePeer, input: Record<string, unknown>): RpcEventSubscriptionResult {
     if ([...this.#subscriptions.values()].filter((entry) => entry.peerId === peer.id).length >= 100) {
       throw new Error("Too many event subscriptions for this client");
     }
     const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
     const branch = optionalString(input.branch, "branch") ?? this.#runtime.store.getThread(threadId).defaultBranch;
+    const cursor = optionalCursor(input.afterSequence);
+    const limit = eventPageLimit(input.limit);
+    const firstPage = boundedEventPage(this.#runtime.store.listEventPage(threadId, branch, {
+      afterSequence: cursor,
+      limit,
+    }), cursor);
     const subscription: Subscription = {
       id: `subscription_${randomBytes(16).toString("hex")}`,
       peerId: peer.id,
       threadId,
       branch,
-      cursor: optionalCursor(input.afterSequence),
+      cursor,
       replaying: true,
       pendingLive: [],
+      pendingLiveBytes: 0,
+      deliveryRunning: false,
     };
     this.#subscriptions.set(subscription.id, subscription);
-    const replay = this.#runtime.store.listEvents(threadId, branch);
-    const replayedThrough = replay.reduce((cursor, event) => Math.max(cursor, event.sequence), subscription.cursor);
     setImmediate(() => {
-      if (!this.#subscriptions.has(subscription.id)) return;
-      for (const event of replay) this.#deliverNow(subscription, event);
-      for (const event of subscription.pendingLive.sort((left, right) => left.sequence - right.sequence)) {
-        this.#deliverNow(subscription, event);
-      }
-      subscription.pendingLive = [];
-      subscription.replaying = false;
+      void this.#replaySubscription(subscription, firstPage, limit).catch((cause) => {
+        if (!this.#subscriptions.has(subscription.id)) return;
+        this.#subscriptions.delete(subscription.id);
+        void this.#notify(subscription.peerId, "events.error", {
+          subscriptionId: subscription.id,
+          cursor: subscription.cursor,
+          reason: defaultSecretRedactor.redact(cause instanceof Error ? cause.message : String(cause)),
+        });
+      });
     });
-    return { subscriptionId: subscription.id, replayedThrough };
+    return {
+      subscriptionId: subscription.id,
+      replayedThrough: Math.max(cursor, firstPage.snapshotSequence),
+      nextCursor: firstPage.nextSequence,
+      hasMore: firstPage.hasMore,
+      ...(firstPage.blocked === undefined ? {} : { blocked: firstPage.blocked }),
+    };
+  }
+
+  async #replaySubscription(subscription: Subscription, firstPage: EventReplayPage, limit: number): Promise<void> {
+    let page = firstPage;
+    while (this.#subscriptions.has(subscription.id)) {
+      if (subscription.stopReason !== undefined) {
+        await this.#finalizeSubscriptionStop(subscription);
+        return;
+      }
+      for (const event of page.events) {
+        if (!await this.#deliverReplayNow(subscription, event)) return;
+        if (subscription.stopReason !== undefined) {
+          await this.#finalizeSubscriptionStop(subscription);
+          return;
+        }
+      }
+      if (page.blocked !== undefined) {
+        this.#requestSubscriptionStop(subscription, {
+          reason: `Event ${page.blocked.sequence} exceeds the serialized event limit; the subscription stopped before that event`,
+          blocked: page.blocked,
+        });
+        await this.#finalizeSubscriptionStop(subscription);
+        return;
+      }
+      if (!page.hasMore) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (!this.#subscriptions.has(subscription.id)) return;
+      const previousCursor = page.nextSequence;
+      page = boundedEventPage(this.#runtime.store.listEventPage(subscription.threadId, subscription.branch, {
+        afterSequence: previousCursor,
+        limit,
+        throughSequence: firstPage.snapshotSequence,
+      }), previousCursor);
+      if (page.nextSequence <= previousCursor && page.hasMore) {
+        throw new Error("Event replay cursor did not advance");
+      }
+    }
+    if (!this.#subscriptions.has(subscription.id)) return;
+    subscription.replaying = false;
+    await this.#drainSubscription(subscription);
+  }
+
+  async #deliverReplayNow(subscription: Subscription, event: EventEnvelope): Promise<boolean> {
+    if (event.sequence <= subscription.cursor || !this.#subscriptions.has(subscription.id)) {
+      return this.#subscriptions.has(subscription.id);
+    }
+    const bytes = serializedEventBytes(event);
+    if (bytes > RPC_EVENT_MAX_SERIALIZED_BYTES) {
+      const blocked = oversizedEvent(event, bytes);
+      this.#requestSubscriptionStop(subscription, {
+        reason: `Event ${blocked.sequence} exceeds the serialized event limit; the subscription stopped before that event`,
+        blocked,
+      });
+      await this.#finalizeSubscriptionStop(subscription);
+      return false;
+    }
+    return await this.#sendSubscriptionEvent(subscription, event);
   }
 
   #publish(ownerId: string, branch: string, event: EventEnvelope): void {
-    void this.#notify(ownerId, "run.event", event);
+    void this.#notify(ownerId, "run.event", rpcEventEnvelope(event));
     this.#publishSubscriptions(branch, event);
   }
 
   #publishSubscriptions(branch: string, event: EventEnvelope): void {
     if (this.#closing) return;
+    const projected = rpcEventEnvelope(event);
     for (const subscription of this.#subscriptions.values()) {
-      if (subscription.threadId === event.threadId && subscription.branch === branch) this.#deliver(subscription, event);
+      if (subscription.threadId === projected.threadId && subscription.branch === branch) this.#deliver(subscription, projected);
     }
   }
 
   #deliver(subscription: Subscription, event: EventEnvelope): void {
     if (event.sequence <= subscription.cursor || !this.#subscriptions.has(subscription.id)) return;
-    if (subscription.replaying) {
-      subscription.pendingLive.push(event);
-      if (subscription.pendingLive.length > 10_000) {
-        this.#subscriptions.delete(subscription.id);
-        void this.#notify(subscription.peerId, "events.error", {
-          subscriptionId: subscription.id,
-          cursor: subscription.cursor,
-          reason: "subscription handoff buffer exceeded its limit",
-        });
-      }
+    if (subscription.stopReason !== undefined) return;
+    const bytes = serializedEventBytes(event);
+    if (bytes > RPC_EVENT_MAX_SERIALIZED_BYTES) {
+      this.#requestSubscriptionStop(subscription, {
+        reason: `Event ${event.sequence} exceeds the serialized event limit; the subscription stopped before that event`,
+        blocked: oversizedEvent(event, bytes),
+      });
       return;
     }
-    this.#deliverNow(subscription, event);
+    if (subscription.pendingLive.some((entry) => entry.event.sequence === event.sequence)) return;
+    if (
+      subscription.pendingLive.length >= RPC_SUBSCRIPTION_PENDING_MAX_EVENTS ||
+      subscription.pendingLiveBytes + bytes > RPC_SUBSCRIPTION_PENDING_MAX_BYTES
+    ) {
+      this.#requestSubscriptionStop(subscription, {
+        reason: `Subscription delivery buffer exceeded ${RPC_SUBSCRIPTION_PENDING_MAX_EVENTS} events or ${RPC_SUBSCRIPTION_PENDING_MAX_BYTES} bytes`,
+      });
+      return;
+    }
+    const insertion = subscription.pendingLive.findIndex((entry) => entry.event.sequence > event.sequence);
+    if (insertion < 0) subscription.pendingLive.push({ event, bytes });
+    else subscription.pendingLive.splice(insertion, 0, { event, bytes });
+    subscription.pendingLiveBytes += bytes;
+    if (!subscription.replaying) void this.#drainSubscription(subscription);
   }
 
-  #deliverNow(subscription: Subscription, event: EventEnvelope): void {
-    if (event.sequence <= subscription.cursor || !this.#subscriptions.has(subscription.id)) return;
+  async #drainSubscription(subscription: Subscription): Promise<void> {
+    if (subscription.deliveryRunning || subscription.replaying || !this.#subscriptions.has(subscription.id)) return;
+    subscription.deliveryRunning = true;
+    try {
+      while (subscription.pendingLive.length > 0 && this.#subscriptions.has(subscription.id)) {
+        const selected = subscription.pendingLive[0]!;
+        if (!await this.#sendSubscriptionEvent(subscription, selected.event)) return;
+        if (subscription.pendingLive[0] === selected) subscription.pendingLive.shift();
+        subscription.pendingLiveBytes = Math.max(0, subscription.pendingLiveBytes - selected.bytes);
+        if (subscription.stopReason !== undefined) break;
+      }
+    } finally {
+      subscription.deliveryRunning = false;
+    }
+    if (subscription.stopReason !== undefined) await this.#finalizeSubscriptionStop(subscription);
+    else if (subscription.pendingLive.length > 0) await this.#drainSubscription(subscription);
+  }
+
+  async #sendSubscriptionEvent(subscription: Subscription, event: EventEnvelope): Promise<boolean> {
+    if (event.sequence <= subscription.cursor || !this.#subscriptions.has(subscription.id)) {
+      return this.#subscriptions.has(subscription.id);
+    }
+    const peer = this.#peers.get(subscription.peerId);
+    if (peer === undefined) {
+      this.#subscriptions.delete(subscription.id);
+      return false;
+    }
+    try {
+      await peer.notification("events.event", { subscriptionId: subscription.id, event });
+    } catch (cause) {
+      subscription.pendingLive = [];
+      subscription.pendingLiveBytes = 0;
+      this.#subscriptions.delete(subscription.id);
+      await this.#notify(subscription.peerId, "events.error", {
+        subscriptionId: subscription.id,
+        cursor: subscription.cursor,
+        reason: `Event delivery failed before cursor advancement: ${defaultSecretRedactor.redact(cause instanceof Error ? cause.message : String(cause))}`,
+      });
+      return false;
+    }
     subscription.cursor = event.sequence;
-    void this.#notify(subscription.peerId, "events.event", { subscriptionId: subscription.id, event }).then((sent) => {
-      if (!sent) this.#subscriptions.delete(subscription.id);
+    return this.#subscriptions.has(subscription.id);
+  }
+
+  #requestSubscriptionStop(
+    subscription: Subscription,
+    stop: { reason: string; blocked?: RpcOversizedEvent },
+  ): void {
+    if (!this.#subscriptions.has(subscription.id) || subscription.stopReason !== undefined) return;
+    subscription.stopReason = stop;
+    subscription.pendingLive = [];
+    subscription.pendingLiveBytes = 0;
+    if (!subscription.replaying && !subscription.deliveryRunning) void this.#finalizeSubscriptionStop(subscription);
+  }
+
+  async #finalizeSubscriptionStop(subscription: Subscription): Promise<void> {
+    const stop = subscription.stopReason;
+    if (stop === undefined || !this.#subscriptions.has(subscription.id)) return;
+    this.#subscriptions.delete(subscription.id);
+    subscription.pendingLive = [];
+    subscription.pendingLiveBytes = 0;
+    await this.#notify(subscription.peerId, "events.error", {
+      subscriptionId: subscription.id,
+      cursor: subscription.cursor,
+      reason: stop.reason,
+      ...(stop.blocked === undefined ? {} : { blocked: stop.blocked }),
     });
   }
 

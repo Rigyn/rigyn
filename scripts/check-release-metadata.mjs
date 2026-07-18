@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,6 +193,18 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
   const releaseWorkflow = await readText(projectRoot, ".github/workflows/release.yml");
   for (const target of EXPECTED_TARGETS) assert.ok(releaseWorkflow.includes(target.runner), `release.yml must use ${target.runner}`);
   const releaseDocument = parseYaml(releaseWorkflow);
+  const releaseGuards = releaseDocument?.jobs?.["regression-guards"];
+  const releaseGuardCommands = new Set(
+    (releaseGuards?.steps ?? []).map((step) => step?.run).filter((command) => typeof command === "string"),
+  );
+  for (const command of ["npm run test:coverage:risk", "npm run benchmark:runtime"]) {
+    assert.ok(releaseGuardCommands.has(command), `release.yml regression-guards must run ${command}`);
+  }
+  assert.equal(
+    releaseDocument?.jobs?.stage?.needs,
+    "regression-guards",
+    "release staging must wait for the regression guards",
+  );
   const stagedUpload = releaseDocument?.jobs?.stage?.steps?.find((step) => step?.name === "Upload staged release");
   assert.equal(
     stagedUpload?.with?.["include-hidden-files"],
@@ -227,11 +240,11 @@ const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
     const result = await checkReleaseMetadata();
-    process.stdout.write(
+    writeFileSync(1,
       `Release metadata policy passed for ${result.version}: ${result.subpathCount} public subpaths, ${result.targetCount} platform targets, ${result.actionCount} pinned action uses.\n`,
     );
   } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    writeFileSync(2, `${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
 }

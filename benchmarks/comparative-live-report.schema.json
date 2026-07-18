@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Rigyn/rigyn/blob/main/benchmarks/comparative-live-report.schema.json",
+  "title": "Rigyn comparative live benchmark report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "suite", "purpose", "stochastic", "provider", "model", "samples", "runs", "summary"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "suite": { "const": "comparative-live-v1" },
+    "purpose": { "const": "same-task-peer-comparison" },
+    "stochastic": { "const": true },
+    "provider": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "samples": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "runs": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taskId", "harnessId", "sample", "metrics"],
+        "properties": {
+          "taskId": { "type": "string", "minLength": 1 },
+          "harnessId": { "type": "string", "minLength": 1 },
+          "sample": { "type": "integer", "minimum": 1 },
+          "metrics": { "$ref": "#/$defs/runMetrics" }
+        }
+      }
+    },
+    "summary": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["harnessId", "runs", "completionRate", "verifierPassRate", "passRate", "medianWallTimeMs", "steps", "toolErrors", "usage"],
+        "properties": {
+          "harnessId": { "type": "string", "minLength": 1 },
+          "runs": { "type": "integer", "minimum": 1 },
+          "completionRate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "verifierPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "passRate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "medianWallTimeMs": { "type": "number", "minimum": 0 },
+          "steps": { "type": ["integer", "null"], "minimum": 0 },
+          "toolErrors": { "type": ["integer", "null"], "minimum": 0 },
+          "usage": { "$ref": "#/$defs/usage" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nullableCount": { "type": ["integer", "null"], "minimum": 0 },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "costUsd"],
+      "properties": {
+        "inputTokens": { "$ref": "#/$defs/nullableCount" },
+        "outputTokens": { "$ref": "#/$defs/nullableCount" },
+        "totalTokens": { "$ref": "#/$defs/nullableCount" },
+        "cacheReadTokens": { "$ref": "#/$defs/nullableCount" },
+        "cacheWriteTokens": { "$ref": "#/$defs/nullableCount" },
+        "reasoningTokens": { "$ref": "#/$defs/nullableCount" },
+        "costUsd": { "type": ["string", "null"] }
+      }
+    },
+    "runMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completion", "verifierPassed", "passed", "wallTimeMs", "exitCode", "stdoutBytes", "stderrBytes", "steps", "toolErrors", "usage"],
+      "properties": {
+        "completion": { "type": "boolean" },
+        "verifierPassed": { "type": "boolean" },
+        "passed": { "type": "boolean" },
+        "failure": { "enum": ["command_error", "command_failed", "timed_out", "verification_failed"] },
+        "wallTimeMs": { "type": "number", "minimum": 0 },
+        "exitCode": { "type": ["integer", "null"] },
+        "stdoutBytes": { "type": "integer", "minimum": 0 },
+        "stderrBytes": { "type": "integer", "minimum": 0 },
+        "steps": { "$ref": "#/$defs/nullableCount" },
+        "toolErrors": { "$ref": "#/$defs/nullableCount" },
+        "usage": { "$ref": "#/$defs/usage" }
+      }
+    }
+  }
+}

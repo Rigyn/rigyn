@@ -562,6 +562,7 @@ test("before-provider request hooks chain safe patches and reject identity, tool
     const reduced = await host.reduceBeforeProviderRequest({
       threadId: "thread-1",
       runId: "run-1",
+      branch: "main",
       step: 1,
       provider: "provider-1",
       model: "model-1",
@@ -584,7 +585,7 @@ test("before-provider request hooks chain safe patches and reject identity, tool
       "first", "identity", "tool", "secret", "last:first:original",
     ]);
     assert.deepEqual((globalThis as Record<string, unknown>).__providerBoundaryKeys, [
-      ["model", "provider", "request", "runId", "step", "threadId"],
+      ["branch", "model", "provider", "request", "runId", "step", "threadId"],
       ["maxOutputTokens", "messages", "metadata", "tools"],
     ]);
     assert.ok(host.diagnostics().some((entry) => entry.message.includes("identity or unsupported") || entry.message.includes("unknown or owner-controlled")));
@@ -614,6 +615,7 @@ test("before-provider request hooks settle on cancellation and replace cleanly a
   const event = {
     threadId: "thread-1",
     runId: "run-1",
+    branch: "main",
     provider: "provider-1",
     model: "model-1",
     request: { messages: [message("cancel-user", "user", "cancel")], tools: [] },
@@ -724,10 +726,15 @@ test("post-activation flag, shortcut, command, and hook registrations become liv
   assert.equal((globalThis as Record<string, unknown>).__authoringLateShortcut, true);
   assert.deepEqual(await host.completeCommandArguments("late-authoring", ""), [{ value: "done" }]);
   assert.deepEqual(await host.runCommand("late-authoring", { ...commandContext(), args: "" }), { handled: true, prompt: "late" });
-  assert.deepEqual((await host.reduceContext([
-    message("first", "user", "one"),
-    message("second", "assistant", "two"),
-  ])).map((entry) => entry.id), ["first"]);
+  assert.deepEqual((await host.reduceContext({
+    threadId: "thread-1",
+    runId: "run-1",
+    branch: "main",
+    messages: [
+      message("first", "user", "one"),
+      message("second", "assistant", "two"),
+    ],
+  })).map((entry) => entry.id), ["first"]);
   await host.dispatch("session_end", { reason: "quit", threadId: "thread-1" });
   assert.equal((globalThis as Record<string, unknown>).__authoringShutdown, undefined);
   await host.close();
@@ -856,15 +863,24 @@ test("input, prompt, context, and message reducers chain in load order and isola
 
   assert.deepEqual(await host.reduceInput({ text: "go", source: "tui" }), { action: "transform", text: "go:one:two" });
   assert.deepEqual(await host.reduceInput({ text: "stop", source: "rpc" }), { action: "handled" });
-  const before = await host.reduceBeforeAgentStart({ prompt: "p", systemPrompt: "base" });
+  const runScope = { threadId: "thread-authoring", runId: "run-authoring", branch: "main" };
+  const before = await host.reduceBeforeAgentStart({ ...runScope, prompt: "p", systemPrompt: "base" });
   assert.equal(before.systemPrompt, "base:one:two");
   assert.deepEqual(before.messages.map((entry) => entry.id), ["injected-1"]);
-  const reducedContext = await host.reduceContext([
-    message("user", "user", "request"),
-    message("tool", "tool", "result"),
-  ]);
+  const reducedContext = await host.reduceContext({
+    ...runScope,
+    step: 1,
+    messages: [
+      message("user", "user", "request"),
+      message("tool", "tool", "result"),
+    ],
+  });
   assert.deepEqual(reducedContext.map((entry) => entry.id), ["user", "context-last"]);
-  const ended = await host.reduceMessageEnd(message("assistant", "assistant", "answer"));
+  const ended = await host.reduceMessageEnd({
+    ...runScope,
+    step: 1,
+    message: message("assistant", "assistant", "answer"),
+  });
   assert.equal(ended.role, "assistant");
   assert.equal(ended.displayText, "one:two");
   assert.ok(host.diagnostics().some((entry) => entry.message.includes("input boom")));
@@ -892,12 +908,14 @@ test("tool reducers expose prior mutations, chain partial result patches, and fa
   assert.deepEqual(allowed, {
     invocation: { ...target, callId: "call-1", name: "write", input: { path: "safe/ok" }, index: 0 },
     blocked: false,
+    transformations: [{ actor: "extension-0" }],
   });
   const blocked = await host.reduceToolCall({ ...target, callId: "call-2", name: "write", input: { path: "blocked" }, index: 1 });
   assert.equal(blocked.blocked, true);
   assert.equal(blocked.reason, "protected");
   assert.deepEqual(blocked.invocation.input, { path: "safe/blocked" });
   const result = await host.reduceToolResult({
+    ...target,
     invocation: allowed.invocation,
     result: { content: "base", isError: false },
   });
@@ -913,7 +931,7 @@ test("tool reducers expose prior mutations, chain partial result patches, and fa
   const decision = await failed.host.reduceToolCall({ ...target, callId: "call-3", name: "bash", input: {}, index: 0 });
   assert.equal(decision.blocked, true);
   assert.match(decision.reason ?? "", /preflight boom/u);
-  assert.deepEqual(decision.invocation.input, { checked: true });
+  assert.deepEqual(decision.invocation.input, {});
   assert.equal((globalThis as Record<string, unknown>).__authoringUnsafeToolContinued, undefined);
   await failed.host.close();
 });
@@ -938,6 +956,9 @@ test("session and compaction reducers cancel deterministically and accept bounde
     sourceEventIds: ["event-1"],
   }), { summary: { text: "tree summary", metadata: { count: 1 } } });
   const compactionEvent = {
+    threadId: "thread-1",
+    runId: "run-1",
+    branch: "main",
     plan: {
       kind: "compact",
       provider: "offline",

@@ -47,7 +47,7 @@ async function writePackage(root: string, version: string, text: string): Promis
     id: "declared",
     name: "Declared package",
     version,
-    compatibility: { hostVersion: ">=0.1.0 <0.2.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
     contributions: { runtime: [{ path: "runtime/index.mjs" }] },
   }, null, 2)}\n`);
 }

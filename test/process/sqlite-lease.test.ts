@@ -51,9 +51,10 @@ test("SQLite process leases recover immediately after their owner process exits"
   const path = join(root, "operation.lock.sqlite3");
   const moduleUrl = pathToFileURL(new URL("../../src/process/sqlite-lease.ts", import.meta.url).pathname).href;
   const source = `
+    import { writeFileSync } from "node:fs";
     import { withSqliteProcessLease } from ${JSON.stringify(moduleUrl)};
     await withSqliteProcessLease(${JSON.stringify(path)}, async () => {
-      process.stdout.write("locked\\n");
+      writeFileSync(1, "locked\\n");
       setInterval(() => {}, 1000);
       await new Promise(() => {});
     }, { timeoutMs: 2000, retryMs: 5, label: "crash fixture" });

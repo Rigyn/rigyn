@@ -4,12 +4,100 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
+import {
+  loadRuntimeExtensions,
+  type RuntimeCompactionInput,
+  type RuntimeThinkingSelectionInput,
+} from "../../src/extensions/runtime.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { HarnessService } from "../../src/service/harness.js";
 import { SessionStore } from "../../src/storage/store.js";
 import { ScriptedProvider } from "../../src/testing/scripted-provider.js";
 import { sha256 } from "../../src/tools/hash.js";
+
+test("runtime extensions forward bounded compaction and thinking controls", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-bounded-controls-"));
+  const sourcePath = join(root, "bounded-controls.mjs");
+  const source = `export default (api) => { globalThis.__runtimeBoundedControlsApi = api; };\n`;
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "bounded-controls",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root });
+  t.after(async () => {
+    await host.close();
+    delete (globalThis as Record<string, unknown>).__runtimeBoundedControlsApi;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const observed: Array<Record<string, unknown>> = [];
+  host.setSessionHandler({
+    async compact(input: RuntimeCompactionInput) {
+      observed.push({ operation: "compact", ...input });
+      return { threadId: input.threadId, branch: input.branch ?? "main", summary: "bounded summary" };
+    },
+    async setThinking(input: RuntimeThinkingSelectionInput) {
+      observed.push({ operation: "thinking", ...input });
+      return { provider: "control-provider", model: "control-model", reasoningEffort: input.reasoningEffort };
+    },
+  } as never);
+  const api = (globalThis as Record<string, any>).__runtimeBoundedControlsApi;
+
+  assert.deepEqual(await api.compact({
+    threadId: "bounded-thread",
+    branch: "review",
+    provider: "control-provider",
+    model: "control-model",
+    reasoningEffort: "low",
+    instructions: "Preserve decisions",
+    contextTokenBudget: 4_096,
+    summaryTokenBudget: 512,
+  }), {
+    threadId: "bounded-thread",
+    branch: "review",
+    summary: "bounded summary",
+  });
+  assert.deepEqual(await api.setThinkingLevel({
+    threadId: "bounded-thread",
+    branch: "review",
+    reasoningEffort: "high",
+  }), {
+    provider: "control-provider",
+    model: "control-model",
+    reasoningEffort: "high",
+  });
+
+  assert.deepEqual(observed.map(({ signal, ...entry }) => ({
+    ...entry,
+    signal: signal instanceof AbortSignal,
+  })), [{
+    operation: "compact",
+    threadId: "bounded-thread",
+    branch: "review",
+    signal: true,
+    provider: "control-provider",
+    model: "control-model",
+    reasoningEffort: "low",
+    instructions: "Preserve decisions",
+    contextTokenBudget: 4_096,
+    summaryTokenBudget: 512,
+  }, {
+    operation: "thinking",
+    threadId: "bounded-thread",
+    branch: "review",
+    reasoningEffort: "high",
+    signal: true,
+  }]);
+  await assert.rejects(
+    api.compact({ threadId: "bounded-thread", contextTokenBudget: 0 }),
+    /contextTokenBudget is invalid/u,
+  );
+  await assert.rejects(
+    api.setThinkingLevel({ threadId: "bounded-thread", reasoningEffort: 1 }),
+    /thinking level is invalid/u,
+  );
+});
 
 test("runtime extensions control sessions, messages, selection, queues, and host commands", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-controls-"));

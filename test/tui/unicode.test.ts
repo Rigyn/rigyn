@@ -21,3 +21,12 @@ test("untrusted terminal text cannot inject ANSI or control sequences", () => {
   const unsafe = "ok\u001b[2J\u001b]0;owned\u0007\nnext\u0000\tvalue";
   assert.equal(sanitizeTerminalText(unsafe), "ok\nnext    value");
 });
+
+test("terminal text normalizes CRLF, bare carriage returns, and tabs before wrapping", () => {
+  assert.equal(sanitizeTerminalText("first\r\nsecond\rthird\tfourth"), "first\nsecond\nthird    fourth");
+  assert.deepEqual(wrapCells("first\r\nsecond\rthird\tfourth", 80), [
+    "first",
+    "second",
+    "third    fourth",
+  ]);
+});

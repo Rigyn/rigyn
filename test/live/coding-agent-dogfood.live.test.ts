@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { loadRuntime, type LoadedRuntime } from "../../src/cli/runtime.js";
@@ -408,12 +408,21 @@ export function average(values) {
           "Register exactly one model-callable tool named dogfood_echo with a closed schema requiring one string field named text.",
           "For valid input, return isError false, top-level status success, a non-empty summary, an empty nextActions array, and JSON content shaped as {\"echo\": <the exact input>}.",
           "Add and run a deterministic node:test covering activation, schema, and the structured result.",
+          "Inspect the test exit status and output; if it fails, fix the package or test and rerun it. Finish only after the test passes.",
           "This temporary project has no host dependency installed: the test must import only Node built-ins and local package files, use a minimal local activation host stub, and must not import rigyn or rigyn/extensions.",
           "Do not install the package; the independent verifier will install, reload, invoke, and remove it.",
         ].join(" "),
       }, budget);
-      const inspected = (path: string): boolean => observation.toolRequests.some((entry) =>
-        ["read", "bash", "grep"].includes(entry.name) && entry.input.includes(path));
+      const inspected = (path: string): boolean => {
+        const candidates = [
+          path,
+          relative(resources.packageRoot, path),
+          relative(dirname(resources.authoringSkill), path),
+        ].map((entry) => entry.replaceAll("\\", "/"));
+        return observation.toolRequests.some((entry) =>
+          ["read", "bash", "grep"].includes(entry.name)
+          && candidates.some((candidate) => entry.input.replaceAll("\\", "/").includes(candidate)));
+      };
       assert.equal(inspected(resources.authoringSkill), true,
       "agent did not load the bundled build-extension skill");
       assert.equal(inspected(join(resources.documentationRoot, "extensions.md")), true,

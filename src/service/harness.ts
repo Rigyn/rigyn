@@ -64,6 +64,7 @@ import {
 import { sha256 } from "../tools/hash.js";
 import { buildSystemPrompt, instructionMessage } from "../prompts/index.js";
 import { StoreArtifactWriter, StoredConversation } from "./session-runtime.js";
+import { WorkspaceSessionFacade } from "./session-access.js";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
@@ -72,18 +73,13 @@ import {
   normalizeChildRunPolicy,
   type ChildRunPolicy,
 } from "../core/child-runs.js";
-import type { BranchRecord, RunInputQueueRecord } from "../storage/types.js";
+import type { BranchRecord, RunInputQueueRecord, RunRecord } from "../storage/types.js";
 import {
   BRANCH_SUMMARY_LIMITS,
   generateBranchSummary,
   prepareAbandonedBranch,
 } from "./branch-summary.js";
-import {
-  cloneSessionPath as cloneStoredSessionPath,
-  type CloneSessionPathInput,
-  type CloneSessionPathResult,
-} from "./session-clone.js";
-import { buildSessionTree } from "./session-tree.js";
+import type { CloneSessionPathInput, CloneSessionPathResult } from "./session-clone.js";
 import type {
   RuntimeAgentOutcome,
   RuntimeExtensionEvent,
@@ -97,6 +93,7 @@ import type {
   RuntimeChildUsage,
   RuntimeChildVisibleEvent,
   RuntimeModelSelection,
+  RuntimeRunScope,
   RuntimeSessionSnapshot,
   RuntimeExtensionStateRecord,
   RuntimeExtensionStateCompareAndAppendResult,
@@ -111,6 +108,7 @@ import {
 } from "./resource-catalog.js";
 import { projectHarnessTranscriptPage } from "./transcript-projection.js";
 import {
+  HARNESS_TRANSCRIPT_LIMITS,
   parseHarnessTranscriptPage,
   type HarnessTranscriptPage,
   type HarnessTranscriptRequest,
@@ -123,6 +121,7 @@ import {
 } from "./session-catalog.js";
 
 const CANCELLED_EXTENSION_OBSERVER_SETTLEMENT_TIMEOUT_MS = 1_000;
+const RESOURCE_GENERATION_READER_DRAIN_TIMEOUT_MS = 1_000;
 const RUNTIME_CHILD_INSTRUCTION_SOURCE = "runtime child run";
 const MAX_PROMPT_COMPOSITION_SOURCES = 128;
 const MAX_PROMPT_COMPOSITION_TOOLS = 128;
@@ -198,13 +197,18 @@ const RUNTIME_CHILD_VISIBLE_EVENT_TYPES = new Set<RuntimeChildVisibleEvent["type
 function runtimeChildEvent(envelope: EventEnvelope, branch: string): RuntimeChildEvent | undefined {
   if (!RUNTIME_CHILD_VISIBLE_EVENT_TYPES.has(envelope.event.type as RuntimeChildVisibleEvent["type"])) return undefined;
   if (envelope.event.type === "reasoning_delta" && envelope.event.visibility !== "summary") return undefined;
+  let event = envelope.event;
+  if (event.type === "run_failed" && "retryable" in event.error) {
+    const { diagnostics: _diagnostics, ...error } = event.error;
+    event = { ...event, error };
+  }
   return {
     threadId: envelope.threadId,
     branch,
     ...(envelope.runId === undefined ? {} : { runId: envelope.runId }),
     sequence: envelope.sequence,
     timestamp: envelope.timestamp,
-    event: structuredClone(envelope.event) as RuntimeChildVisibleEvent,
+    event: structuredClone(event) as RuntimeChildVisibleEvent,
   };
 }
 
@@ -294,6 +298,25 @@ function observerAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
+async function settlePromiseWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(observerAbortReason(signal)));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 async function settleObserverWithSignal(
   observer: () => void | Promise<void>,
   signal: AbortSignal,
@@ -333,7 +356,7 @@ export interface HarnessOptions {
   userInstructions?: { text: string; source?: string };
   userInstructionFile?: string;
   skillRoots?: SkillRoot[];
-  extraTools?: HarnessTool[];
+  extraTools?: readonly HarnessTool[];
   /** Routes explicitly claimed model tools through a fail-closed host boundary. */
   toolBackend?: ToolExecutionBackend;
   outboundImages?: OutboundImagePolicy;
@@ -353,8 +376,8 @@ export interface HarnessOptions {
 export interface HarnessRuntimeResources {
   providers: ProviderRegistry;
   projectTrusted: boolean;
-  skills: SkillMetadata[];
-  extraTools: HarnessTool[];
+  skills: readonly SkillMetadata[];
+  extraTools: readonly HarnessTool[];
   toolBackend?: ToolExecutionBackend;
   outboundImages?: OutboundImagePolicy;
   runtimeExtensions?: RuntimeExtensionHost;
@@ -365,6 +388,91 @@ export interface HarnessRuntimeResources {
   retry?: RetryPolicy;
   childRuns?: Partial<ChildRunPolicy>;
   resourceCatalog?: Pick<HarnessResourceCatalogSources, "extensions" | "packages" | "projectPackages" | "packageDiagnostics">;
+}
+
+interface HarnessResourceGeneration {
+  readonly providers: ProviderRegistry;
+  readonly projectTrusted: boolean;
+  readonly skills: readonly SkillMetadata[];
+  readonly extraTools: readonly HarnessTool[];
+  readonly toolBackend?: ToolExecutionBackend;
+  readonly outboundImages: OutboundImagePolicy;
+  readonly runtimeExtensions?: RuntimeExtensionHost;
+  readonly shellPath?: string;
+  readonly autoCompaction?: boolean;
+  readonly compactionRetainRecentTurns?: number;
+  readonly compactionToolResultBytes?: number;
+  readonly retry?: Readonly<RetryPolicy>;
+  readonly childRunPolicy: Readonly<ChildRunPolicy>;
+  readonly resourceCatalog?: Pick<HarnessResourceCatalogSources, "extensions" | "packages" | "projectPackages" | "packageDiagnostics">;
+}
+
+interface HarnessResourceGenerationReaders {
+  count: number;
+  runHandoffs: number;
+  readonly idle: Promise<void>;
+  readonly resolveIdle: () => void;
+  readonly controllers: Set<AbortController>;
+}
+
+function immutableResourceGeneration(resources: HarnessRuntimeResources): HarnessResourceGeneration {
+  const resourceCatalog = resources.resourceCatalog === undefined
+    ? undefined
+    : Object.freeze({
+        ...resources.resourceCatalog,
+        ...(resources.resourceCatalog.packages === undefined
+          ? {}
+          : { packages: Object.freeze([...resources.resourceCatalog.packages]) }),
+        ...(resources.resourceCatalog.projectPackages === undefined
+          ? {}
+          : { projectPackages: Object.freeze([...resources.resourceCatalog.projectPackages]) }),
+        ...(resources.resourceCatalog.packageDiagnostics === undefined
+          ? {}
+          : { packageDiagnostics: Object.freeze([...resources.resourceCatalog.packageDiagnostics]) }),
+      });
+  return Object.freeze({
+    providers: resources.providers,
+    projectTrusted: resources.projectTrusted,
+    skills: Object.freeze([...resources.skills]),
+    extraTools: Object.freeze([...resources.extraTools]),
+    ...(resources.toolBackend === undefined ? {} : { toolBackend: resources.toolBackend }),
+    outboundImages: resources.outboundImages ?? "allow",
+    ...(resources.runtimeExtensions === undefined ? {} : { runtimeExtensions: resources.runtimeExtensions }),
+    ...(resources.shellPath === undefined ? {} : { shellPath: resources.shellPath }),
+    ...(resources.autoCompaction === undefined ? {} : { autoCompaction: resources.autoCompaction }),
+    ...(resources.compactionRetainRecentTurns === undefined
+      ? {}
+      : { compactionRetainRecentTurns: resources.compactionRetainRecentTurns }),
+    ...(resources.compactionToolResultBytes === undefined
+      ? {}
+      : { compactionToolResultBytes: resources.compactionToolResultBytes }),
+    ...(resources.retry === undefined ? {} : { retry: Object.freeze({ ...resources.retry }) }),
+    childRunPolicy: Object.freeze(normalizeChildRunPolicy(resources.childRuns)),
+    ...(resourceCatalog === undefined ? {} : { resourceCatalog }),
+  });
+}
+
+function initialResourceGeneration(options: HarnessOptions): HarnessResourceGeneration {
+  return immutableResourceGeneration({
+    providers: options.providers,
+    projectTrusted: options.projectTrusted ?? false,
+    skills: [],
+    extraTools: options.extraTools ?? [],
+    ...(options.toolBackend === undefined ? {} : { toolBackend: options.toolBackend }),
+    ...(options.outboundImages === undefined ? {} : { outboundImages: options.outboundImages }),
+    ...(options.runtimeExtensions === undefined ? {} : { runtimeExtensions: options.runtimeExtensions }),
+    ...(options.shellPath === undefined ? {} : { shellPath: options.shellPath }),
+    ...(options.autoCompaction === undefined ? {} : { autoCompaction: options.autoCompaction }),
+    ...(options.compactionRetainRecentTurns === undefined
+      ? {}
+      : { compactionRetainRecentTurns: options.compactionRetainRecentTurns }),
+    ...(options.compactionToolResultBytes === undefined
+      ? {}
+      : { compactionToolResultBytes: options.compactionToolResultBytes }),
+    ...(options.retry === undefined ? {} : { retry: options.retry }),
+    ...(options.childRuns === undefined ? {} : { childRuns: options.childRuns }),
+    ...(options.resourceCatalog === undefined ? {} : { resourceCatalog: options.resourceCatalog }),
+  });
 }
 
 export interface RunOptions {
@@ -404,6 +512,12 @@ export interface RunOptions {
 
 export interface ResolveModelSelectionOptions extends ModelReferenceOptions {
   signal?: AbortSignal;
+}
+
+export interface RetainedModelSelection {
+  readonly selection: ResolvedModelSelection;
+  readonly signal: AbortSignal;
+  release(): void;
 }
 
 export interface HarnessRun {
@@ -449,7 +563,19 @@ export interface NavigateTreeResult {
   summaryEvent?: EventEnvelope<Extract<RuntimeEvent, { type: "branch_summary_created" }>>;
 }
 
+interface CreateSessionInput {
+  threadId?: string;
+  name?: string;
+  defaultBranch?: string;
+  parentThreadId?: string;
+  parentRunId?: string;
+  sourceEventId?: string;
+  cwd?: string;
+  signal?: AbortSignal;
+}
+
 interface RuntimeLifecycleProjection {
+  branch: string;
   step: number;
   tools: Map<string, ToolInvocation>;
 }
@@ -588,9 +714,11 @@ function extensionMessageRecord(
 
 export class HarnessService {
   readonly #options: HarnessOptions;
+  #resources: HarnessResourceGeneration;
   readonly #runner: AgentRunner;
   readonly #manager: ThreadRunManager;
   readonly #workspaceRoot: string;
+  readonly #sessionAccess: WorkspaceSessionFacade;
   readonly #listeners = new Map<string, (event: EventEnvelope) => Promise<void> | void>();
   readonly #extensionSessionListeners = new Set<ExtensionSessionPublicationListener>();
   readonly #activeToolSelections = new Map<string, {
@@ -603,9 +731,8 @@ export class HarnessService {
   readonly #sessions = new Map<string, { branch?: string; cwd: string }>();
   readonly #pendingExtensionTurns = new Map<string, Map<number, RuntimeTurnEndEvent>>();
   readonly #childRunDepth = new Map<string, number>();
-  #childRunPolicy: ChildRunPolicy;
+  readonly #resourceGenerationReaders = new Map<HarnessResourceGeneration, HarnessResourceGenerationReaders>();
   #activeChildRuns = 0;
-  #skills: SkillMetadata[] = [];
   #workspaceBoundary: WorkspaceBoundary | undefined;
   #closed = false;
   #reloading = false;
@@ -617,22 +744,24 @@ export class HarnessService {
   #runtimeOwnerStarted = false;
   #runtimeOwnerFailure: HarnessError | undefined;
   #initializing = false;
-  #closeStarted = false;
+  #closeFlight: Promise<void> | undefined;
 
   constructor(options: HarnessOptions) {
     this.#options = options;
-    this.#childRunPolicy = normalizeChildRunPolicy(options.childRuns);
+    this.#resources = initialResourceGeneration(options);
     this.#workspaceRoot = resolve(options.workspace);
+    this.#sessionAccess = new WorkspaceSessionFacade(options.store, this.#workspaceRoot);
     const conversation = new StoredConversation(options.store);
     this.#runner = new AgentRunner({
       conversation,
       events: (threadId, runId, branch, signal) => {
+        const resolvedBranch = this.#extensionBranch(threadId, branch);
         const persistent = options.store.createEventSink({
           threadId,
           runId,
-          ...(branch === undefined ? {} : { branch }),
+          branch: resolvedBranch,
         });
-        const projection: RuntimeLifecycleProjection = { step: 0, tools: new Map() };
+        const projection: RuntimeLifecycleProjection = { branch: resolvedBranch, step: 0, tools: new Map() };
         return {
           emit: async (event) => {
             const sanitized = defaultSecretRedactor.redactValue(event) as RuntimeEvent;
@@ -658,27 +787,38 @@ export class HarnessService {
       },
       lifecycle: {
         beforeRun: async (event, signal) => {
-          await this.#observeRuntime("agent_start", event, signal);
+          await this.#observeRuntime("agent_start", {
+            ...event,
+            ...this.#runtimeRunScope(event),
+          }, signal);
         },
         afterRun: async (event, signal) => {
-          const extensionEvent = { ...event, outcome: boundedAgentOutcome(event.outcome) };
+          const extensionEvent = {
+            ...this.#runtimeRunScope(event),
+            outcome: boundedAgentOutcome(event.outcome),
+          };
           await this.#flushPendingExtensionTurns(event.runId, signal);
           await this.#observeRuntime("agent_end", extensionEvent, signal);
           await this.#observeRuntime("agent_settled", extensionEvent, signal);
         },
         beforeModel: async (event, signal) => {
-          await this.#observeRuntime("turn_start", event, signal);
+          const runScope = this.#runtimeRunScope(event);
+          await this.#observeRuntime("turn_start", { ...event, ...runScope }, signal);
           await this.#observeRuntime("message_start", {
-            threadId: event.threadId,
-            runId: event.runId,
+            ...runScope,
             step: event.step,
             role: "assistant",
           }, signal);
         },
         afterModel: async (event, signal) => {
+          const runScope = this.#runtimeRunScope(event);
           const extensionEvent: RuntimeTurnEndEvent = event.outcome.status === "failed"
-            ? { ...event, outcome: { status: "failed", error: boundedLifecycleAdapterError(event.outcome.error) } }
-            : event;
+            ? {
+                ...event,
+                ...runScope,
+                outcome: { status: "failed", error: boundedLifecycleAdapterError(event.outcome.error) },
+              }
+            : { ...event, ...runScope };
           if (extensionEvent.outcome.status === "completed") {
             const turns = this.#pendingExtensionTurns.get(event.runId) ?? new Map<number, RuntimeTurnEndEvent>();
             turns.set(event.step, extensionEvent);
@@ -688,12 +828,20 @@ export class HarnessService {
           }
         },
         afterProviderResponse: async (event, signal) => {
-          await this.#observeRuntime("after_provider_response", event, signal);
+          await this.#observeRuntime(
+            "after_provider_response",
+            {
+              ...(defaultSecretRedactor.redactValue(event) as typeof event),
+              ...this.#runtimeRunScope(event),
+            },
+            signal,
+          );
         },
         beforeCompaction: async (event, signal) => {
-          const extensions = this.#options.runtimeExtensions;
+          const extensions = this.#resources.runtimeExtensions;
           if (extensions === undefined || !extensions.hasListeners("session_before_compact")) return undefined;
           const result = await extensions.reduceSessionBeforeCompact({
+            ...this.#runtimeRunScope(event),
             plan: event.plan,
             ...(event.customInstructions === undefined ? {} : { customInstructions: event.customInstructions }),
             signal,
@@ -707,6 +855,7 @@ export class HarnessService {
         },
         afterCompaction: async (event, signal) => {
           await this.#observeRuntime("session_compact", {
+            ...this.#runtimeRunScope(event),
             reason: event.reason,
             summary: event.summary,
             sourceMessageIds: event.sourceMessageIds,
@@ -718,7 +867,7 @@ export class HarnessService {
       },
     });
     this.#manager = new ThreadRunManager(this.#runner);
-    this.#bindExtensionSessionHost(options.runtimeExtensions);
+    this.#bindExtensionSessionHost(this.#resources.runtimeExtensions);
   }
 
   async initialize(options: { recover?: boolean; skills?: readonly SkillMetadata[] } = {}): Promise<void> {
@@ -738,9 +887,13 @@ export class HarnessService {
     try {
       ownerStarted = this.#startRuntimeOwner();
       this.#workspaceBoundary = await WorkspaceBoundary.create(this.#options.workspace);
-      this.#skills = options.skills === undefined
+      const skills = options.skills === undefined
         ? await discoverSkills(this.#options.skillRoots ?? [])
         : [...options.skills];
+      this.#resources = Object.freeze({
+        ...this.#resources,
+        skills: Object.freeze([...skills]),
+      });
       if (options.recover === true) await this.recoverWorkspaceRuntime();
     } catch (error) {
       if (ownerStarted) this.#stopRuntimeOwner();
@@ -832,9 +985,8 @@ export class HarnessService {
   async deleteSession(threadId: string): Promise<void> {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
-    this.#options.store.bindThreadWorkspace(threadId, this.#workspaceRoot);
     const session = this.#sessions.get(threadId);
-    this.#options.store.deleteThread(threadId);
+    this.#sessionAccess.mutate({ type: "delete", threadId });
     this.#sessions.delete(threadId);
     for (const key of this.#activeToolSelections.keys()) {
       if (key.startsWith(`${threadId}\0`)) this.#activeToolSelections.delete(key);
@@ -894,7 +1046,11 @@ export class HarnessService {
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     input.signal?.throwIfAborted();
     const branch = this.#extensionBranch(input.threadId, input.branch);
-    const thread = this.#options.store.nameThread(input.threadId, input.name);
+    const thread = this.#sessionAccess.mutate({
+      type: "name",
+      threadId: input.threadId,
+      ...(input.name === undefined ? {} : { name: input.name }),
+    });
     await this.#observeRuntime("session_info_changed", {
       threadId: input.threadId,
       branch,
@@ -915,7 +1071,8 @@ export class HarnessService {
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     input.signal?.throwIfAborted();
     const branch = this.#extensionBranch(input.threadId, input.branch);
-    const changed = this.#options.store.setEntryLabel({
+    const changed = this.#sessionAccess.mutate({
+      type: "label",
       threadId: input.threadId,
       branch,
       targetEventId: input.targetEventId,
@@ -932,7 +1089,12 @@ export class HarnessService {
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     input.signal?.throwIfAborted();
     const branch = this.#extensionBranch(input.threadId, input.branch);
-    const events = this.#options.store.listEvents(input.threadId, branch);
+    const events = this.#sessionAccess.pagedEvents({
+      threadId: input.threadId,
+      branch,
+      ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+      pageSize: HARNESS_TRANSCRIPT_LIMITS.maxEntries,
+    });
     return parseHarnessTranscriptPage(await projectHarnessTranscriptPage({
       threadId: input.threadId,
       branch,
@@ -949,8 +1111,7 @@ export class HarnessService {
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     const request = normalizeHarnessSessionListRequest(input, this.#workspaceRoot);
     request.signal?.throwIfAborted();
-    const page = this.#options.store.listThreadMetadataPage({
-      workspaceRoot: this.#workspaceRoot,
+    const page = this.#sessionAccess.metadataPage({
       ...(request.search === undefined ? {} : { search: request.search }),
       limit: request.limit,
       ...(request.after === undefined ? {} : { after: request.after }),
@@ -960,7 +1121,7 @@ export class HarnessService {
   }
 
   get skills(): readonly SkillMetadata[] {
-    return this.#skills;
+    return this.#resources.skills;
   }
 
   /** Returns one deterministic, bounded metadata snapshot for every front end. */
@@ -968,39 +1129,151 @@ export class HarnessService {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     signal.throwIfAborted();
-    const models = await this.#options.providers.listModels(undefined, signal, { refresh: false });
-    signal.throwIfAborted();
-    const groupedModels = new Map<string, typeof models>();
-    for (const model of models) {
-      const grouped = groupedModels.get(model.provider) ?? [];
-      grouped.push(model);
-      groupedModels.set(model.provider, grouped);
+    const resources = this.#resources;
+    const retained = this.#retainResourceGeneration(resources, signal);
+    try {
+      const models = await settlePromiseWithSignal(
+        Promise.resolve().then(async () =>
+          await resources.providers.listModels(undefined, retained.signal, { refresh: false })),
+        retained.signal,
+      );
+      retained.signal.throwIfAborted();
+      const groupedModels = new Map<string, typeof models>();
+      for (const model of models) {
+        const grouped = groupedModels.get(model.provider) ?? [];
+        grouped.push(model);
+        groupedModels.set(model.provider, grouped);
+      }
+      const tools = this.#buildTools("resource-catalog", {
+        prompt: "",
+        provider: "resource-catalog",
+        model: "resource-catalog",
+      }, 0, resources);
+      const extraTools = new Set(resources.extraTools);
+      const toolOwner = (tool: HarnessTool): HarnessResourceOwner => {
+        const owner = resources.runtimeExtensions?.toolOwner(tool);
+        if (owner?.kind === "extension") return { kind: "extension", extensionId: owner.extensionId };
+        return extraTools.has(tool) ? { kind: "host" } : { kind: "builtin" };
+      };
+      return buildHarnessResourceCatalog({
+        tools,
+        toolOwner,
+        skills: resources.skills,
+        providers: resources.providers.list().map((provider) => ({
+          id: provider.id,
+          models: groupedModels.get(provider.id) ?? [],
+        })),
+        ...(resources.runtimeExtensions === undefined ? {} : {
+          runtimeCommands: resources.runtimeExtensions.commands(),
+          runtimeDiagnostics: resources.runtimeExtensions.diagnostics(),
+        }),
+        ...resources.resourceCatalog,
+      });
+    } finally {
+      retained.release();
     }
-    const tools = this.#buildTools("resource-catalog", {
-      prompt: "",
-      provider: "resource-catalog",
-      model: "resource-catalog",
-    }, 0);
-    const extraTools = new Set(this.#options.extraTools ?? []);
-    const toolOwner = (tool: HarnessTool): HarnessResourceOwner => {
-      const owner = this.#options.runtimeExtensions?.toolOwner(tool);
-      if (owner?.kind === "extension") return { kind: "extension", extensionId: owner.extensionId };
-      return extraTools.has(tool) ? { kind: "host" } : { kind: "builtin" };
+  }
+
+  #retainResourceGeneration(
+    resources: HarnessResourceGeneration,
+    signal: AbortSignal,
+    runHandoff = false,
+  ): { signal: AbortSignal; release: () => void } {
+    let readers = this.#resourceGenerationReaders.get(resources);
+    if (readers === undefined) {
+      let resolveIdle!: () => void;
+      const idle = new Promise<void>((resolve) => { resolveIdle = resolve; });
+      readers = { count: 0, runHandoffs: 0, idle, resolveIdle, controllers: new Set() };
+      this.#resourceGenerationReaders.set(resources, readers);
+    }
+    const controller = new AbortController();
+    readers.controllers.add(controller);
+    readers.count += 1;
+    if (runHandoff) readers.runHandoffs += 1;
+    const retainedSignal = AbortSignal.any([signal, controller.signal]);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      retainedSignal.removeEventListener("abort", release);
+      readers!.controllers.delete(controller);
+      readers!.count -= 1;
+      if (runHandoff) readers!.runHandoffs -= 1;
+      if (readers!.count !== 0) return;
+      this.#resourceGenerationReaders.delete(resources);
+      readers!.resolveIdle();
     };
-    return buildHarnessResourceCatalog({
-      tools,
-      toolOwner,
-      skills: this.#skills,
-      providers: this.#options.providers.list().map((provider) => ({
-        id: provider.id,
-        models: groupedModels.get(provider.id) ?? [],
-      })),
-      ...(this.#options.runtimeExtensions === undefined ? {} : {
-        runtimeCommands: this.#options.runtimeExtensions.commands(),
-        runtimeDiagnostics: this.#options.runtimeExtensions.diagnostics(),
-      }),
-      ...this.#options.resourceCatalog,
+    if (runHandoff) {
+      if (retainedSignal.aborted) release();
+      else retainedSignal.addEventListener("abort", release, { once: true });
+    }
+    return { signal: retainedSignal, release };
+  }
+
+  async #waitForResourceGeneration(
+    resources: HarnessResourceGeneration,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const idle = this.#resourceGenerationReaders.get(resources)?.idle;
+    if (idle === undefined) return;
+    if (signal === undefined) {
+      await idle;
+      return;
+    }
+    signal.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = (): void => finish(() => reject(observerAbortReason(signal)));
+      signal.addEventListener("abort", onAbort, { once: true });
+      idle.then(
+        () => finish(resolve),
+        (error: unknown) => finish(() => reject(error)),
+      );
     });
+  }
+
+  async #drainResourceGeneration(
+    resources: HarnessResourceGeneration,
+    reason: unknown,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.#resourceGenerationReaders.has(resources)) return;
+    const timeout = AbortSignal.timeout(RESOURCE_GENERATION_READER_DRAIN_TIMEOUT_MS);
+    try {
+      await this.#waitForResourceGeneration(
+        resources,
+        signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      );
+      return;
+    } catch (error) {
+      if (signal?.aborted === true) throw observerAbortReason(signal);
+      if (!timeout.aborted) throw error;
+    }
+    // Resource lookups are raced against these controllers. Aborting first makes
+    // every HarnessService reader release before its generation can be torn down;
+    // a provider promise that settles later has no generation-dependent continuation.
+    for (const controller of this.#resourceGenerationReaders.get(resources)?.controllers ?? []) {
+      controller.abort(reason);
+    }
+    await this.#waitForResourceGeneration(resources);
+  }
+
+  async #drainAllResourceGenerations(): Promise<void> {
+    const resources = [...this.#resourceGenerationReaders.keys()];
+    await Promise.all(resources.map(async (generation) => await this.#drainResourceGeneration(
+      generation,
+      new HarnessError("SERVICE_CLOSED", "Resource lookup cancelled because the harness service is closing"),
+    )));
+  }
+
+  #hasPendingRunHandoff(): boolean {
+    return [...this.#resourceGenerationReaders.values()].some((readers) => readers.runHandoffs !== 0);
   }
 
   onExtensionSessionEvent(listener: ExtensionSessionPublicationListener): () => void {
@@ -1011,12 +1284,44 @@ export class HarnessService {
 
   async resolveModelSelection(
     reference: string,
-    options: ResolveModelSelectionOptions = {},
-  ): Promise<ResolvedModelSelection> {
+    options: ResolveModelSelectionOptions & { retainGeneration: true; lookupSignal?: AbortSignal },
+  ): Promise<RetainedModelSelection>;
+  async resolveModelSelection(
+    reference: string,
+    options?: ResolveModelSelectionOptions,
+  ): Promise<ResolvedModelSelection>;
+  async resolveModelSelection(
+    reference: string,
+    options: ResolveModelSelectionOptions & { retainGeneration?: true; lookupSignal?: AbortSignal } = {},
+  ): Promise<ResolvedModelSelection | RetainedModelSelection> {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
-    const { signal = AbortSignal.timeout(30_000), ...resolutionOptions } = options;
-    return await this.#options.providers.requireModelReference(reference, signal, resolutionOptions);
+    const {
+      signal = AbortSignal.timeout(30_000),
+      lookupSignal,
+      retainGeneration = false,
+      ...resolutionOptions
+    } = options;
+    const resources = this.#resources;
+    const retained = this.#retainResourceGeneration(resources, signal, retainGeneration);
+    const resolutionSignal = lookupSignal === undefined
+      ? retained.signal
+      : AbortSignal.any([retained.signal, lookupSignal]);
+    let handedOff = false;
+    try {
+      const selection = await settlePromiseWithSignal(
+        resources.providers.requireModelReference(reference, resolutionSignal, resolutionOptions),
+        resolutionSignal,
+      );
+      retained.signal.throwIfAborted();
+      if (retainGeneration) {
+        handedOff = true;
+        return { selection, signal: retained.signal, release: retained.release };
+      }
+      return selection;
+    } finally {
+      if (!handedOff) retained.release();
+    }
   }
 
   async run(options: RunOptions): Promise<HarnessRun> {
@@ -1025,7 +1330,7 @@ export class HarnessService {
     options.signal?.throwIfAborted();
     const resumed = options.threadId !== undefined;
     const threadId = options.threadId ?? createId("thread");
-    let thread = resumed ? this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace) : undefined;
+    let thread = resumed ? this.#sessionAccess.thread(threadId) : undefined;
     const queueBranch = options.branch ?? thread?.defaultBranch ?? "main";
     this.#manager.reserve(threadId, {
       ...(options.steeringMode === undefined ? {} : { steeringMode: options.steeringMode }),
@@ -1045,7 +1350,7 @@ export class HarnessService {
           options.signal,
           "switch",
           () => {
-            thread = this.#options.store.createThread({ threadId, workspaceRoot: this.#options.workspace });
+            thread = this.#sessionAccess.mutate({ type: "create", threadId });
           },
         );
       }
@@ -1065,20 +1370,15 @@ export class HarnessService {
     } finally {
       this.#listeners.delete(threadId);
       this.#manager.release(threadId);
-      if (thread !== undefined) this.#options.store.markRunInputsRecoverable(threadId, queueBranch);
+      if (thread !== undefined) this.#sessionAccess.queue(threadId, queueBranch).recoverAll();
     }
   }
 
-  async createSession(input: {
-    threadId?: string;
-    name?: string;
-    defaultBranch?: string;
-    parentThreadId?: string;
-    parentRunId?: string;
-    sourceEventId?: string;
-    cwd?: string;
-    signal?: AbortSignal;
-  } = {}) {
+  async createSession(input: CreateSessionInput = {}) {
+    return await this.#createSession(input, false);
+  }
+
+  async #createSession(input: CreateSessionInput, runtimeChild: boolean) {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     const threadId = input.threadId ?? createId("thread");
@@ -1086,9 +1386,10 @@ export class HarnessService {
       throw new HarnessError("SERVICE_SESSION_ID", "Session ID must contain 1 to 256 UTF-8 bytes and no NUL");
     }
     const branch = input.defaultBranch ?? "main";
-    if (input.parentThreadId !== undefined && this.#options.runtimeExtensions?.hasListeners("session_before_fork") === true) {
-      const result = await this.#options.runtimeExtensions.reduceSessionBeforeFork({
+    if (input.parentThreadId !== undefined && this.#resources.runtimeExtensions?.hasListeners("session_before_fork") === true) {
+      const result = await this.#resources.runtimeExtensions.reduceSessionBeforeFork({
         sourceThreadId: input.parentThreadId,
+        targetThreadId: threadId,
         ...(input.sourceEventId === undefined ? {} : { sourceEventId: input.sourceEventId }),
         targetBranch: branch,
       }, input.signal);
@@ -1108,14 +1409,17 @@ export class HarnessService {
       input.signal,
       input.parentThreadId === undefined ? "switch" : "none",
       () => {
-        created = this.#options.store.createThread({
+        const command = {
+          type: "create",
           threadId,
-          workspaceRoot: this.#options.workspace,
           ...(input.name === undefined ? {} : { name: input.name }),
           ...(input.defaultBranch === undefined ? {} : { defaultBranch: input.defaultBranch }),
           ...(input.parentThreadId === undefined ? {} : { parentThreadId: input.parentThreadId }),
           ...(input.parentRunId === undefined ? {} : { parentRunId: input.parentRunId }),
-        });
+        } as const;
+        created = runtimeChild
+          ? this.#sessionAccess.createRuntimeChild(command)
+          : this.#sessionAccess.mutate(command);
       },
     );
     if (created === undefined) throw new HarnessError("STORAGE_WRITE", "Session creation did not produce a thread");
@@ -1123,22 +1427,31 @@ export class HarnessService {
   }
 
   async cloneSessionPath(
-    input: Omit<CloneSessionPathInput, "workspaceRoot"> & { signal?: AbortSignal },
+    input: Omit<CloneSessionPathInput, "workspaceRoot" | "targetThreadId"> & { signal?: AbortSignal },
+  ): Promise<CloneSessionPathResult> {
+    return await this.#cloneSessionPath(input, createId("thread"), false);
+  }
+
+  async #cloneSessionPath(
+    input: Omit<CloneSessionPathInput, "workspaceRoot" | "targetThreadId"> & { signal?: AbortSignal },
+    targetThreadId: string,
+    runtimeChild: boolean,
   ): Promise<CloneSessionPathResult> {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     input.signal?.throwIfAborted();
-    const source = this.#options.store.bindThreadWorkspace(input.threadId, this.#options.workspace);
+    const source = this.#sessionAccess.thread(input.threadId);
     const sourceBranch = input.branch ?? source.defaultBranch;
     const branch = source.branches.find((entry) => entry.name === sourceBranch);
     if (branch === undefined) throw new Error(`Unknown branch: ${sourceBranch}`);
     const sourceEventId = typeof input.atEventId === "string"
       ? input.atEventId
       : input.beforeEventId ?? branch.headEventId;
-    const extensions = this.#options.runtimeExtensions;
+    const extensions = this.#resources.runtimeExtensions;
     if (extensions?.hasListeners("session_before_fork") === true) {
       const directive = await extensions.reduceSessionBeforeFork({
         sourceThreadId: input.threadId,
+        targetThreadId,
         ...(sourceEventId === undefined ? {} : { sourceEventId }),
         targetBranch: sourceBranch,
       }, input.signal);
@@ -1152,21 +1465,25 @@ export class HarnessService {
       }
     }
     input.signal?.throwIfAborted();
-    return cloneStoredSessionPath(this.#options.store, {
+    const cloneInput = {
       threadId: input.threadId,
       ...(input.branch === undefined ? {} : { branch: input.branch }),
       ...(input.atEventId === undefined ? {} : { atEventId: input.atEventId }),
       ...(input.beforeEventId === undefined ? {} : { beforeEventId: input.beforeEventId }),
       ...(input.name === undefined ? {} : { name: input.name }),
-      workspaceRoot: this.#options.workspace,
-    });
+      targetThreadId,
+    };
+    return runtimeChild
+      ? this.#sessionAccess.cloneRuntimeChild(cloneInput)
+      : this.#sessionAccess.clone(cloneInput);
   }
 
   async navigateTree(options: NavigateTreeOptions): Promise<NavigateTreeResult> {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
-    const thread = this.#options.store.bindThreadWorkspace(options.threadId, this.#options.workspace);
+    const thread = this.#sessionAccess.thread(options.threadId);
     const sourceBranch = options.branch ?? thread.defaultBranch;
+    this.#sessionAccess.branch(options.threadId, options.targetBranch);
     if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(options.newBranch) || options.newBranch.includes("..")) {
       throw new Error(`Invalid branch name: ${options.newBranch}`);
     }
@@ -1193,17 +1510,22 @@ export class HarnessService {
       : AbortSignal.any([control.abortController.signal, options.signal]);
     try {
       signal.throwIfAborted();
+      const branchEvents = this.#sessionAccess.snapshot({
+        threadId: options.threadId,
+        branch: sourceBranch,
+        include: { branchEvents: [sourceBranch, options.targetBranch] },
+      }).branchEvents;
       const preparation = prepareAbandonedBranch(
-        this.#options.store.listEvents(options.threadId, sourceBranch),
-        this.#options.store.listEvents(options.threadId, options.targetBranch),
+        branchEvents?.get(sourceBranch) ?? [],
+        branchEvents?.get(options.targetBranch) ?? [],
         options.targetEventId,
       );
       if (options.label !== undefined && preparation.messages.length === 0) {
         throw new Error("A branch summary label requires abandoned conversational content");
       }
-      const priorEventId = this.#options.store.listBranches(options.threadId)
+      const priorEventId = thread.branches
         .find((entry) => entry.name === sourceBranch)?.headEventId;
-      const extensions = this.#options.runtimeExtensions;
+      const extensions = this.#resources.runtimeExtensions;
       const treeDirective = extensions?.hasListeners("session_before_tree") === true
         ? await extensions.reduceSessionBeforeTree({
             threadId: options.threadId,
@@ -1219,7 +1541,7 @@ export class HarnessService {
         if (treeDirective?.summary === undefined) {
           let modelMaxOutputTokens: number | undefined;
           try {
-            modelMaxOutputTokens = (await this.#options.providers.resolveModel(
+            modelMaxOutputTokens = (await this.#resources.providers.resolveModel(
               options.provider!,
               options.model!,
               signal,
@@ -1232,7 +1554,7 @@ export class HarnessService {
             modelMaxOutputTokens,
           );
           generated = await generateBranchSummary(preparation, {
-            provider: this.#options.providers.get(options.provider!),
+            provider: this.#resources.providers.get(options.provider!),
             model: options.model!,
             signal,
             ...(summaryMaxOutputTokens === undefined ? {} : { maxOutputTokens: summaryMaxOutputTokens }),
@@ -1252,18 +1574,21 @@ export class HarnessService {
       if (generated !== undefined && !generated.cancelled) {
         const durableSummary = defaultSecretRedactor.redactValue(generated.summary) as CanonicalMessage;
         const treeMetadata = treeDirective?.summary?.metadata;
-        const committed = this.#options.store.forkBranchWithSummary({
-          threadId: options.threadId,
-          fromBranch: options.targetBranch,
-          newBranch: options.newBranch,
-          atEventId: options.targetEventId,
-          summary: durableSummary,
-          sourceBranch,
-          sourceEventIds: generated.sourceEventIds,
-          ...(treeMetadata === undefined
-            ? {}
-            : { extensionMetadata: defaultSecretRedactor.redactValue(treeMetadata) as typeof treeMetadata }),
-          ...(options.label === undefined ? {} : { label: options.label }),
+        const committed = this.#sessionAccess.mutate({
+          type: "fork_with_summary",
+          input: {
+            threadId: options.threadId,
+            fromBranch: options.targetBranch,
+            newBranch: options.newBranch,
+            atEventId: options.targetEventId,
+            summary: durableSummary,
+            sourceBranch,
+            sourceEventIds: generated.sourceEventIds,
+            ...(treeMetadata === undefined
+              ? {}
+              : { extensionMetadata: defaultSecretRedactor.redactValue(treeMetadata) as typeof treeMetadata }),
+            ...(options.label === undefined ? {} : { label: options.label }),
+          },
         });
         await this.#observeRuntime("session_tree", {
           threadId: options.threadId,
@@ -1278,11 +1603,14 @@ export class HarnessService {
         this.#rememberSessionBranch(options.threadId, committed.branch.name);
         return { cancelled: false, branch: committed.branch, summaryEvent: committed.summaryEvent };
       }
-      const branch = this.#options.store.forkBranch({
-        threadId: options.threadId,
-        fromBranch: options.targetBranch,
-        newBranch: options.newBranch,
-        atEventId: options.targetEventId,
+      const branch = this.#sessionAccess.mutate({
+        type: "fork",
+        input: {
+          threadId: options.threadId,
+          fromBranch: options.targetBranch,
+          newBranch: options.newBranch,
+          atEventId: options.targetEventId,
+        },
       });
       await this.#observeRuntime("session_tree", {
         threadId: options.threadId,
@@ -1304,7 +1632,7 @@ export class HarnessService {
     if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
     if (this.#reloading) throw new HarnessError("SERVICE_RELOADING", "Harness resources are reloading");
     options = await this.#canonicalRunOptions(options, true);
-    const thread = this.#options.store.bindThreadWorkspace(options.threadId, this.#options.workspace);
+    const thread = this.#sessionAccess.thread(options.threadId);
     const branch = options.branch ?? thread.defaultBranch;
     if (options.compactionInstructions !== undefined && (options.compactionInstructions.trim() === "" || Buffer.byteLength(options.compactionInstructions) > 16 * 1024)) {
       throw new Error("Compaction instructions must contain 1 to 16384 bytes");
@@ -1322,7 +1650,7 @@ export class HarnessService {
       return result;
     } finally {
       this.#listeners.delete(options.threadId);
-      this.#options.store.markRunInputsRecoverable(options.threadId, branch);
+      this.#sessionAccess.queue(options.threadId, branch).recoverAll();
     }
   }
 
@@ -1342,7 +1670,7 @@ export class HarnessService {
       }
       return activeBranch;
     }
-    const thread = this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
+    const thread = this.#sessionAccess.thread(threadId);
     return branch ?? this.#sessions.get(threadId)?.branch ?? thread.defaultBranch;
   }
 
@@ -1352,7 +1680,7 @@ export class HarnessService {
     message: string,
     images?: ImageBlock[],
   ): void {
-    this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
+    this.#sessionAccess.thread(threadId);
     if (this.#childRunDepth.has(threadId)) {
       throw new HarnessError(
         "RUNTIME_CHILD_QUEUE",
@@ -1361,9 +1689,8 @@ export class HarnessService {
     }
     const branch = this.#manager.activeBranch(threadId);
     if (branch === undefined) throw new Error(`Thread has no active run: ${threadId}`);
-    const record = this.#options.store.enqueueRunInput({
-      threadId,
-      branch,
+    const queue = this.#sessionAccess.queue(threadId, branch);
+    const record = queue.enqueue({
       mode,
       text: message,
       ...(images === undefined ? {} : { images }),
@@ -1373,14 +1700,14 @@ export class HarnessService {
       queueId: record.queueId,
       messageId: record.messageId,
       begin: (): void => {
-        if (!leased) this.#options.store.beginRunInputDelivery(record.queueId, threadId, branch);
+        if (!leased) queue.transition(record.queueId, "begin_delivery");
       },
       delivered: (): void => leased
-        ? this.#options.store.acknowledgeRunInputLease(record.queueId, threadId, branch)
-        : this.#options.store.completeRunInputDelivery(record.queueId, threadId, branch),
-      dequeued: (): void => this.#options.store.dequeueRunInput(record.queueId, threadId, branch),
+        ? queue.transition(record.queueId, "acknowledge")
+        : queue.transition(record.queueId, "complete_delivery"),
+      dequeued: (): void => queue.transition(record.queueId, "dequeue"),
       leased: (): void => {
-        this.#options.store.leaseRunInput(record.queueId, threadId, branch);
+        queue.transition(record.queueId, "lease");
         leased = true;
       },
     };
@@ -1388,7 +1715,7 @@ export class HarnessService {
       if (mode === "follow_up") this.#manager.followUp(threadId, message, images, receipt);
       else this.#manager.steer(threadId, message, images, receipt);
     } catch (error) {
-      this.#options.store.markRunInputRecoverable(record.queueId, threadId, branch);
+      queue.transition(record.queueId, "recover");
       throw error;
     }
   }
@@ -1402,17 +1729,15 @@ export class HarnessService {
   }
 
   queuedMessages(threadId: string, branch?: string): QueuedRunMessage[] {
-    this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
     const selectedBranch = this.#queueBranch(threadId, branch);
-    const recovered = this.#options.store.listRunInputs(threadId, selectedBranch, ["recoverable"])
+    const recovered = this.#sessionAccess.queue(threadId, selectedBranch).list(["recoverable"])
       .map((record) => this.#runInputMessage(record));
     return [...recovered, ...this.#manager.queuedMessages(threadId)];
   }
 
   recoverableMessageCount(threadId: string, branch?: string): number {
-    this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
     const selectedBranch = this.#queueBranch(threadId, branch);
-    return this.#options.store.listRunInputs(threadId, selectedBranch, ["recoverable"]).length;
+    return this.#sessionAccess.queue(threadId, selectedBranch).list(["recoverable"]).length;
   }
 
   queueModes(threadId: string): { steeringMode: QueueMode; followUpMode: QueueMode } | undefined {
@@ -1444,18 +1769,18 @@ export class HarnessService {
   }
 
   leaseOne(threadId: string, branch?: string): RunInputQueueLease | undefined {
-    this.#options.store.bindThreadWorkspace(threadId, this.#options.workspace);
     const selectedBranch = this.#queueBranch(threadId, branch);
-    const recovered = this.#options.store.listRunInputs(threadId, selectedBranch, ["recoverable"])[0];
+    const queue = this.#sessionAccess.queue(threadId, selectedBranch);
+    const recovered = queue.list(["recoverable"])[0];
     if (recovered !== undefined) {
-      this.#options.store.leaseRunInput(recovered.queueId, threadId, selectedBranch);
+      queue.transition(recovered.queueId, "lease");
       const message = this.#runInputMessage(recovered);
       attachQueuedRunDelivery(message, {
         queueId: recovered.queueId,
         messageId: recovered.messageId,
         begin: () => {},
-        delivered: () => this.#options.store.acknowledgeRunInputLease(recovered.queueId, threadId, selectedBranch),
-        dequeued: () => this.#options.store.acknowledgeRunInputLease(recovered.queueId, threadId, selectedBranch),
+        delivered: () => queue.transition(recovered.queueId, "acknowledge"),
+        dequeued: () => queue.transition(recovered.queueId, "acknowledge"),
         leased: () => {},
       });
       return {
@@ -1475,13 +1800,11 @@ export class HarnessService {
   }
 
   acknowledgeQueueLease(lease: Pick<RunInputQueueLease, "leaseId" | "threadId" | "branch">): void {
-    this.#options.store.bindThreadWorkspace(lease.threadId, this.#options.workspace);
-    this.#options.store.acknowledgeRunInputLease(lease.leaseId, lease.threadId, lease.branch);
+    this.#sessionAccess.queue(lease.threadId, lease.branch).transition(lease.leaseId, "acknowledge");
   }
 
   releaseQueueLease(lease: Pick<RunInputQueueLease, "leaseId" | "threadId" | "branch">): void {
-    this.#options.store.bindThreadWorkspace(lease.threadId, this.#options.workspace);
-    this.#options.store.releaseRunInputLease(lease.leaseId, lease.threadId, lease.branch);
+    this.#sessionAccess.queue(lease.threadId, lease.branch).transition(lease.leaseId, "release");
   }
 
   cancel(threadId: string, reason?: string): void {
@@ -1497,23 +1820,9 @@ export class HarnessService {
     if (this.#manager.activeCount() !== 0 || this.#activeChildRuns !== 0) {
       throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
     }
-    const childRunPolicy = normalizeChildRunPolicy(resources.childRuns);
-    const previous = {
-      providers: this.#options.providers,
-      projectTrusted: this.#options.projectTrusted,
-      extraTools: this.#options.extraTools,
-      toolBackend: this.#options.toolBackend,
-      outboundImages: this.#options.outboundImages,
-      runtimeExtensions: this.#options.runtimeExtensions,
-      shellPath: this.#options.shellPath,
-      autoCompaction: this.#options.autoCompaction,
-      compactionRetainRecentTurns: this.#options.compactionRetainRecentTurns,
-      compactionToolResultBytes: this.#options.compactionToolResultBytes,
-      retry: this.#options.retry,
-      childRunPolicy: this.#childRunPolicy,
-      resourceCatalog: this.#options.resourceCatalog,
-      skills: this.#skills,
-    };
+    if (this.#hasPendingRunHandoff()) throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is starting");
+    const candidate = immutableResourceGeneration(resources);
+    const previous = this.#resources;
     const sessions = [...this.#sessions.entries()];
     this.#reloading = true;
     let applied = false;
@@ -1524,6 +1833,7 @@ export class HarnessService {
       if (this.#manager.activeCount() !== 0 || this.#activeChildRuns !== 0) {
         throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is active");
       }
+      if (this.#hasPendingRunHandoff()) throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is starting");
       if (this.#options.managedExtensionLifecycle !== false) {
         await Promise.allSettled(sessions.map(async ([threadId, session]) => await this.#observeRuntime("session_end", {
           reason: "reload",
@@ -1533,29 +1843,15 @@ export class HarnessService {
         })));
       }
       sessionsEnded = true;
-      this.#options.providers = resources.providers;
-      this.#options.projectTrusted = resources.projectTrusted;
-      this.#options.extraTools = resources.extraTools;
-      if (resources.toolBackend === undefined) delete this.#options.toolBackend;
-      else this.#options.toolBackend = resources.toolBackend;
-      this.#options.outboundImages = resources.outboundImages ?? "allow";
-      if (resources.runtimeExtensions === undefined) delete this.#options.runtimeExtensions;
-      else this.#options.runtimeExtensions = resources.runtimeExtensions;
-      if (resources.shellPath === undefined) delete this.#options.shellPath;
-      else this.#options.shellPath = resources.shellPath;
-      if (resources.autoCompaction === undefined) delete this.#options.autoCompaction;
-      else this.#options.autoCompaction = resources.autoCompaction;
-      if (resources.compactionRetainRecentTurns === undefined) delete this.#options.compactionRetainRecentTurns;
-      else this.#options.compactionRetainRecentTurns = resources.compactionRetainRecentTurns;
-      if (resources.compactionToolResultBytes === undefined) delete this.#options.compactionToolResultBytes;
-      else this.#options.compactionToolResultBytes = resources.compactionToolResultBytes;
-      if (resources.retry === undefined) delete this.#options.retry;
-      else this.#options.retry = { ...resources.retry };
-      this.#childRunPolicy = childRunPolicy;
-      if (resources.resourceCatalog === undefined) delete this.#options.resourceCatalog;
-      else this.#options.resourceCatalog = resources.resourceCatalog;
-      this.#bindExtensionSessionHost(this.#options.runtimeExtensions);
-      this.#skills = [...resources.skills];
+      this.#resources = candidate;
+      this.#bindExtensionSessionHost(candidate.runtimeExtensions);
+      await this.#drainResourceGeneration(
+        previous,
+        new HarnessError("SERVICE_RELOADING", "Resource lookup cancelled because resources are reloading"),
+        options.signal,
+      );
+      if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service closed while resources were reloading");
+      options.signal?.throwIfAborted();
       await options.commit?.();
       applied = true;
       if (sessionsEnded) {
@@ -1570,33 +1866,11 @@ export class HarnessService {
       }
     } catch (error) {
       if (applied) throw error;
-      this.#options.providers = previous.providers;
-      if (previous.projectTrusted === undefined) delete this.#options.projectTrusted;
-      else this.#options.projectTrusted = previous.projectTrusted;
-      if (previous.extraTools === undefined) delete this.#options.extraTools;
-      else this.#options.extraTools = previous.extraTools;
-      if (previous.toolBackend === undefined) delete this.#options.toolBackend;
-      else this.#options.toolBackend = previous.toolBackend;
-      if (previous.outboundImages === undefined) delete this.#options.outboundImages;
-      else this.#options.outboundImages = previous.outboundImages;
-      if (previous.runtimeExtensions === undefined) delete this.#options.runtimeExtensions;
-      else this.#options.runtimeExtensions = previous.runtimeExtensions;
-      if (previous.shellPath === undefined) delete this.#options.shellPath;
-      else this.#options.shellPath = previous.shellPath;
-      if (previous.autoCompaction === undefined) delete this.#options.autoCompaction;
-      else this.#options.autoCompaction = previous.autoCompaction;
-      if (previous.compactionRetainRecentTurns === undefined) delete this.#options.compactionRetainRecentTurns;
-      else this.#options.compactionRetainRecentTurns = previous.compactionRetainRecentTurns;
-      if (previous.compactionToolResultBytes === undefined) delete this.#options.compactionToolResultBytes;
-      else this.#options.compactionToolResultBytes = previous.compactionToolResultBytes;
-      if (previous.retry === undefined) delete this.#options.retry;
-      else this.#options.retry = { ...previous.retry };
-      this.#childRunPolicy = previous.childRunPolicy;
-      if (previous.resourceCatalog === undefined) delete this.#options.resourceCatalog;
-      else this.#options.resourceCatalog = previous.resourceCatalog;
-      this.#bindExtensionSessionHost(this.#options.runtimeExtensions);
-      this.#skills = previous.skills;
-      if (this.#options.managedExtensionLifecycle !== false) {
+      if (this.#resources !== previous) {
+        this.#resources = previous;
+        this.#bindExtensionSessionHost(previous.runtimeExtensions);
+      }
+      if (sessionsEnded && this.#options.managedExtensionLifecycle !== false) {
         await Promise.allSettled(sessions.map(async ([threadId, session]) => await this.#observeRuntime("session_start", {
           reason: "reload_rollback",
           threadId,
@@ -1610,12 +1884,16 @@ export class HarnessService {
     }
   }
 
-  async close(reason = "runtime_close"): Promise<void> {
-    if (this.#closeStarted) return;
-    this.#closeStarted = true;
+  close(reason = "runtime_close"): Promise<void> {
+    this.#closeFlight ??= this.#close(reason);
+    return this.#closeFlight;
+  }
+
+  async #close(reason: string): Promise<void> {
     this.#closed = true;
     this.#reloading = false;
     try {
+      await this.#drainAllResourceGenerations();
       const sessionEndReason = this.#runtimeOwnerFailure === undefined ? reason : "runtime_owner_lost";
       const sessions = [...this.#sessions.entries()];
       this.#sessions.clear();
@@ -1645,12 +1923,12 @@ export class HarnessService {
     options: T,
     refreshStale: boolean,
   ): Promise<T> {
-    const status = refreshStale ? (await this.#options.providers.catalogStatus(options.provider))[0] : undefined;
+    const status = refreshStale ? (await this.#resources.providers.catalogStatus(options.provider))[0] : undefined;
     const refresh = status !== undefined && (status.provenance === "none" || status.stale);
     const resolutionSignal = options.signal === undefined
       ? AbortSignal.timeout(30_000)
       : AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]);
-    const selected = await this.#options.providers.requireModelReference(
+    const selected = await this.#resources.providers.requireModelReference(
       options.model,
       resolutionSignal,
       {
@@ -1671,14 +1949,14 @@ export class HarnessService {
 
   async #run(threadId: string, options: RunOptions, depth: number, reserved = false): Promise<AgentRunResult[]> {
     options = await this.#canonicalRunOptions(options, false);
-    const outboundImages = options.outboundImages ?? this.#options.outboundImages ?? "allow";
+    const outboundImages = options.outboundImages ?? this.#resources.outboundImages;
     if (outboundImages !== "allow" && outboundImages !== "block") {
       throw new Error("outboundImages must be allow or block");
     }
     if (options.autoCompaction !== undefined && typeof options.autoCompaction !== "boolean") {
       throw new Error("autoCompaction must be a boolean");
     }
-    const autoCompaction = options.autoCompaction ?? this.#options.autoCompaction;
+    const autoCompaction = options.autoCompaction ?? this.#resources.autoCompaction;
     if (
       options.additionalInstructions !== undefined &&
       (
@@ -1689,11 +1967,11 @@ export class HarnessService {
         Buffer.byteLength(options.additionalInstructions.source, "utf8") > 256
       )
     ) throw new Error("Additional instructions must contain bounded text and a bounded source label");
-    const provider = this.#options.providers.runtimeAdapter(options.provider);
+    const provider = this.#resources.providers.runtimeAdapter(options.provider);
     let automaticContextBudget: ReturnType<typeof resolveEffectiveContextBudget> | undefined;
     let resolvedModel: Awaited<ReturnType<ProviderRegistry["resolveModel"]>>;
     try {
-      resolvedModel = await this.#options.providers.resolveModel(
+      resolvedModel = await this.#resources.providers.resolveModel(
         options.provider,
         options.model,
         AbortSignal.timeout(10_000),
@@ -1714,7 +1992,7 @@ export class HarnessService {
       );
     }
     const contextCwd = this.#contextCwd(threadId, options.cwd);
-    const toolBackend = options.toolBackend === undefined ? this.#options.toolBackend : options.toolBackend ?? undefined;
+    const toolBackend = options.toolBackend === undefined ? this.#resources.toolBackend : options.toolBackend ?? undefined;
     const processRunner = new DirectProcessRunner();
     const tools = this.#buildTools(threadId, { ...options, outboundImages, cwd: contextCwd }, depth);
     const allowed = options.allowedTools === undefined
@@ -1749,7 +2027,7 @@ export class HarnessService {
       const instructions = await discoverInstructions({
         workspaceRoot: this.#options.workspace,
         cwd: contextCwd,
-        trusted: this.#options.projectTrusted ?? false,
+        trusted: this.#resources.projectTrusted,
         ...(this.#options.userInstructions === undefined ? {} : { userInstructions: this.#options.userInstructions }),
         ...(this.#options.userInstructionFile === undefined ? {} : { userInstructionFile: this.#options.userInstructionFile }),
         ...(options.noContextFiles === true ? { includeFiles: false } : {}),
@@ -1758,7 +2036,7 @@ export class HarnessService {
         ? {}
         : await discoverWorkspacePromptFiles(
             this.#options.workspace,
-            this.#options.projectTrusted ?? false,
+            this.#resources.projectTrusted,
             { includeSystemPrompt: options.systemPrompt === undefined },
           );
       const customPrompt = options.systemPrompt ?? automaticPromptFiles.systemPrompt;
@@ -1769,7 +2047,7 @@ export class HarnessService {
       const systemPrompt = buildSystemPrompt({
         workspace: this.#options.workspace,
         instructions,
-        skills: this.#skills,
+        skills: this.#resources.skills,
         selectedTools: promptTools.map((tool) => tool.definition.name),
         toolMetadata: promptTools.map((tool) => tool.definition),
         ...(options.additionalInstructions === undefined ? {} : { additionalInstructions: options.additionalInstructions }),
@@ -1782,7 +2060,7 @@ export class HarnessService {
           systemPrompt,
           instructions,
           selectedTools: promptTools.map((tool) => tool.definition.name),
-          skills: this.#skills,
+          skills: this.#resources.skills,
           ...(customPrompt === undefined ? {} : { customPrompt }),
           appendSystemPrompt: appendedPrompts,
           ...(options.additionalInstructions === undefined
@@ -1804,24 +2082,32 @@ export class HarnessService {
         value: (value) => defaultSecretRedactor.redactValue(value) as typeof value,
       },
       {
-        ...(this.#options.runtimeExtensions?.hasListeners("tool_call") === true
+        ...(this.#resources.runtimeExtensions?.hasListeners("tool_call") === true
           ? {
               beforeCall: async (invocation, context) =>
-                await this.#options.runtimeExtensions!.reduceToolCall({
+                await this.#resources.runtimeExtensions!.reduceToolCall({
                   ...invocation,
                   threadId: context.threadId,
                   runId: context.runId,
                   branch: activeToolBranch,
+                  ...(context.step === undefined ? {} : { step: context.step }),
                 }, context.signal),
             }
           : {}),
-        ...(this.#options.runtimeExtensions?.hasListeners("tool_result") === true
+        ...(this.#resources.runtimeExtensions?.hasListeners("tool_result") === true
           ? {
               afterResult: async (
                 invocation: Parameters<RuntimeExtensionHost["reduceToolCall"]>[0],
                 result: Parameters<RuntimeExtensionHost["reduceToolResult"]>[0]["result"],
-                context: { signal: AbortSignal },
-              ) => await this.#options.runtimeExtensions!.reduceToolResult({ invocation, result }, context.signal),
+                context: { signal: AbortSignal; threadId: string; runId: string; branch?: string; step?: number },
+              ) => await this.#resources.runtimeExtensions!.reduceToolResult({
+                threadId: context.threadId,
+                runId: context.runId,
+                branch: context.branch ?? activeToolBranch,
+                ...(context.step === undefined ? {} : { step: context.step }),
+                invocation,
+                result,
+              }, context.signal),
             }
           : {}),
       },
@@ -1843,7 +2129,7 @@ export class HarnessService {
     });
     let promptQueueMessage: QueuedRunMessage | undefined;
     if (options.queueLease !== undefined) {
-      const selectedBranch = options.branch ?? this.#options.store.getThread(threadId).defaultBranch;
+      const selectedBranch = options.branch ?? this.#sessionAccess.thread(threadId).defaultBranch;
       if (options.queueLease.threadId !== threadId || options.queueLease.branch !== selectedBranch) {
         throw new HarnessError("SERVICE_QUEUE_BRANCH", "Queue lease does not belong to this thread and branch");
       }
@@ -1860,7 +2146,7 @@ export class HarnessService {
     try {
       const request = {
         threadId,
-        ...(options.branch === undefined ? {} : { branch: options.branch }),
+        branch: activeToolBranch,
         prompt: options.prompt,
         ...(options.displayPrompt === undefined ? {} : { displayPrompt: options.displayPrompt }),
         ...(options.images === undefined ? {} : { images: options.images }),
@@ -1869,14 +2155,14 @@ export class HarnessService {
         ...(supportsImages === undefined ? {} : { supportsImages }),
         provider,
         model: options.model,
-        ...(this.#options.runtimeExtensions === undefined || this.#options.runtimeExtensions.extensions().length === 0
+        ...(this.#resources.runtimeExtensions === undefined || this.#resources.runtimeExtensions.extensions().length === 0
           ? {}
           : {
               refreshTurnSelection: async (
                 current: Parameters<NonNullable<AgentRunRequest["refreshTurnSelection"]>>[0],
                 signal: AbortSignal,
               ) => {
-                const stored = this.#options.store.getModelSelection(threadId, activeToolBranch);
+                const stored = this.#sessionAccess.modelSelection(threadId, activeToolBranch);
                 if (
                   stored === undefined ||
                   (
@@ -1885,7 +2171,7 @@ export class HarnessService {
                     stored.reasoningEffort === current.reasoningEffort
                   )
                 ) return undefined;
-                const selected = await this.#options.providers.requireModelReference(stored.model, signal, {
+                const selected = await this.#resources.providers.requireModelReference(stored.model, signal, {
                   provider: stored.provider,
                   refresh: false,
                   allowUnknownModel: true,
@@ -1907,7 +2193,7 @@ export class HarnessService {
                   selected.info?.maxOutputTokens,
                 );
                 return {
-                  provider: this.#options.providers.runtimeAdapter(selected.provider),
+                  provider: this.#resources.providers.runtimeAdapter(selected.provider),
                   model: selected.model,
                   ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
                   ...(selectedSupportsImages === undefined ? {} : { supportsImages: selectedSupportsImages }),
@@ -1949,14 +2235,14 @@ export class HarnessService {
               }),
         ...(options.summaryTokenBudget === undefined ? {} : { summaryTokenBudget: options.summaryTokenBudget }),
         ...(autoCompaction === undefined ? {} : { autoCompaction }),
-        ...(this.#options.compactionRetainRecentTurns === undefined ? {} : { compactionRetainRecentTurns: this.#options.compactionRetainRecentTurns }),
-        ...(this.#options.compactionToolResultBytes === undefined ? {} : { compactionToolResultBytes: this.#options.compactionToolResultBytes }),
+        ...(this.#resources.compactionRetainRecentTurns === undefined ? {} : { compactionRetainRecentTurns: this.#resources.compactionRetainRecentTurns }),
+        ...(this.#resources.compactionToolResultBytes === undefined ? {} : { compactionToolResultBytes: this.#resources.compactionToolResultBytes }),
         ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
         ...(options.manualCompaction === true ? { manualCompaction: true } : {}),
         ...(options.compactionInstructions === undefined ? {} : { compactionInstructions: options.compactionInstructions }),
         ...(options.steeringMode === undefined ? {} : { steeringMode: options.steeringMode }),
         ...(options.followUpMode === undefined ? {} : { followUpMode: options.followUpMode }),
-        ...(this.#options.retry === undefined ? {} : { retry: { ...this.#options.retry } }),
+        ...(this.#resources.retry === undefined ? {} : { retry: { ...this.#resources.retry } }),
       } satisfies AgentRunRequest;
       const running = reserved
         ? this.#manager.startReserved(request, options.manualCompaction === true ? undefined : loadRunContext)
@@ -1976,7 +2262,7 @@ export class HarnessService {
   }
 
   #agentExtensionReducers(): AgentExtensionReducers | undefined {
-    const extensions = this.#options.runtimeExtensions;
+    const extensions = this.#resources.runtimeExtensions;
     if (extensions === undefined) return undefined;
     const beforeAgentStart = extensions.hasListeners("before_agent_start");
     const context = extensions.hasListeners("context");
@@ -1985,17 +2271,35 @@ export class HarnessService {
     if (!beforeAgentStart && !context && !messageEnd && !beforeProviderRequest) return undefined;
     return {
       ...(beforeAgentStart
-        ? { beforeAgentStart: async (event, signal) => await extensions.reduceBeforeAgentStart(event, signal) }
+        ? {
+            beforeAgentStart: async (event, signal) => await extensions.reduceBeforeAgentStart({
+              ...event,
+              ...this.#runtimeRunScope(event),
+            }, signal),
+          }
         : {}),
       ...(context
-        ? { context: async (messages, signal) => await extensions.reduceContext(messages, signal) }
+        ? {
+            context: async (messages, signal, scope) => await extensions.reduceContext({
+              ...this.#runtimeRunScope(scope),
+              messages: [...messages],
+            }, signal),
+          }
         : {}),
       ...(messageEnd
-        ? { messageEnd: async (message, signal) => await extensions.reduceMessageEnd(message, signal) }
+        ? {
+            messageEnd: async (message, signal, scope) => await extensions.reduceMessageEnd({
+              ...this.#runtimeRunScope(scope),
+              message,
+            }, signal),
+          }
         : {}),
       ...(beforeProviderRequest
         ? {
-            beforeProviderRequest: async (event, signal) => await extensions.reduceBeforeProviderRequest(event, signal),
+            beforeProviderRequest: async (event, signal) => await extensions.reduceBeforeProviderRequest({
+              ...event,
+              ...this.#runtimeRunScope(event),
+            }, signal),
           }
         : {}),
     };
@@ -2036,7 +2340,11 @@ export class HarnessService {
   }
 
   #instructionMessages(threadId: string, branch: string | undefined, prompt: string): CanonicalMessage[] {
-    const events = this.#options.store.listEvents(threadId, branch);
+    const events = this.#sessionAccess.snapshot({
+      threadId,
+      ...(branch === undefined ? {} : { branch }),
+      include: { events: true },
+    }).events ?? [];
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]?.event;
       if (event?.type !== "message_appended" || event.message.purpose !== "instructions") continue;
@@ -2054,7 +2362,12 @@ export class HarnessService {
     if (session !== undefined) this.#sessions.set(threadId, { ...session, branch });
   }
 
-  #buildTools(_threadId: string, options: RunOptions, _depth: number): HarnessTool[] {
+  #buildTools(
+    _threadId: string,
+    options: RunOptions,
+    _depth: number,
+    resources: HarnessResourceGeneration = this.#resources,
+  ): HarnessTool[] {
     const builtins: HarnessTool[] = [
       new ReadTool(),
       new GrepTool(),
@@ -2062,13 +2375,14 @@ export class HarnessService {
       new LsTool(),
       new WriteTool(),
       new EditTool(),
-      new ShellTool("bash", this.#options.shellPath === undefined ? {} : { shellPath: this.#options.shellPath }),
+      new ShellTool("bash", resources.shellPath === undefined ? {} : { shellPath: resources.shellPath }),
     ];
     const tools = new Map<string, HarnessTool>();
     if (options.noBuiltinTools !== true) {
       for (const tool of builtins) tools.set(tool.definition.name, tool);
     }
-    for (const tool of this.#options.extraTools ?? []) tools.set(tool.definition.name, tool);
+    for (const tool of resources.extraTools) tools.set(tool.definition.name, tool);
+    for (const tool of resources.runtimeExtensions?.tools() ?? []) tools.set(tool.definition.name, tool);
     return [...tools.values()];
   }
 
@@ -2095,7 +2409,7 @@ export class HarnessService {
       });
       return;
     }
-    const extensions = this.#options.runtimeExtensions;
+    const extensions = this.#resources.runtimeExtensions;
     if (runtimeGuard === "switch" && extensions?.hasListeners("session_before_switch") === true) {
       const result = await extensions.reduceSessionBeforeSwitch({
         reason: resumed ? "resume" : "new",
@@ -2136,6 +2450,7 @@ export class HarnessService {
       await this.#observeRuntime("message_update", {
         threadId: envelope.threadId,
         runId,
+        branch: projection.branch,
         step: projection.step,
         kind: "text",
         part: event.part,
@@ -2147,6 +2462,7 @@ export class HarnessService {
       await this.#observeRuntime("message_update", {
         threadId: envelope.threadId,
         runId,
+        branch: projection.branch,
         step: projection.step,
         kind: "reasoning",
         part: event.part,
@@ -2176,6 +2492,8 @@ export class HarnessService {
       await this.#observeRuntime("tool_execution_start", {
         threadId: envelope.threadId,
         runId,
+        branch: projection.branch,
+        ...(projection.step > 0 ? { step: projection.step } : {}),
         invocation,
       }, signal);
       return;
@@ -2186,6 +2504,8 @@ export class HarnessService {
         await this.#observeRuntime("tool_execution_update", {
           threadId: envelope.threadId,
           runId,
+          branch: projection.branch,
+          ...(projection.step > 0 ? { step: projection.step } : {}),
           invocation,
           phase: "running",
         }, signal);
@@ -2198,6 +2518,8 @@ export class HarnessService {
         await this.#observeRuntime("tool_execution_update", {
           threadId: envelope.threadId,
           runId,
+          branch: projection.branch,
+          ...(projection.step > 0 ? { step: projection.step } : {}),
           invocation,
           phase: "progress",
           sequence: event.sequence,
@@ -2213,6 +2535,8 @@ export class HarnessService {
         await this.#observeRuntime("tool_execution_end", {
           threadId: envelope.threadId,
           runId,
+          branch: projection.branch,
+          ...(projection.step > 0 ? { step: projection.step } : {}),
           invocation,
           outcome: {
             status: event.isError ? "failed" : "completed",
@@ -2231,6 +2555,8 @@ export class HarnessService {
         await this.#observeRuntime("tool_execution_end", {
           threadId: envelope.threadId,
           runId,
+          branch: projection.branch,
+          ...(projection.step > 0 ? { step: projection.step } : {}),
           invocation,
           outcome: { status: "in_doubt", reason: event.reason },
         }, signal);
@@ -2247,6 +2573,8 @@ export class HarnessService {
         await this.#observeRuntime("tool_execution_end", {
           threadId: envelope.threadId,
           runId,
+          branch: projection.branch,
+          ...(projection.step > 0 ? { step: projection.step } : {}),
           invocation,
           outcome: { status: "interrupted", reason },
         }, signal);
@@ -2265,11 +2593,22 @@ export class HarnessService {
     }
   }
 
+  #runtimeRunScope(event: {
+    threadId: string;
+    runId: string;
+    branch?: string;
+    step?: number;
+  }): RuntimeRunScope {
+    return Object.freeze({
+      threadId: event.threadId,
+      runId: event.runId,
+      branch: this.#extensionBranch(event.threadId, event.branch),
+      ...(event.step === undefined ? {} : { step: event.step }),
+    });
+  }
+
   #extensionBranch(threadId: string, branch: string | undefined): string {
-    const thread = this.#options.store.bindThreadWorkspace(threadId, this.#workspaceRoot);
-    const selected = branch ?? thread.defaultBranch;
-    if (!thread.branches.some((entry) => entry.name === selected)) throw new Error(`Unknown branch: ${selected}`);
-    return selected;
+    return this.#sessionAccess.branch(threadId, branch);
   }
 
   #activeToolKey(threadId: string, branch: string): string {
@@ -2278,7 +2617,7 @@ export class HarnessService {
 
   #runtimeModelSelection(threadId: string, branch: string): RuntimeModelSelection | undefined {
     return this.#runtimeModelSelections.get(this.#activeToolKey(threadId, branch))
-      ?? this.#options.store.getModelSelection(threadId, branch);
+      ?? this.#sessionAccess.modelSelection(threadId, branch);
   }
 
   #configuredToolNames(threadId: string): string[] {
@@ -2290,12 +2629,12 @@ export class HarnessService {
   }
 
   async #extensionContextUsage(
-    threadId: string,
     events: readonly EventEnvelope[],
+    runs: readonly RunRecord[],
     signal?: AbortSignal,
   ): Promise<RuntimeSessionSnapshot["contextUsage"]> {
     const pathRunIds = new Set(events.flatMap((event) => event.runId === undefined ? [] : [event.runId]));
-    const latestRun = this.#options.store.listRuns(threadId).filter((run) => pathRunIds.has(run.runId)).at(-1);
+    const latestRun = runs.filter((run) => pathRunIds.has(run.runId)).at(-1);
     if (latestRun?.provider === undefined || latestRun.model === undefined) return undefined;
     const latestUsage = latestRunContextUsage(events, latestRun.runId);
     if (latestUsage === undefined) return undefined;
@@ -2305,7 +2644,7 @@ export class HarnessService {
       const modelSignal = signal === undefined
         ? AbortSignal.timeout(5_000)
         : AbortSignal.any([signal, AbortSignal.timeout(5_000)]);
-      const model = (await this.#options.providers.listModels(latestRun.provider, modelSignal, { refresh: false }))
+      const model = (await this.#resources.providers.listModels(latestRun.provider, modelSignal, { refresh: false }))
         .find((entry) => entry.id === latestRun.model);
       const tokens = normalizedContextTokens(latestUsage.usage);
       if (tokens === undefined || model?.contextTokens === undefined) return undefined;
@@ -2326,18 +2665,28 @@ export class HarnessService {
     signal?: AbortSignal,
   ): Promise<RuntimeSessionSnapshot> {
     signal?.throwIfAborted();
-    const thread = this.#options.store.bindThreadWorkspace(threadId, this.#workspaceRoot);
-    const events = this.#options.store.listEvents(threadId, branch);
+    const snapshot = this.#sessionAccess.snapshot({
+      threadId,
+      branch,
+      include: {
+        events: true,
+        runs: true,
+        runInputStates: ["recoverable"],
+      },
+    });
+    const { thread } = snapshot;
+    const events = snapshot.events ?? [];
+    const runs = snapshot.runs ?? [];
     const activeBranch = this.#manager.activeBranch(threadId);
     const active = this.#manager.active(threadId) && (activeBranch === undefined || activeBranch === branch);
     const activeRun = active
-      ? this.#options.store.listRuns(threadId).findLast((run) =>
+      ? runs.findLast((run) =>
           run.branch === branch && !["completed", "failed", "cancelled"].includes(run.state))
       : undefined;
     const operation = active ? runtimeSessionPhase(events, activeRun?.runId) : undefined;
-    const recoverableMessageCount = this.#options.store.listRunInputs(threadId, branch, ["recoverable"]).length;
+    const recoverableMessageCount = snapshot.runInputs?.length ?? 0;
     const pendingMessageCount = recoverableMessageCount + (active ? this.#manager.queuedMessages(threadId).length : 0);
-    const contextUsage = await this.#extensionContextUsage(threadId, events, signal);
+    const contextUsage = await this.#extensionContextUsage(events, runs, signal);
     const model = this.#runtimeModelSelection(threadId, branch);
     const promptCompositionEvent = events.findLast((entry) =>
       entry.event.type === "run_started" && entry.event.promptComposition !== undefined);
@@ -2371,11 +2720,9 @@ export class HarnessService {
       ? 0
       : this.#childRunDepth.get(input.requesterThreadId) ?? 0;
     const parentDepth = Math.max(targetDepth, requesterDepth);
-    const durableChild = this.#isRuntimeChildThread(input.threadId) || (
-      input.requesterThreadId !== undefined && this.#isRuntimeChildThread(input.requesterThreadId)
-    );
+    const durableChild = this.#hasRuntimeChildThread([input.threadId, input.requesterThreadId]);
     if (parentDepth >= 1 || durableChild) throw new Error("Nested runtime child runs are disabled");
-    const childRunPolicy = this.#childRunPolicy;
+    const childRunPolicy = this.#resources.childRunPolicy;
     const requestedLimits = [
       ["maxSteps", input.maxSteps, childRunPolicy.maxSteps],
       ["timeoutMs", input.timeoutMs, childRunPolicy.maxTimeoutMs],
@@ -2406,7 +2753,7 @@ export class HarnessService {
       throw new Error(`Runtime child run requested unavailable tools: ${unavailableTools.join(", ")}`);
     }
     const executionSelection = input.execution ?? { backend: "inherit" as const };
-    const configuredBackend = this.#options.toolBackend;
+    const configuredBackend = this.#resources.toolBackend;
     if (
       executionSelection.backend === "inherit" &&
       executionSelection.backendId !== undefined &&
@@ -2440,33 +2787,41 @@ export class HarnessService {
     };
     const persisted = input.session === "persisted";
     this.#activeChildRuns += 1;
+    const pendingChildThreadId = createId("thread");
+    this.#childRunDepth.set(pendingChildThreadId, parentDepth + 1);
     try {
       const cwd = input.cwd === undefined
         ? this.#sessions.get(input.threadId)?.cwd ?? this.#workspaceRoot
         : await (this.#workspaceBoundary ?? await WorkspaceBoundary.create(this.#workspaceRoot)).readable(input.cwd);
+      const parentSnapshot = this.#sessionAccess.snapshot({
+        threadId: input.threadId,
+        branch: parentBranch,
+        include: { events: true, runs: true },
+      });
       const activeRun = this.#manager.active(input.threadId)
-        ? this.#options.store.listRuns(input.threadId).findLast((run) =>
+        ? parentSnapshot.runs?.findLast((run) =>
             run.branch === parentBranch && !["completed", "failed", "cancelled"].includes(run.state))
         : undefined;
       const activeEvents = activeRun === undefined
         ? []
-        : this.#options.store.listEvents(input.threadId, parentBranch).filter((event) => event.runId === activeRun.runId);
+        : (parentSnapshot.events ?? []).filter((event) => event.runId === activeRun.runId);
       const currentToolRequest = activeEvents.findLast((event) =>
         event.event.type === "message_appended" &&
         event.event.message.role === "assistant" &&
         event.event.message.content.some((block) => block.type === "tool_call"));
       const child = input.context === "fork"
-        ? (await this.cloneSessionPath({
+        ? (await this.#cloneSessionPath({
             threadId: input.threadId,
             branch: parentBranch,
             ...(currentToolRequest === undefined ? {} : { beforeEventId: currentToolRequest.eventId }),
             ...(input.signal === undefined ? {} : { signal: input.signal }),
-          })).thread
-        : await this.createSession({
+          }, pendingChildThreadId, true)).thread
+        : await this.#createSession({
+            threadId: pendingChildThreadId,
             parentThreadId: input.threadId,
             cwd,
             ...(input.signal === undefined ? {} : { signal: input.signal }),
-          });
+          }, true);
       const childBranch = child.defaultBranch;
       const childSession: RuntimeChildSession = {
         threadId: child.threadId,
@@ -2475,7 +2830,11 @@ export class HarnessService {
         persisted,
       };
       const artifactIdsBeforeRun = new Set(
-        this.#options.store.listArtifacts(child.threadId).map((artifact) => artifact.artifactId),
+        (this.#sessionAccess.snapshot({
+          threadId: child.threadId,
+          branch: childBranch,
+          include: { artifacts: true },
+        }).artifacts ?? []).map((artifact) => artifact.artifactId),
       );
       const timeout = AbortSignal.timeout(input.timeoutMs ?? childRunPolicy.defaultTimeoutMs);
       const signal = input.signal === undefined ? timeout : AbortSignal.any([input.signal, timeout]);
@@ -2567,12 +2926,17 @@ export class HarnessService {
       } finally {
         this.#childRunDepth.delete(child.threadId);
       }
-      const runRecord = this.#options.store.listRuns(child.threadId).at(-1);
+      const childSnapshot = this.#sessionAccess.snapshot({
+        threadId: child.threadId,
+        branch: childBranch,
+        include: { events: true, runs: true, artifacts: true },
+      });
+      const runRecord = childSnapshot.runs?.at(-1);
       const selectedRunId = outcome.runId ?? runRecord?.runId;
       if (selectedRunId !== undefined) {
-        const events = this.#options.store.listEvents(child.threadId, childBranch);
+        const events = childSnapshot.events ?? [];
         const usage = runtimeChildUsage(events, selectedRunId);
-        const allArtifacts = this.#options.store.listArtifacts(child.threadId)
+        const allArtifacts = (childSnapshot.artifacts ?? [])
           .filter((artifact) => !artifactIdsBeforeRun.has(artifact.artifactId));
         outcome = {
           ...outcome,
@@ -2607,17 +2971,18 @@ export class HarnessService {
       }
       return outcome;
     } finally {
+      this.#childRunDepth.delete(pendingChildThreadId);
       this.#activeChildRuns -= 1;
     }
   }
 
-  #isRuntimeChildThread(threadId: string): boolean {
-    if (this.#childRunDepth.has(threadId)) return true;
-    const thread = this.#options.store.bindThreadWorkspace(threadId, this.#workspaceRoot);
-    if (thread.parentThreadId === undefined) return false;
-    return thread.branches.some((branch) => this.#options.store.listEvents(threadId, branch.name).some((entry) =>
-      entry.event.type === "run_started" && entry.event.promptComposition?.sources.some((source) =>
-        source.kind === "additional_instructions" && source.source === RUNTIME_CHILD_INSTRUCTION_SOURCE) === true));
+  #hasRuntimeChildThread(threadIds: readonly (string | undefined)[]): boolean {
+    const uniqueThreadIds = new Set(threadIds.filter((threadId): threadId is string => threadId !== undefined));
+    for (const threadId of uniqueThreadIds) {
+      if (this.#childRunDepth.has(threadId)) return true;
+      if (this.#sessionAccess.hasRuntimeChildThread(threadId)) return true;
+    }
+    return false;
   }
 
   async #publishExtensionSessionEvent(publication: ExtensionSessionPublication): Promise<void> {
@@ -2626,7 +2991,7 @@ export class HarnessService {
     const results = await Promise.allSettled(listeners.map(async (listener) => await listener(structuredClone(publication))));
     for (const result of results) {
       if (result.status !== "rejected") continue;
-      this.#options.runtimeExtensions?.addDiagnostic({
+      this.#resources.runtimeExtensions?.addDiagnostic({
         extensionId: "runtime",
         sourcePath: "",
         message: `Extension session event observer failed after durable commit: ${defaultSecretRedactor.redact(
@@ -2649,7 +3014,7 @@ export class HarnessService {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
         const event = defaultSecretRedactor.redactValue(input.event) as ExtensionStateEvent;
-        const envelope = this.#options.store.appendEvent({ threadId: input.threadId, branch, event });
+        const envelope = this.#sessionAccess.appendEvent(input.threadId, branch, event);
         await this.#publishExtensionSessionEvent({
           branch,
           envelope: envelope as EventEnvelope<ExtensionStateEvent>,
@@ -2660,7 +3025,7 @@ export class HarnessService {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
         const event = defaultSecretRedactor.redactValue(input.event) as ExtensionStateEvent;
-        const result = this.#options.store.compareAndAppendExtensionState({
+        const result = this.#sessionAccess.compareAndAppendExtensionState({
           threadId: input.threadId,
           branch,
           event,
@@ -2681,12 +3046,12 @@ export class HarnessService {
       readState: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
-        const envelope = this.#options.store.getExtensionState(
+        const envelope = this.#sessionAccess.extensionState(
           input.threadId,
+          branch,
           input.extensionId,
           input.schemaVersion,
           input.key,
-          branch,
         );
         return envelope === undefined ? undefined : extensionStateRecord(envelope, branch);
       },
@@ -2694,7 +3059,7 @@ export class HarnessService {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
         const event = defaultSecretRedactor.redactValue(input.event) as ExtensionMessageEvent;
-        const envelope = this.#options.store.appendEvent({ threadId: input.threadId, branch, event });
+        const envelope = this.#sessionAccess.appendEvent(input.threadId, branch, event);
         await this.#publishExtensionSessionEvent({
           branch,
           envelope: envelope as EventEnvelope<ExtensionMessageEvent>,
@@ -2704,11 +3069,11 @@ export class HarnessService {
       readMessages: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
-        return this.#options.store.listExtensionMessages(
+        return this.#sessionAccess.extensionMessages(
           input.threadId,
+          branch,
           input.extensionId,
           input.schemaVersion,
-          branch,
           input.kind,
         ).slice(-input.limit).map((entry) => extensionMessageRecord(entry, branch));
       },
@@ -2735,7 +3100,7 @@ export class HarnessService {
           ?? this.#activeToolSelections.get(key)?.names
           ?? this.#configuredToolNames(input.threadId),
         );
-        const extraTools = new Set(this.#options.extraTools ?? []);
+        const extraTools = new Set(this.#resources.extraTools);
         return tools
           .map((tool) => ({
             name: tool.definition.name,
@@ -2743,7 +3108,7 @@ export class HarnessService {
             inputSchema: structuredClone(tool.definition.inputSchema),
             active: active.has(tool.definition.name),
             executionMode: tool.executionMode ?? "parallel",
-            owner: this.#options.runtimeExtensions?.toolOwner(tool)
+            owner: this.#resources.runtimeExtensions?.toolOwner(tool)
               ?? (extraTools.has(tool) ? { kind: "host" as const } : { kind: "builtin" as const }),
             ...(tool.definition.loading === undefined ? {} : { loading: tool.definition.loading }),
             ...(tool.definition.promptSnippet === undefined ? {} : { promptSnippet: tool.definition.promptSnippet }),
@@ -2824,7 +3189,7 @@ export class HarnessService {
       },
       cancel: async (input) => {
         input.signal?.throwIfAborted();
-        this.#options.store.bindThreadWorkspace(input.threadId, this.#workspaceRoot);
+        this.#sessionAccess.thread(input.threadId);
         if (!this.#manager.active(input.threadId)) return false;
         if (input.branch !== undefined && this.#manager.activeBranch(input.threadId) !== input.branch) {
           throw new HarnessError("SERVICE_QUEUE_BRANCH", `Active run is not on branch ${input.branch}`);
@@ -2834,7 +3199,7 @@ export class HarnessService {
       },
       compact: async (input) => {
         input.signal?.throwIfAborted();
-        const thread = this.#options.store.bindThreadWorkspace(input.threadId, this.#workspaceRoot);
+        const thread = this.#sessionAccess.thread(input.threadId);
         const branch = input.branch ?? thread.defaultBranch;
         const stored = this.#runtimeModelSelection(input.threadId, branch);
         const provider = input.provider ?? stored?.provider;
@@ -2906,7 +3271,7 @@ export class HarnessService {
       sessionTree: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
-        return buildSessionTree(this.#options.store, input.threadId, branch);
+        return this.#sessionAccess.tree(input.threadId, branch);
       },
       navigateSession: async (input) => {
         input.signal?.throwIfAborted();
@@ -2944,15 +3309,11 @@ export class HarnessService {
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         });
-        this.#options.store.appendEvent({
-          threadId: input.threadId,
-          branch,
-          event: {
-            type: "model_selected",
-            provider: selected.provider,
-            model: selected.model,
-            ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
-          },
+        this.#sessionAccess.appendEvent(input.threadId, branch, {
+          type: "model_selected",
+          provider: selected.provider,
+          model: selected.model,
+          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
         });
         this.setRuntimeModelSelection({ threadId: input.threadId, branch, selection: selected });
         return selected;
@@ -2968,15 +3329,11 @@ export class HarnessService {
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           reasoningEffort: input.reasoningEffort,
         });
-        this.#options.store.appendEvent({
-          threadId: input.threadId,
-          branch,
-          event: {
-            type: "model_selected",
-            provider: selected.provider,
-            model: selected.model,
-            ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
-          },
+        this.#sessionAccess.appendEvent(input.threadId, branch, {
+          type: "model_selected",
+          provider: selected.provider,
+          model: selected.model,
+          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
         });
         this.setRuntimeModelSelection({ threadId: input.threadId, branch, selection: selected });
         return selected;
@@ -3016,7 +3373,7 @@ export class HarnessService {
     value: RuntimeExtensionEventMap[K],
     signal?: AbortSignal,
   ): Promise<void> {
-    const extensions = this.#options.runtimeExtensions;
+    const extensions = this.#resources.runtimeExtensions;
     if (extensions === undefined || !extensions.hasListeners(event)) return;
     try {
       await extensions.dispatch(event, value, extensionObserverSignal(signal));

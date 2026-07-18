@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -453,13 +454,13 @@ async function install() {
       await rm(previousApp, { recursive: true, force: true });
       await rm(transactionPath, { force: true });
       transactionStarted = false;
-      process.stdout.write(`Installed a self-contained Rigyn copy at ${installRoot}\n`);
-      process.stdout.write(`Installed command at ${paths.command}\n`);
+      writeFileSync(1, `Installed a self-contained Rigyn copy at ${installRoot}\n`);
+      writeFileSync(1, `Installed command at ${paths.command}\n`);
       const commandDirectory = process.platform === "win32" ? join(installRoot, "bin") : join(homedir(), ".local", "bin");
       if ((process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").includes(commandDirectory)) {
-        process.stdout.write("Run rigyn from any directory.\n");
+        writeFileSync(1, "Run rigyn from any directory.\n");
       } else {
-        process.stdout.write(`Add ${commandDirectory} to PATH, then run rigyn.\n`);
+        writeFileSync(1, `Add ${commandDirectory} to PATH, then run rigyn.\n`);
       }
     } catch (error) {
       if (!committed) {

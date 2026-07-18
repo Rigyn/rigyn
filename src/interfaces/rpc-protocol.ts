@@ -155,6 +155,36 @@ export type RpcThreadExportResult =
   | { jsonl: string }
   | { format: "jsonl" | "markdown" | "html"; content: string; bytes: number };
 
+export interface RpcThreadEventsPagedParams {
+  threadId: string;
+  branch?: string;
+  afterSequence?: number;
+  limit?: number;
+}
+
+export interface RpcOversizedEvent {
+  reason: "event_exceeds_serialized_byte_limit";
+  sequence: number;
+  serializedBytes: number;
+  maximumBytes: number;
+  resumeAfterSequence: number;
+}
+
+export interface RpcEventPage {
+  events: EventEnvelope[];
+  nextCursor: number;
+  hasMore: boolean;
+  blocked?: RpcOversizedEvent;
+}
+
+export interface RpcEventSubscriptionResult {
+  subscriptionId: string;
+  replayedThrough: number;
+  nextCursor: number;
+  hasMore: boolean;
+  blocked?: RpcOversizedEvent;
+}
+
 export interface RpcMethodMap {
   initialize: { params: undefined; result: RpcInitializeResult };
   health: { params: undefined; result: RpcHealthResult };
@@ -166,7 +196,10 @@ export interface RpcMethodMap {
   };
   "thread.list": { params: undefined; result: ThreadRecord[] };
   "thread.get": { params: { threadId: string }; result: { thread: ThreadRecord; runs: RunRecord[] } };
-  "thread.events": { params: { threadId: string; branch?: string }; result: EventEnvelope[] };
+  "thread.events": {
+    params: RpcThreadEventsPagedParams;
+    result: RpcEventPage;
+  };
   "thread.state": { params: { threadId: string; branch?: string }; result: RpcThreadState };
   "thread.stats": { params: { threadId: string; branch?: string }; result: RpcThreadStatistics };
   "thread.lastAssistantText": { params: { threadId: string; branch?: string }; result: { text: string | null } };
@@ -182,8 +215,8 @@ export interface RpcMethodMap {
   };
   "thread.compact": { params: RpcThreadCompactParams; result: AgentRunResult };
   "events.subscribe": {
-    params: { threadId: string; branch?: string; afterSequence?: number };
-    result: { subscriptionId: string; replayedThrough: number };
+    params: { threadId: string; branch?: string; afterSequence?: number; limit?: number };
+    result: RpcEventSubscriptionResult;
   };
   "events.unsubscribe": { params: { subscriptionId: string }; result: { unsubscribed: true } };
   "run.start": { params: RpcRunStartParams; result: { threadId: string; handled?: true } };
@@ -255,7 +288,7 @@ export interface RpcNotificationMap {
   "extension.warning": { phase: "session_start" | "event"; message: string };
   "extension.ui.request": RpcExtensionUiRequest;
   "events.event": { subscriptionId: string; event: EventEnvelope };
-  "events.error": { subscriptionId: string; cursor: number; reason: string };
+  "events.error": { subscriptionId: string; cursor: number; reason: string; blocked?: RpcOversizedEvent };
 }
 
 export type RpcNotification = keyof RpcNotificationMap;
@@ -299,7 +332,7 @@ export const RPC_METHOD_REFERENCE = Object.freeze({
   "thread.create": { params: "name?, parentThreadId?, parentRunId?", result: "ThreadRecord", summary: "Create a workspace-bound thread." },
   "thread.list": { params: "none", result: "ThreadRecord[]", summary: "List workspace threads." },
   "thread.get": { params: "threadId", result: "{ thread, runs }", summary: "Read a thread and its runs." },
-  "thread.events": { params: "threadId, branch?", result: "EventEnvelope[]", summary: "Read durable events on a branch." },
+  "thread.events": { params: "threadId, branch?, afterSequence?, limit?", result: "RpcEventPage", summary: "Read a bounded cursor page of durable events on a branch." },
   "thread.state": { params: "threadId, branch?", result: "RpcThreadState", summary: "Read active state, selection, and pending counts." },
   "thread.stats": { params: "threadId, branch?", result: "RpcThreadStatistics", summary: "Read message, run, usage, and context statistics." },
   "thread.lastAssistantText": { params: "threadId, branch?", result: "{ text }", summary: "Read bounded text from the latest assistant message." },
@@ -308,7 +341,7 @@ export const RPC_METHOD_REFERENCE = Object.freeze({
   "thread.delete": { params: "threadId", result: "{ deleted }", summary: "Delete a workspace thread." },
   "thread.export": { params: "threadId, format?, branch?", result: "RpcThreadExportResult", summary: "Export bounded JSONL, Markdown, or HTML." },
   "thread.compact": { params: "threadId, provider, model, branch?, budgets?", result: "AgentRunResult", summary: "Run manual context compaction." },
-  "events.subscribe": { params: "threadId, branch?, afterSequence?", result: "{ subscriptionId, replayedThrough }", summary: "Start replayable durable-event delivery." },
+  "events.subscribe": { params: "threadId, branch?, afterSequence?, limit?", result: "RpcEventSubscriptionResult", summary: "Start bounded-batch replayable durable-event delivery." },
   "events.unsubscribe": { params: "subscriptionId", result: "{ unsubscribed }", summary: "Stop an event subscription." },
   "run.start": { params: "RpcRunStartParams", result: "{ threadId, handled? }", summary: "Start a caller-owned agent run." },
   "run.wait": { params: "threadId", result: "HarnessRun or AgentRunResult", summary: "Wait for a caller-owned run or compaction." },
@@ -352,7 +385,7 @@ export const RPC_NOTIFICATION_REFERENCE = Object.freeze({
   "extension.warning": { payload: "{ phase, message }", summary: "A bounded extension lifecycle observer failed." },
   "extension.ui.request": { payload: "RpcExtensionUiRequest", summary: "Correlated UI request owned by this RPC peer." },
   "events.event": { payload: "{ subscriptionId, event }", summary: "Replay or live event for a durable subscription." },
-  "events.error": { payload: "{ subscriptionId, cursor, reason }", summary: "A durable event subscription stopped at a cursor." },
+  "events.error": { payload: "{ subscriptionId, cursor, reason, blocked? }", summary: "A durable event subscription stopped at a cursor." },
 } satisfies { [K in RpcNotification]: { payload: string; summary: string } });
 
 export const RPC_NOTIFICATION_NAMES = Object.freeze(Object.keys(RPC_NOTIFICATION_REFERENCE) as RpcNotification[]);

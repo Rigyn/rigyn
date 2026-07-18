@@ -40,8 +40,9 @@ test("native clipboard copy writes exact text and rejects oversized payloads", {
   const command = join(root, "wl-copy");
   await writeFile(command, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
 const chunks = [];
-for await (const chunk of process.stdin) chunks.push(chunk);
+for await (const chunk of createReadStream("", { fd: 0, autoClose: false })) chunks.push(chunk);
 writeFileSync(process.env.HOME + "/copied.txt", Buffer.concat(chunks));
 `);
   await chmod(command, 0o700);

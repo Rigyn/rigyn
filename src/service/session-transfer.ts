@@ -25,9 +25,21 @@ function object(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function exactObjectKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) throw new Error(`${label} contains unknown fields: ${unknown.join(", ")}`);
+}
+
 function string(value: unknown, label: string): string {
   if (typeof value !== "string" || value === "") throw new Error(`${label} must be a non-empty string`);
   return value;
+}
+
+function boundedPositiveInteger(value: unknown, label: string, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+    throw new Error(`${label} must be an integer between 1 and ${maximum}`);
+  }
+  return value as number;
 }
 
 export interface ImportThreadResult {
@@ -56,18 +68,28 @@ export function importThreadJsonl(
   const formatLines = records.filter((record) => record.type === "format");
   if (formatLines.length > 1) throw new Error("Session import contains more than one format record");
   const formatLine = formatLines[0];
+  let exportSchemaVersion = 1;
   if (formatLine !== undefined) {
     if (records[0] !== formatLine) throw new Error("Session import format record must be first");
     const format = object(formatLine.value, "format.value");
-    if (format.format !== SESSION_EXPORT_FORMAT || format.schemaVersion !== SESSION_EXPORT_SCHEMA_VERSION) {
+    if (
+      format.format !== SESSION_EXPORT_FORMAT
+      || !Number.isSafeInteger(format.schemaVersion)
+      || (format.schemaVersion !== 1 && format.schemaVersion !== SESSION_EXPORT_SCHEMA_VERSION)
+    ) {
       throw new Error(`Unsupported session export format or schema version: ${String(format.format)}@${String(format.schemaVersion)}`);
     }
+    exportSchemaVersion = format.schemaVersion as number;
   }
   const threadLines = records.filter((record) => record.type === "thread");
   if (threadLines.length > 1) throw new Error("Session import contains more than one thread record");
   const threadLine = threadLines[0];
   if (threadLine === undefined) throw new Error("Session import is missing its thread record");
   const originalThread = object(threadLine.value, "thread.value");
+  exactObjectKeys(originalThread, [
+    "threadId", "name", "defaultBranch", "createdAt", "updatedAt", "parentThreadId", "parentRunId",
+    "workspaceRoot", "branches",
+  ], "thread.value");
   const defaultBranch = string(originalThread.defaultBranch, "thread.defaultBranch");
   const name = typeof originalThread.name === "string" && originalThread.name.trim() !== ""
     ? originalThread.name
@@ -79,11 +101,49 @@ export function importThreadJsonl(
   });
   const eventIds = new Map<string, string>();
   const eventBranches = new Map<string, string>();
+  const eventParents = new Map<string, string | undefined>();
   const branchHeads = new Map<string, string | undefined>([[defaultBranch, undefined]]);
+  const branchIncarnations = new Map<string, number>([[defaultBranch, 1]]);
   const runIds = new Map<string, string>();
   let eventCount = 0;
   let artifactCount = 0;
   const omittedEmptyBranches: string[] = [];
+
+  const eventIsAncestor = (headEventId: string | undefined, candidateEventId: string): boolean => {
+    let cursor = headEventId;
+    while (cursor !== undefined) {
+      if (cursor === candidateEventId) return true;
+      cursor = eventParents.get(cursor);
+    }
+    return false;
+  };
+
+  const forkImportedBranch = (branch: string, originalParent: string | undefined): void => {
+    if (originalParent === undefined) {
+      const sourceBranch = branchHeads.keys().next().value as string | undefined;
+      if (sourceBranch === undefined) throw new Error(`Imported branch ${branch} has no available fork source`);
+      store.forkBranch({ threadId: imported.threadId, fromBranch: sourceBranch, newBranch: branch, atEventId: null });
+      return;
+    }
+    const mappedParent = eventIds.get(originalParent);
+    if (mappedParent === undefined) throw new Error(`Imported branch ${branch} has an unknown fork parent`);
+    const preferred = eventBranches.get(originalParent);
+    const candidates = preferred === undefined
+      ? [...branchHeads.keys()]
+      : [preferred, ...branchHeads.keys()].filter((value, index, values) => values.indexOf(value) === index);
+    const sourceBranch = candidates.find((candidate) => (
+      candidate !== branch
+      && branchHeads.has(candidate)
+      && eventIsAncestor(branchHeads.get(candidate), originalParent)
+    ));
+    if (sourceBranch === undefined) throw new Error(`Imported branch ${branch} has an unreachable fork parent`);
+    store.forkBranch({
+      threadId: imported.threadId,
+      fromBranch: sourceBranch,
+      newBranch: branch,
+      atEventId: mappedParent,
+    });
+  };
 
   try {
     for (const [index, record] of records.entries()) {
@@ -91,14 +151,31 @@ export function importThreadJsonl(
       const envelope = object(record.value, `line ${index + 1}.value`) as unknown as EventEnvelope;
       const originalEventId = string(envelope.eventId, `line ${index + 1}.eventId`);
       if (eventIds.has(originalEventId)) throw new Error(`Duplicate imported event ID: ${originalEventId}`);
-      const branch = typeof record.branch === "string" ? record.branch : defaultBranch;
-      const originalParent = envelope.parentEventId;
-      if (!branchHeads.has(branch)) {
-        if (originalParent === undefined) throw new Error(`Imported branch ${branch} has no fork parent`);
-        const mappedParent = eventIds.get(originalParent);
-        const sourceBranch = eventBranches.get(originalParent);
-        if (mappedParent === undefined || sourceBranch === undefined) throw new Error(`Imported branch ${branch} has an unknown fork parent`);
-        store.forkBranch({ threadId: imported.threadId, fromBranch: sourceBranch, newBranch: branch, atEventId: mappedParent });
+      const branch = exportSchemaVersion >= 2
+        ? string(record.branch, `line ${index + 1}.branch`)
+        : typeof record.branch === "string" ? record.branch : defaultBranch;
+      const branchIncarnation = exportSchemaVersion >= 2
+        ? boundedPositiveInteger(record.branchIncarnation, `line ${index + 1}.branchIncarnation`, MAX_IMPORT_LINES)
+        : 1;
+      const originalParent = envelope.parentEventId === undefined
+        ? undefined
+        : string(envelope.parentEventId, `line ${index + 1}.parentEventId`);
+      const currentIncarnation = branchIncarnations.get(branch);
+      if (currentIncarnation === undefined) {
+        if (branchIncarnation !== 1) throw new Error(`Imported branch ${branch} begins at invalid incarnation ${branchIncarnation}`);
+        forkImportedBranch(branch, originalParent);
+        branchIncarnations.set(branch, branchIncarnation);
+        branchHeads.set(branch, originalParent);
+      } else if (branchIncarnation !== currentIncarnation) {
+        if (branch === defaultBranch) throw new Error(`Imported default branch ${branch} cannot change incarnation`);
+        if (branchIncarnation !== currentIncarnation + 1) {
+          throw new Error(`Imported branch ${branch} has a non-consecutive incarnation`);
+        }
+        store.deleteBranch(imported.threadId, branch);
+        branchHeads.delete(branch);
+        branchIncarnations.delete(branch);
+        forkImportedBranch(branch, originalParent);
+        branchIncarnations.set(branch, branchIncarnation);
         branchHeads.set(branch, originalParent);
       }
       if (branchHeads.get(branch) !== originalParent) throw new Error(`Imported branch ${branch} has a non-linear event chain`);
@@ -150,23 +227,41 @@ export function importThreadJsonl(
       });
       eventIds.set(originalEventId, mappedEventId);
       eventBranches.set(originalEventId, branch);
+      eventParents.set(originalEventId, originalParent);
       branchHeads.set(branch, originalEventId);
       eventCount += 1;
     }
 
     const exportedBranches = Array.isArray(originalThread.branches) ? originalThread.branches : [];
+    const desiredBranches = new Set<string>([defaultBranch]);
+    const seenExportedBranches = new Set<string>();
     for (const value of exportedBranches) {
       const branch = object(value, "thread.branch");
       const branchName = string(branch.name, "thread.branch.name");
-      if (branchHeads.has(branchName)) continue;
-      if (typeof branch.headEventId !== "string") {
-        omittedEmptyBranches.push(branchName);
-        continue;
+      if (seenExportedBranches.has(branchName)) throw new Error(`Imported thread contains duplicate branch ${branchName}`);
+      seenExportedBranches.add(branchName);
+      desiredBranches.add(branchName);
+      const originalHead = typeof branch.headEventId === "string" ? branch.headEventId : undefined;
+      if (originalHead !== undefined && !eventIds.has(originalHead)) {
+        throw new Error(`Imported branch ${branchName} references an unknown head`);
       }
-      const mappedHead = eventIds.get(branch.headEventId);
-      const sourceBranch = eventBranches.get(branch.headEventId);
-      if (mappedHead === undefined || sourceBranch === undefined) throw new Error(`Imported branch ${branchName} references an unknown head`);
-      store.forkBranch({ threadId: imported.threadId, fromBranch: sourceBranch, newBranch: branchName, atEventId: mappedHead });
+      if (branchHeads.has(branchName) && branchHeads.get(branchName) === originalHead) continue;
+      if (branchName === defaultBranch) throw new Error(`Imported default branch ${branchName} has an inconsistent head`);
+      const nextIncarnation = (branchIncarnations.get(branchName) ?? 0) + 1;
+      if (branchHeads.has(branchName)) {
+        store.deleteBranch(imported.threadId, branchName);
+        branchHeads.delete(branchName);
+        branchIncarnations.delete(branchName);
+      }
+      forkImportedBranch(branchName, originalHead);
+      branchHeads.set(branchName, originalHead);
+      branchIncarnations.set(branchName, nextIncarnation);
+    }
+    for (const branchName of [...branchHeads.keys()]) {
+      if (desiredBranches.has(branchName)) continue;
+      store.deleteBranch(imported.threadId, branchName);
+      branchHeads.delete(branchName);
+      branchIncarnations.delete(branchName);
     }
 
     for (const [index, record] of records.entries()) {

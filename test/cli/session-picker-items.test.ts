@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  indexedSessionPickerPage,
   indexedSessionPickerItems,
   markCurrentSessionPickerItems,
   refreshSessionCatalogOnOpen,
@@ -308,4 +309,21 @@ test("all-workspace picker uses composite values and reads metadata without open
   assert.ok(items.every((item) => item.id === item.value && item.id.endsWith("#duplicate")));
   assert.equal(items.filter((item) => item.session?.current).length, 1);
   assert.ok(items.every((item) => item.session?.path === item.value));
+
+  const page = indexedSessionPickerPage(index, {
+    workspaceRoot: records[0]!.workspace,
+    databasePath: records[0]!.database,
+    threadId: "duplicate",
+  }, { limit: 1 });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.hasMore, true);
+  assert.ok(page.nextCursor !== undefined);
+  const nextPage = indexedSessionPickerPage(index, {
+    workspaceRoot: records[0]!.workspace,
+    databasePath: records[0]!.database,
+    threadId: "duplicate",
+  }, { cursor: page.nextCursor, limit: 1 });
+  assert.equal(nextPage.items.length, 1);
+  assert.equal(nextPage.hasMore, false);
+  assert.equal([...page.items, ...nextPage.items].filter((item) => item.session?.current).length, 1);
 });

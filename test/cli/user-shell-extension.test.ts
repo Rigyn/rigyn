@@ -117,7 +117,7 @@ test("before_user_shell replaces or handles shortcuts without breaking hidden tr
   child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   const submit = (value: string) => child.stdin.write(`\u001b[200~${value}\u001b[201~\r`);
-  await waitFor(() => output.includes("Rigyn v0.1.7 · Ready"), () => output.slice(-16 * 1024));
+  await waitFor(() => output.includes("Rigyn v0.2.0 · Ready"), () => output.slice(-16 * 1024));
 
   submit(`!printf visible-original > ${shellQuote(visibleMarker)}`);
   await waitFor(async () => {

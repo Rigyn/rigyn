@@ -11,6 +11,7 @@ import type {
   ProviderAdapter,
   ProviderId,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { catalogId } from "./catalog.js";
@@ -36,6 +37,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -94,6 +96,7 @@ export interface ResponsesWireEvent {
   data: string;
   event?: string;
   requestId?: string;
+  diagnostics?: ProviderResponseDiagnostics;
 }
 
 export interface ResponsesEventStreamInput {
@@ -103,6 +106,7 @@ export interface ResponsesEventStreamInput {
   request: ProviderRequest;
   signal: AbortSignal;
   fetch: FetchLike;
+  onResponse?: (diagnostics: ProviderResponseDiagnostics, requestId?: string) => void;
 }
 
 interface ToolAccumulator {
@@ -116,10 +120,15 @@ interface ToolAccumulator {
 
 const parsedResponsesWireEvents = new WeakMap<ResponsesWireEvent, unknown>();
 
-function responsesWireEventFromValue(value: unknown, requestId?: string): ResponsesWireEvent {
+function responsesWireEventFromValue(
+  value: unknown,
+  requestId?: string,
+  diagnostics?: ProviderResponseDiagnostics,
+): ResponsesWireEvent {
   const wire: ResponsesWireEvent = {
     data: "",
     ...(requestId === undefined ? {} : { requestId }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
   };
   parsedResponsesWireEvents.set(wire, value);
   return wire;
@@ -138,6 +147,7 @@ export class ResponsesAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const headers = new Headers(this.#transport.headers);
@@ -156,6 +166,10 @@ export class ResponsesAdapter implements ProviderAdapter {
         this.#transport.promptCacheOptions,
         this.#transport.deferredToolLoading,
       );
+      const onResponse = (observedDiagnostics: ProviderResponseDiagnostics, observedRequestId?: string): void => {
+        diagnostics = observedDiagnostics;
+        requestId ??= observedRequestId;
+      };
       const wireEvents = this.#transport.streamEvents?.({
         url,
         headers,
@@ -163,7 +177,8 @@ export class ResponsesAdapter implements ProviderAdapter {
         request,
         signal,
         fetch: this.#transport.fetch,
-      }) ?? httpResponsesWireEvents({ url, headers, body, signal, fetch: this.#transport.fetch });
+        onResponse,
+      }) ?? httpResponsesWireEvents({ url, headers, body, signal, fetch: this.#transport.fetch, onResponse });
 
       let started = false;
       let responseId: string | undefined;
@@ -177,6 +192,7 @@ export class ResponsesAdapter implements ProviderAdapter {
 
       for await (const wire of wireEvents) {
         requestId ??= wire.requestId;
+        diagnostics ??= wire.diagnostics;
         const hasParsedEvent = parsedResponsesWireEvents.has(wire);
         if (!hasParsedEvent && wire.data.trim() === "[DONE]") break;
         const parsed: unknown = hasParsedEvent
@@ -194,7 +210,11 @@ export class ResponsesAdapter implements ProviderAdapter {
 
         if (!started && type !== "error") {
           started = true;
-          const start: AdapterEvent = { type: "response_start", model: responseModel };
+          const start: AdapterEvent = {
+            type: "response_start",
+            model: responseModel,
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+          };
           if (responseId !== undefined) start.responseId = responseId;
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
@@ -320,7 +340,11 @@ export class ResponsesAdapter implements ProviderAdapter {
         if (type === "response.completed" || type === "response.incomplete") {
           if (!started) {
             started = true;
-            const start: AdapterEvent = { type: "response_start", model: responseModel };
+            const start: AdapterEvent = {
+              type: "response_start",
+              model: responseModel,
+              ...(diagnostics === undefined ? {} : { diagnostics }),
+            };
             if (responseId !== undefined) start.responseId = responseId;
             if (requestId !== undefined) start.requestId = requestId;
             yield start;
@@ -370,7 +394,7 @@ export class ResponsesAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }
@@ -422,6 +446,7 @@ export async function* httpResponsesWireEvents(input: {
   body: Record<string, unknown>;
   signal: AbortSignal;
   fetch: FetchLike;
+  onResponse?: (diagnostics: ProviderResponseDiagnostics, requestId?: string) => void;
 }): AsyncGenerator<ResponsesWireEvent> {
   const response = await input.fetch(input.url, {
     method: "POST",
@@ -431,12 +456,15 @@ export async function* httpResponsesWireEvents(input: {
     redirect: "error",
   });
   const requestId = requestIdFromHeaders(response.headers);
+  const diagnostics = responseDiagnostics(response);
   await assertResponseOk(response);
+  input.onResponse?.(diagnostics, requestId);
   for await (const sse of decodeSSE(requireBody(response))) {
     yield {
       data: sse.data,
       ...(sse.event === undefined ? {} : { event: sse.event }),
       ...(requestId === undefined ? {} : { requestId }),
+      diagnostics,
     };
   }
 }

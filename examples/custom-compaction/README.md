@@ -11,4 +11,4 @@ rigyn
 
 Build some session history, then run `/compact focus on decisions and remaining work`. A successful override reports `Custom bounded compaction checkpoint saved.` Remove the package with `rigyn remove custom-compaction-example`.
 
-This deterministic strategy is an authoring reference, not a universal replacement for semantic summarization. Use it only when a bounded audit-style outline is preferable to a provider summary. Cancellation is checked before any summary is returned. The package targets extension manifest schema 1 and Rigyn 0.1.x.
+This deterministic strategy is an authoring reference, not a universal replacement for semantic summarization. Use it only when a bounded audit-style outline is preferable to a provider summary. Cancellation is checked before any summary is returned. The package targets extension manifest schema 1 and the public APIs documented for the installed Rigyn build.

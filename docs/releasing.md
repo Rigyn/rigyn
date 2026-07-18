@@ -32,16 +32,16 @@ Staging refuses to replace a directory without that exact ownership marker and s
 1. Move classified entries from `Unreleased` into a dated `[version]` section.
 2. Update `package.json`, `package-lock.json`, and `src/version.ts` together.
 3. Review migrations, public API changes, provider behavior, security impact, and platform notes.
-4. Run `npm run check` and `npm run release:stage`.
+4. Run `npm run check`, `npm run test:coverage:risk`, `npm run benchmark:runtime`, and `npm run release:stage`.
 5. Inspect `.release/RELEASE_NOTES.md`, `.release/release-manifest.json`, and `SHA256SUMS`.
 6. Create and push the exact `v<version>` tag. Do not move or reuse a published tag.
 7. Let the release workflow verify the single archive on every declared target.
 
-On a tag, the workflow creates or updates a draft GitHub release, uploads the staged files, and then makes the release public. Setting the repository variable `NPM_PUBLISH_ENABLED` to `true` also publishes the exact staged archive to npm with provenance before the GitHub release becomes public. Configure npm trusted publishing for `Rigyn/rigyn` and `release.yml` before enabling that variable. A rerun accepts an already-published npm version only when its registry integrity exactly matches the staged archive.
+On a tag, independent risk-coverage and runtime-performance guards must pass before release staging begins. The workflow then creates or updates a draft GitHub release, uploads the staged files, and makes the release public only after every declared platform verifies the archive. Setting the repository variable `NPM_PUBLISH_ENABLED` to `true` also publishes the exact staged archive to npm with provenance before the GitHub release becomes public. Configure npm trusted publishing for `Rigyn/rigyn` and `release.yml` before enabling that variable. A rerun accepts an already-published npm version only when its registry integrity exactly matches the staged archive.
 
-The first npm publication requires an npm owner to bootstrap the package. Publish only the exact verified archive, then configure the trusted publisher, remove the bootstrap credential, and enable `NPM_PUBLISH_ENABLED` for later releases. A GitHub-only release remains valid while npm publication is disabled; `rigyn self-update` becomes available after the registry package exists.
+The first npm publication requires an npm owner to bootstrap the package. Publish only the exact verified archive, then configure the trusted publisher, remove the bootstrap credential, and enable `NPM_PUBLISH_ENABLED` for later releases. A GitHub-only release remains valid while npm publication is disabled. The default `rigyn self-update` path refuses to replace an installation with an older npm `latest`; after reviewing a rollback or alternate artifact, an operator may explicitly set `RIGYN_UPDATE_SPEC` to that exact version or archive.
 
-Manual workflow dispatch performs staging and the full platform verification without publishing.
+Manual workflow dispatch performs the regression guards, staging, and full platform verification without publishing.
 
 ## Failure handling
 

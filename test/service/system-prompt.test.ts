@@ -27,8 +27,23 @@ test("built-in tool contracts contribute focused model-visible operating guidanc
   assert.match(prompt, /read: Read bounded text ranges/iu);
   assert.match(prompt, /continue with offset and limit/iu);
   assert.match(prompt, /make each oldText uniquely identify/iu);
+  assert.match(prompt, /several separate changes.*one edit call/iu);
+  assert.match(prompt, /oldText is matched against the original file/iu);
   assert.match(prompt, /inspect an existing file before overwriting/iu);
   assert.match(prompt, /bash for commands and verification/iu);
+});
+
+test("generic bash guidance is present only when bash is active", () => {
+  const input = {
+    workspace: "/workspace",
+    instructions: { entries: [], totalBytes: 0, truncated: false },
+    skills: [],
+  };
+  const withBash = buildSystemPrompt({ ...input, selectedTools: ["read", "bash"] });
+  const withoutBash = buildSystemPrompt({ ...input, selectedTools: ["read"] });
+
+  assert.match(withBash, /Use bash for file operations such as ls, rg, and find/iu);
+  assert.doesNotMatch(withoutBash, /Use bash for file operations such as ls, rg, and find/iu);
 });
 
 test("active extension tool prompt metadata is model-visible without leaking inactive guidance", async () => {

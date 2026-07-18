@@ -45,6 +45,8 @@ export interface ToolContext {
   threadId: string;
   /** Exact session branch when execution is owned by HarnessService. */
   branch?: string;
+  /** One-based provider step that produced this invocation when known. */
+  step?: number;
 }
 
 export type ToolInputPreparer = (
@@ -85,6 +87,11 @@ export interface ToolInvocation {
   name: string;
   input: JsonValue;
   index: number;
+}
+
+/** Non-secret durable attribution for a validated input transformation. */
+export interface ToolInputTransformationAudit {
+  actor: string;
 }
 
 export interface ToolInvocationResult {

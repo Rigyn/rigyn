@@ -160,10 +160,21 @@ export interface AdapterError {
   retryable: boolean;
   partial: boolean;
   bodyStarted?: boolean;
+  /** Safe, allowlisted transport metadata for an observed HTTP response. */
+  diagnostics?: ProviderResponseDiagnostics;
   raw?: JsonValue;
 }
 
-export type ProviderState =
+export interface RoutedProviderStateProvenance {
+  provider: ProviderId;
+  model: string;
+  delegate: ProviderId;
+  upstreamModel: string;
+  protocolFamily: ModelProtocolFamily;
+  scope: string;
+}
+
+type NativeProviderState =
   | { kind: "openai_responses"; previousResponseId?: string; outputItems: JsonValue[] }
   | { kind: "anthropic_messages"; assistantBlocks: JsonValue[] }
   | { kind: "gemini_interactions"; previousInteractionId?: string; steps: JsonValue[] }
@@ -180,12 +191,28 @@ export type ProviderState =
   | { kind: "openrouter_chat"; assistantMessage: JsonValue }
   | { kind: "ollama_chat"; assistantMessage: JsonValue };
 
+export type ProviderState = NativeProviderState & {
+  /** Exact routed-adapter generation that produced this continuation state. */
+  routed?: RoutedProviderStateProvenance;
+};
+
+export interface ProviderResponseDiagnostics {
+  /** Final HTTP response status observed by the provider transport. */
+  status: number;
+  /** Small, explicitly allowlisted response-header projection. */
+  headers: Record<string, string>;
+}
+
+/** Bounded failed-response metadata exposed to observers; raw provider bodies are excluded. */
+export type ProviderResponseFailureMetadata = Omit<AdapterError, "raw" | "diagnostics">;
+
 export type AdapterEvent =
   | {
       type: "response_start";
       model: string;
       responseId?: string;
       requestId?: string;
+      diagnostics?: ProviderResponseDiagnostics;
     }
   | { type: "text_delta"; part: number; text: string }
   | {

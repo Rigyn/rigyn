@@ -7,6 +7,7 @@ import type {
   NormalizedUsage,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { catalogId, catalogLimit } from "./catalog.js";
@@ -31,6 +32,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -69,6 +71,7 @@ export class OllamaAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const headers = await this.#headers(signal);
@@ -82,6 +85,7 @@ export class OllamaAdapter implements ProviderAdapter {
         redirect: "error",
       });
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -100,7 +104,7 @@ export class OllamaAdapter implements ProviderAdapter {
         const model = asString(chunk.model) ?? request.model;
         if (!started) {
           started = true;
-          const start: AdapterEvent = { type: "response_start", model };
+          const start: AdapterEvent = { type: "response_start", model, diagnostics };
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
         }
@@ -171,7 +175,7 @@ export class OllamaAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

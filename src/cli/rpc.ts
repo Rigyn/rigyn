@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import { RpcRuntimeDispatcher, type RpcRuntimePeer } from "../interfaces/rpc-runtime.js";
 import { decodeRpcLines, RpcWriter, parseRpcRequest, type RpcId, type RpcRequest } from "../interfaces/rpc.js";
@@ -6,6 +8,90 @@ import { withGracefulTermination, type GracefulTerminationContext } from "../pro
 import type { ParsedArguments } from "./args.js";
 import { flagBoolean, flagString, flagStrings } from "./args.js";
 import { loadRuntime } from "./runtime.js";
+
+const RPC_STDIN_RELAY_SOURCE = String.raw`
+const { createReadStream, writeFileSync } = require("node:fs");
+let completed = false;
+process.once("disconnect", () => {
+  if (!completed) process.kill(process.pid, "SIGKILL");
+});
+(async () => {
+  try {
+    for await (const chunk of createReadStream("", { fd: 0 })) writeFileSync(1, chunk);
+  } catch (error) {
+    try { writeFileSync(2, error instanceof Error ? error.message : String(error)); } catch {}
+    process.exitCode = 1;
+  } finally {
+    completed = true;
+    if (process.connected) process.disconnect();
+  }
+})();
+`;
+const NODE_MAJOR = Number(process.versions.node.split(".", 1)[0]);
+
+interface RpcInput {
+  readonly stream: AsyncIterable<string | Uint8Array>;
+  close(): void;
+  failure(): Promise<Error | undefined>;
+}
+
+function createRpcInput(): RpcInput {
+  if (NODE_MAJOR < 26) {
+    return {
+      stream: process.stdin,
+      close() {
+        process.stdin.pause();
+        process.stdin.destroy();
+      },
+      async failure() { return undefined; },
+    };
+  }
+
+  const relay = spawn(process.execPath, ["--input-type=commonjs", "--eval", RPC_STDIN_RELAY_SOURCE], {
+    stdio: [0, "pipe", "pipe", "ipc"],
+    windowsHide: true,
+  });
+  if (relay.stdout === null || relay.stderr === null) throw new Error("RPC stdin relay pipes are unavailable");
+  const relayStdout = relay.stdout;
+  const relayStderr = relay.stderr;
+  let closing = false;
+  let diagnostic = Buffer.alloc(0);
+  relayStderr.on("data", (value: Buffer) => {
+    if (diagnostic.length >= 4_096) return;
+    const chunk = Buffer.from(value);
+    diagnostic = Buffer.concat([diagnostic, chunk.subarray(0, 4_096 - diagnostic.length)]);
+  });
+  const settled = new Promise<Error | undefined>((resolve) => {
+    let finished = false;
+    const finish = (error?: Error): void => {
+      if (finished) return;
+      finished = true;
+      resolve(error);
+    };
+    relay.once("error", (error) => finish(error));
+    relay.once("close", (code, signal) => {
+      if (closing || code === 0) finish();
+      else {
+        const detail = diagnostic.toString("utf8").trim();
+        finish(new Error(
+          `RPC stdin relay failed${code === null ? ` with signal ${signal ?? "unknown"}` : ` with exit ${code}`}${detail === "" ? "" : `: ${detail}`}`,
+        ));
+      }
+    });
+  });
+  relayStdout.on("error", () => undefined);
+  return {
+    stream: relayStdout,
+    close() {
+      if (closing) return;
+      closing = true;
+      if (relay.exitCode === null && relay.signalCode === null) relay.kill("SIGKILL");
+      relayStdout.destroy();
+      relayStderr.destroy();
+    },
+    async failure() { return await settled; },
+  };
+}
 
 function errorText(error: unknown): string {
   return defaultSecretRedactor.redact(error instanceof Error ? error.message : String(error));
@@ -49,13 +135,19 @@ async function runRpcServerOperation(
     extensionRuntime: true,
     recover: true,
   });
+  let input: RpcInput;
+  try {
+    input = createRpcInput();
+  } catch (error) {
+    await runtime.close().catch(() => undefined);
+    throw error;
+  }
   let closing = false;
   const handlers = new Set<Promise<void>>();
   const closeInput = (): void => {
     if (closing) return;
     closing = true;
-    process.stdin.pause();
-    process.stdin.destroy();
+    input.close();
   };
   const peer: RpcRuntimePeer = {
     id: "stdio",
@@ -103,16 +195,19 @@ async function runRpcServerOperation(
 
   try {
     termination.throwIfTerminated();
-    for await (const line of decodeRpcLines(process.stdin)) {
+    for await (const line of decodeRpcLines(input.stream)) {
       if (closing) break;
       if (line.trim() === "") continue;
       if (handlers.size >= 64) await Promise.race(handlers);
       const task = handle(line).catch(() => closeInput()).finally(() => handlers.delete(task));
       handlers.add(task);
     }
+    const inputFailure = await input.failure();
+    if (inputFailure !== undefined) throw inputFailure;
   } catch (error) {
-    await writer.error(null, RPC_ERROR_CODES.parse, errorText(error)).catch(() => undefined);
+    if (!closing) await writer.error(null, RPC_ERROR_CODES.parse, errorText(error)).catch(() => undefined);
   } finally {
+    closeInput();
     try {
       await Promise.allSettled([
         closeDispatcher("RPC connection closed"),

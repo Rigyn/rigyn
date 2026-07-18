@@ -921,6 +921,32 @@ test("TUI model drops old viewport data when its byte budget is exceeded", () =>
   assert.match(model.notice ?? "", /discarded/u);
 });
 
+test("TUI model releases durable assistant IDs when bounded rows are discarded", () => {
+  const model = new TuiModel({ ...DEFAULT_TUI_LIMITS, maxTranscriptEntries: 1 });
+  const committed = envelope({
+    type: "message_appended",
+    message: {
+      id: "assistant-durable",
+      role: "assistant",
+      content: [{ type: "text", text: "durable answer" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    },
+  }, 3);
+
+  model.apply(envelope({ type: "assistant_started", step: 1 }, 1));
+  model.apply(envelope({ type: "text_delta", text: "streaming answer", part: 0 }, 2));
+  model.apply(committed);
+  model.apply(envelope({ type: "assistant_completed", finishReason: "stop" }, 4));
+  assert.equal(model.entries[0]?.id, "assistant-durable");
+  assert.equal(model.entries[0]?.text, "durable answer");
+
+  model.apply(envelope({ type: "warning", code: "replacement", message: "newer row" }, 5));
+  assert.deepEqual(model.entries.map((entry) => entry.id), ["evt_5"]);
+
+  model.apply(committed);
+  assert.deepEqual(model.entries.map((entry) => entry.id), ["assistant-durable"]);
+});
+
 test("TUI usage exposes provider cache reads and writes", () => {
   const model = new TuiModel(DEFAULT_TUI_LIMITS);
   model.setContext({ contextWindowTokens: 20_000 });

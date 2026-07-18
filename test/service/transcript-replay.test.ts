@@ -270,6 +270,70 @@ test("transcript replay enforces entry, byte, workspace, and cancellation bounds
   await assert.rejects(service.getTranscript({ threadId: thread.threadId, signal: controller.signal }), /cancel transcript/u);
 });
 
+test("transcript replay pages long invisible histories without materializing the branch", async (t) => {
+  const { root, store, service } = await fixture(t);
+  const thread = store.createThread({ threadId: "paged-transcript", workspaceRoot: root });
+  const appendInvisible = (offset: number): void => {
+    for (let start = 0; start < 2_048; start += 512) {
+      store.appendEvents({
+        threadId: thread.threadId,
+        events: Array.from({ length: 512 }, (_, index) => ({
+          type: "warning" as const,
+          code: "unknown_provider_event",
+          message: `hidden-${offset + start + index}`,
+        })),
+      });
+    }
+  };
+  appendInvisible(0);
+  store.appendEvent({
+    threadId: thread.threadId,
+    event: { type: "message_appended", message: message("first-visible", "assistant", "first visible") },
+  });
+  appendInvisible(2_048);
+  store.appendEvent({
+    threadId: thread.threadId,
+    event: { type: "message_appended", message: message("second-visible", "assistant", "second visible") },
+  });
+
+  const listEvents = store.listEvents.bind(store);
+  const listEventPage = store.listEventPage.bind(store);
+  let fullHistoryReads = 0;
+  let pageReads = 0;
+  let largestRequestedPage = 0;
+  store.listEvents = () => {
+    fullHistoryReads += 1;
+    throw new Error("Transcript replay must not read the complete branch");
+  };
+  store.listEventPage = (threadId, branch, options) => {
+    pageReads += 1;
+    largestRequestedPage = Math.max(largestRequestedPage, options.limit);
+    const page = listEventPage(threadId, branch, options);
+    assert.ok(page.events.length <= HARNESS_TRANSCRIPT_LIMITS.maxEntries);
+    return page;
+  };
+  try {
+    const first = await service.getTranscript({ threadId: thread.threadId, limit: 1 });
+    assert.deepEqual(first.entries.map((entry) => entry.text), ["first visible"]);
+    assert.equal(first.hasMore, true);
+    assert.ok(first.nextSequence !== undefined);
+
+    const second = await service.getTranscript({
+      threadId: thread.threadId,
+      afterSequence: first.nextSequence,
+      limit: 1,
+    });
+    assert.deepEqual(second.entries.map((entry) => entry.text), ["second visible"]);
+    assert.equal(second.hasMore, false);
+  } finally {
+    store.listEvents = listEvents;
+    store.listEventPage = listEventPage;
+  }
+  assert.equal(fullHistoryReads, 0);
+  assert.ok(pageReads > 16, `expected multiple bounded reads, received ${pageReads}`);
+  assert.equal(largestRequestedPage, HARNESS_TRANSCRIPT_LIMITS.maxEntries);
+});
+
 test("transcript page parser rejects owner-controlled and private wire fields", () => {
   const page = {
     schemaVersion: 1 as const,

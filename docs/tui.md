@@ -1,10 +1,18 @@
-# Extension TUI
+# Terminal UI
+
+Rigyn keeps the released inline workbench geometry: transcript first, a word-wrapped composer between two horizontal rules, and a compact footer for workspace, session, model, reasoning, token, cache, cost, and context telemetry. User messages use the existing full-width row with a small `You ›` label. Model, session, tree, and settings pickers remain compact and bottom-anchored in the transcript region, use a bracketed title and a compact selection marker, and return to the unchanged draft when closed. Narrow terminals wrap reasoning summaries and picker help downward instead of extending content off-screen.
+
+The interactive mode is selected automatically for a raw TTY. Set `RIGYN_TUI_MODE=full`, `classic`, or `accessible` to request a mode explicitly; `RIGYN_ACCESSIBLE=1` is the accessibility shortcut. Accessible mode emits no cursor-control sequences. Set `RIGYN_ASCII=1` for ASCII glyphs. The full interface stays inline by default so completed output remains in terminal scrollback; `RIGYN_ALT_SCREEN=1` opts into an alternate screen.
+
+Picker help is generated from the active key map rather than fixed default keys. Run `/hotkeys` to inspect the complete current map and edit `~/.config/rigyn/keybindings.json` (or the equivalent XDG configuration path) to remap it. Command decks show the most relevant actions; `/hotkeys` remains the complete reference.
+
+## Extension TUI
 
 Rigyn exposes a bounded structural UI to runtime extensions. Extensions describe lines, semantic roles, focus behavior, and key handling; the host owns terminal escape sequences, screen restoration, resizing, and input decoding.
 
 This is the supported extension surface. The internal `TuiController` and live-surface renderer are implementation details and may change without becoming a separate UI SDK.
 
-The native transcript presents each tool as one theme-aware framed card. Its header combines lifecycle state, canonical built-in result metadata, and a bounded input summary. Running cards keep live file/search previews, recent shell output, and mutation diffs vertically bounded; completed cards show all retained detail automatically. Provider reasoning summaries wrap to the terminal width instead of creating horizontally growing rows. A registered tool renderer replaces the call or result slots it returns; missing, invalid, expired, or failed slots use the native host presentation.
+The native transcript presents each tool inside the released horizontal separators with a narrow transparent status rail. The header carries the operation, target, lifecycle state, and decisive metadata without a background slab or duplicated call/result label. Running tools keep a small recent live tail so streaming output cannot take over the screen. After completion, Rigyn displays all canonical output retained by the tool layer by default, including complete stored reads, searches, shell output, and edit diffs; no expansion shortcut is required. Canonical output is bounded before presentation to 2,000 lines and 50 KiB. When shell output exceeds that bound, the result states what was retained and includes the full-output path when one exists. Structured live progress distinguishes stdout, stderr, partial errors, and truncation. Provider reasoning summaries wrap independently down the terminal instead of growing sideways. A registered tool renderer replaces the call or result slots it returns; missing, invalid, expired, or failed slots use the native host presentation.
 
 The focused runnable example is [`examples/custom-overlay.mjs`](../examples/custom-overlay.mjs).
 
@@ -23,6 +31,8 @@ Custom components require the full interactive TUI. Text, JSON, print, and RPC m
 `api.ui.registerAutocompleteProvider(provider)` adds one provider to the host's deterministic provider chain. On Tab, each provider receives a frozen `{ text, cursor }` snapshot and an abort signal. Cursor and completion ranges are grapheme indexes. Results contain `{ start, end, value, label?, detail? }`; the host deduplicates them, caps the combined list at 256, rejects malformed or oversized items, and applies a choice only if the editor snapshot is unchanged. Reload aborts pending providers before their late results can mutate input.
 
 `api.ui.registerEditorMiddleware(middleware)` composes synchronous structural editor behavior. Middleware receives a normalized key event, a frozen `{ text, cursor }` snapshot, and its generation signal. It returns `{ action: "pass" }`, `{ action: "handled" }`, or `{ action: "replace", text, cursor? }`. Replacements are terminal-safe, bounded by the editor limit, and flow through later middleware in extension order. Interrupt, exit, suspend, model/session commands, overlays, and capturing components stay host-owned and never enter middleware.
+
+`api.registerEditorRenderer(renderer)` replaces only the bounded visual editor block. `render(view, context)` receives the host-owned text, grapheme cursor, label, input mode, blocked state, dimensions, and semantic theme. It returns structural lines/spans plus a required display-cell cursor. Renderers are consulted in reverse extension load order: the most recently loaded active renderer gets the first opportunity, returning `undefined` falls through to earlier renderers, and exhausting the chain uses the native editor. Rigyn validates and sanitizes each returned block, rejects ANSI/control data and invalid geometry, falls back to the native editor on failure, and removes the renderer with its extension generation. The renderer cannot handle keys, change the draft, submit input, or access terminal streams.
 
 The runnable [`input-assist`](../examples/input-assist/README.md) example demonstrates both contracts.
 
@@ -163,7 +173,8 @@ await handle.result;
 
 The handle operations have distinct meanings:
 
-- `hide()` or `setHidden(true)` removes the overlay from layout but keeps it mounted;
+- `setHidden(true)` removes the overlay from layout but keeps it mounted; `setHidden(false)` shows it again;
+- `hide()` is a deprecated permanent alias for `close()` and remains available for compatibility;
 - `focus()` gives it input and raises it;
 - `unfocus()` transfers input to the next eligible surface; pass `{ target: null }` to return input to the editor;
 - `close()` ends the mount, runs `dispose()`, and settles `result`.

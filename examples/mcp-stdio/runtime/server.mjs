@@ -1,9 +1,10 @@
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const SERVER_NAME = "fixed-gallery-mcp";
 
 function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`);
+  writeFileSync(1, `${JSON.stringify(message)}\n`);
 }
 
 function error(id, code, message) {

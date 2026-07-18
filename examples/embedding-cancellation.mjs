@@ -1,10 +1,12 @@
+import { writeFileSync } from "node:fs";
+
 import { createInMemoryHarness } from "rigyn/embedding";
 import { createScriptedProvider } from "rigyn/testing";
 
 const usage = "node examples/embedding-cancellation.mjs";
 
 if (process.argv[2] === "--help" || process.argv[2] === "-h") {
-  process.stdout.write(`${usage}\n`);
+  writeFileSync(1, `${usage}\n`);
 } else {
   const provider = createScriptedProvider({
     id: "example-cancellation",
@@ -22,5 +24,5 @@ if (process.argv[2] === "--help" || process.argv[2] === "-h") {
   const run = await harness.start({ prompt: "cancel this run" });
   run.cancel("example cancellation");
   const result = await run.result;
-  process.stdout.write(`${result.results.at(-1)?.finishReason ?? "unknown"}\n`);
+  writeFileSync(1, `${result.results.at(-1)?.finishReason ?? "unknown"}\n`);
 }

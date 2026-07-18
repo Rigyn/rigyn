@@ -58,6 +58,10 @@ const DEFAULT_EVENT_TAIL_LIMIT = 4_096;
 const DEFAULT_EVENT_TAIL_BYTES = 8 * 1024 * 1024;
 const MAX_EVENT_TAIL_LIMIT = 16_384;
 const MAX_EVENT_TAIL_BYTES = 32 * 1024 * 1024;
+const MAX_PAGED_PROGRESS_CACHE_BRANCHES = 64;
+const MAX_PAGED_PROGRESS_CACHE_STATES = 4_096;
+const MAX_PAGED_PROGRESS_CACHE_BYTES = 2 * 1024 * 1024;
+const PAGED_PROGRESS_STATE_OVERHEAD_BYTES = 32;
 export const MAX_ENTRY_LABEL_BYTES = 256;
 export const MAX_BRANCH_SUMMARY_SOURCE_EVENTS = 4_096;
 export const MAX_BRANCH_SUMMARY_EVENT_BYTES = 128 * 1024;
@@ -78,6 +82,35 @@ const ECMASCRIPT_WHITESPACE_SQL = [
 ].map((codePoint) => `char(${codePoint})`).join(" || ");
 const STORE_NO_FOLLOW = process.platform === "win32" ? 0 : (constants.O_NOFOLLOW ?? 0);
 const MINIMUM_SQLITE_VERSION = [3, 51, 3] as const;
+const EVENT_BRANCH_PATH_CTE = `
+  WITH RECURSIVE branch_path(branch_name, branch_incarnation, maximum_sequence, parent_event_id) AS (
+    SELECT head.branch_name, head.branch_incarnation, head.sequence,
+      (
+        SELECT first.parent_event_id
+        FROM events first
+        WHERE first.thread_id = head.thread_id
+          AND first.branch_name = head.branch_name
+          AND first.branch_incarnation = head.branch_incarnation
+        ORDER BY first.sequence ASC
+        LIMIT 1
+      )
+    FROM events head
+    WHERE head.thread_id = ? AND head.event_id = ?
+    UNION ALL
+    SELECT parent.branch_name, parent.branch_incarnation, parent.sequence,
+      (
+        SELECT first.parent_event_id
+        FROM events first
+        WHERE first.thread_id = parent.thread_id
+          AND first.branch_name = parent.branch_name
+          AND first.branch_incarnation = parent.branch_incarnation
+        ORDER BY first.sequence ASC
+        LIMIT 1
+      )
+    FROM branch_path path
+    JOIN events parent ON parent.thread_id = ? AND parent.event_id = path.parent_event_id
+  )
+`;
 
 interface DatabaseFileGuard {
   path: string;
@@ -86,6 +119,29 @@ interface DatabaseFileGuard {
 }
 
 type SqlRow = Record<string, unknown>;
+
+const runtimeChildThreadCreations = new WeakMap<object, Set<ThreadId>>();
+
+/** Internal host capability; intentionally not re-exported from the storage package. */
+export function withRuntimeChildThreadCreation<T>(
+  store: SessionStore,
+  threadId: ThreadId,
+  operation: () => T,
+): T {
+  let reserved = runtimeChildThreadCreations.get(store);
+  if (reserved === undefined) {
+    reserved = new Set();
+    runtimeChildThreadCreations.set(store, reserved);
+  }
+  if (reserved.has(threadId)) throw new Error(`Runtime child session ${threadId} is already being created`);
+  reserved.add(threadId);
+  try {
+    return operation();
+  } finally {
+    reserved.delete(threadId);
+    if (reserved.size === 0) runtimeChildThreadCreations.delete(store);
+  }
+}
 
 function requiredString(row: SqlRow, key: string): string {
   const value = row[key];
@@ -486,6 +542,35 @@ function validCanonicalMessage(value: unknown): boolean {
 
 function validProviderState(value: unknown): boolean {
   if (!isRecord(value) || !hasString(value, "kind")) return false;
+  if (value["routed"] !== undefined) {
+    const routed = value["routed"];
+    const validIdentity = (entry: unknown, maximumBytes: number) =>
+      typeof entry === "string" &&
+      entry !== "" &&
+      entry.trim() === entry &&
+      !/[\u0000-\u001f\u007f-\u009f]/u.test(entry) &&
+      Buffer.byteLength(entry, "utf8") <= maximumBytes;
+    if (
+      !isRecord(routed) ||
+      !exactObjectKeys(routed, ["provider", "model", "delegate", "upstreamModel", "protocolFamily", "scope"]) ||
+      !validIdentity(routed["provider"], 128) ||
+      !validIdentity(routed["model"], 512) ||
+      !validIdentity(routed["delegate"], 128) ||
+      !validIdentity(routed["upstreamModel"], 512) ||
+      ![
+        "openai-responses",
+        "openai-chat-completions",
+        "anthropic-messages",
+        "gemini-generate-content",
+        "gemini-interactions",
+        "bedrock-converse",
+        "mistral-conversations",
+        "ollama-chat",
+      ].includes(String(routed["protocolFamily"])) ||
+      typeof routed["scope"] !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(routed["scope"])
+    ) return false;
+  }
   switch (value["kind"]) {
     case "openai_responses":
       return Array.isArray(value["outputItems"]) && value["outputItems"].every(isJsonValue) &&
@@ -618,6 +703,11 @@ function validEventShape(event: Record<string, unknown>): boolean {
     case "assistant_completed":
       return hasString(event, "finishReason") &&
         (event["rawReason"] === undefined || hasString(event, "rawReason"));
+    case "tool_input_transformed":
+      return hasString(event, "callId") && hasString(event, "name") && hasInteger(event, "index") &&
+        Array.isArray(event["actors"]) && event["actors"].length > 0 && event["actors"].length <= 128 &&
+        event["actors"].every((actor) => typeof actor === "string" && actor !== "" && !actor.includes("\0") &&
+          Buffer.byteLength(actor, "utf8") <= 256);
     case "tool_requested":
       return (
         hasString(event, "callId") &&
@@ -767,6 +857,65 @@ function decodeRuntimeEvent(payload: unknown, expectedKind: string): RuntimeEven
   return parsed as RuntimeEvent;
 }
 
+type ToolProgressState = Map<string, { sequence: number; stdoutBytes: number; stderrBytes: number }>;
+
+function validateToolProgressOrder(
+  events: readonly EventEnvelope[],
+  progress: ToolProgressState = new Map(),
+): ToolProgressState {
+  for (const envelope of events) {
+    if (envelope.event.type !== "tool_progress") continue;
+    const key = `${envelope.runId ?? "unscoped"}\u0000${envelope.event.callId}`;
+    const previous = progress.get(key);
+    if (
+      envelope.event.sequence !== (previous?.sequence ?? -1) + 1 ||
+      (envelope.event.progress.type === "output" && (
+        envelope.event.progress.stdoutBytes < (previous?.stdoutBytes ?? 0) ||
+        envelope.event.progress.stderrBytes < (previous?.stderrBytes ?? 0)
+      ))
+    ) {
+      throw new HarnessError("STORAGE_CORRUPT", `Out-of-order tool progress ${envelope.event.callId}`);
+    }
+    progress.set(key, {
+      sequence: envelope.event.sequence,
+      stdoutBytes: envelope.event.progress.type === "output"
+        ? envelope.event.progress.stdoutBytes
+        : previous?.stdoutBytes ?? 0,
+      stderrBytes: envelope.event.progress.type === "output"
+        ? envelope.event.progress.stderrBytes
+        : previous?.stderrBytes ?? 0,
+    });
+  }
+  return progress;
+}
+
+function pagedProgressCacheKey(threadId: ThreadId, branch: string): string {
+  return JSON.stringify([threadId, branch]);
+}
+
+function pagedProgressCacheBytes(
+  threadId: ThreadId,
+  branch: string,
+  headEventId: EventId,
+  state: ToolProgressState,
+): number {
+  let bytes = Buffer.byteLength(threadId, "utf8") + Buffer.byteLength(branch, "utf8")
+    + Buffer.byteLength(headEventId, "utf8") + PAGED_PROGRESS_STATE_OVERHEAD_BYTES;
+  for (const key of state.keys()) {
+    bytes += Buffer.byteLength(key, "utf8") + PAGED_PROGRESS_STATE_OVERHEAD_BYTES;
+    if (bytes > MAX_PAGED_PROGRESS_CACHE_BYTES) return bytes;
+  }
+  return bytes;
+}
+
+interface ValidatedToolProgress {
+  threadId: ThreadId;
+  branch: string;
+  headEventId: EventId;
+  state: ToolProgressState;
+  byteLength: number;
+}
+
 export class SessionStore {
   readonly database: DatabaseSync;
   readonly maxArtifactBytes: number;
@@ -775,6 +924,9 @@ export class SessionStore {
   readonly idFactory: (prefix: string) => string;
   readonly runtimeOwnerLeaseMs: number;
   readonly #runtimeOwnerId = randomUUID();
+  readonly #validatedToolProgress = new Map<string, ValidatedToolProgress>();
+  #validatedToolProgressBytes = 0;
+  #pagedProgressDataVersion: number;
   #runtimeOwner: RuntimeOwnerLease | undefined;
   #closed = false;
 
@@ -808,11 +960,76 @@ export class SessionStore {
     this.clock = options.clock ?? (() => new Date());
     this.idFactory = options.idFactory ?? createId;
     this.runtimeOwnerLeaseMs = runtimeOwnerLeaseMs;
+    this.#pagedProgressDataVersion = requiredNumber(
+      this.database.prepare("PRAGMA data_version").get() as SqlRow,
+      "data_version",
+    );
+  }
+
+  private clearPagedProgressCache(threadId?: ThreadId): void {
+    if (threadId === undefined) {
+      this.#validatedToolProgress.clear();
+      this.#validatedToolProgressBytes = 0;
+      return;
+    }
+    for (const [key, entry] of this.#validatedToolProgress) {
+      if (entry.threadId !== threadId) continue;
+      this.#validatedToolProgress.delete(key);
+      this.#validatedToolProgressBytes -= entry.byteLength;
+    }
+  }
+
+  private cachedPagedProgress(threadId: ThreadId, branch: string): ValidatedToolProgress | undefined {
+    const key = pagedProgressCacheKey(threadId, branch);
+    const entry = this.#validatedToolProgress.get(key);
+    if (entry === undefined) return undefined;
+    this.#validatedToolProgress.delete(key);
+    this.#validatedToolProgress.set(key, entry);
+    return entry;
+  }
+
+  private invalidatePagedProgressCacheAfterExternalWrite(): void {
+    const current = requiredNumber(
+      this.database.prepare("PRAGMA data_version").get() as SqlRow,
+      "data_version",
+    );
+    if (current === this.#pagedProgressDataVersion) return;
+    this.#pagedProgressDataVersion = current;
+    this.clearPagedProgressCache();
+  }
+
+  private cachePagedProgress(
+    threadId: ThreadId,
+    branch: string,
+    headEventId: EventId,
+    state: ToolProgressState,
+  ): void {
+    const key = pagedProgressCacheKey(threadId, branch);
+    const previous = this.#validatedToolProgress.get(key);
+    if (previous !== undefined) {
+      this.#validatedToolProgress.delete(key);
+      this.#validatedToolProgressBytes -= previous.byteLength;
+    }
+    const byteLength = pagedProgressCacheBytes(threadId, branch, headEventId, state);
+    if (byteLength > MAX_PAGED_PROGRESS_CACHE_BYTES) return;
+    while (
+      this.#validatedToolProgress.size >= MAX_PAGED_PROGRESS_CACHE_BRANCHES
+      || this.#validatedToolProgressBytes + byteLength > MAX_PAGED_PROGRESS_CACHE_BYTES
+    ) {
+      const oldestKey = this.#validatedToolProgress.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      const oldest = this.#validatedToolProgress.get(oldestKey)!;
+      this.#validatedToolProgress.delete(oldestKey);
+      this.#validatedToolProgressBytes -= oldest.byteLength;
+    }
+    this.#validatedToolProgress.set(key, { threadId, branch, headEventId, state, byteLength });
+    this.#validatedToolProgressBytes += byteLength;
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.clearPagedProgressCache();
     try {
       this.releaseRuntimeOwner();
     } finally {
@@ -1040,6 +1257,7 @@ export class SessionStore {
     const timestamp = this.now();
     const name = normalizeThreadName(input.name);
     const workspaceRoot = input.workspaceRoot === undefined ? undefined : validateWorkspaceRoot(input.workspaceRoot);
+    const runtimeChild = runtimeChildThreadCreations.get(this)?.has(threadId) === true;
     this.transaction(() => {
       this.database
         .prepare(
@@ -1048,11 +1266,28 @@ export class SessionStore {
         .run(threadId, name ?? null, branch, timestamp, timestamp, input.parentThreadId ?? null, input.parentRunId ?? null, workspaceRoot ?? null);
       this.database
         .prepare(
-          "INSERT INTO branches(thread_id, branch_name, head_event_id, created_at, updated_at) VALUES (?, ?, NULL, ?, ?)",
+          "INSERT INTO branches(thread_id, branch_name, branch_incarnation, head_event_id, created_at, updated_at) VALUES (?, ?, 1, NULL, ?, ?)",
         )
         .run(threadId, branch, timestamp, timestamp);
+      if (runtimeChild) {
+        this.database.prepare("INSERT INTO runtime_child_threads(thread_id) VALUES (?)").run(threadId);
+      }
     });
+    this.clearPagedProgressCache(threadId);
     return this.getThread(threadId);
+  }
+
+  hasRuntimeChildThread(threadId: ThreadId): boolean {
+    const row = this.database.prepare(`
+      SELECT EXISTS(
+        SELECT 1 FROM runtime_child_threads runtime_child
+        WHERE runtime_child.thread_id = thread.thread_id
+      ) AS runtime_child
+      FROM threads thread
+      WHERE thread.thread_id = ?
+    `).get(threadId) as SqlRow | undefined;
+    if (row === undefined) throw new HarnessError("STORAGE_NOT_FOUND", `Unknown thread ${threadId}`);
+    return requiredNumber(row, "runtime_child") === 1;
   }
 
   getThread(threadId: ThreadId): ThreadRecord {
@@ -1981,11 +2216,16 @@ export class SessionStore {
         `Event ${input.atEventId} is not reachable from branch ${sourceName}`,
       );
     }
+    const incarnation = requiredNumber(this.database.prepare(`
+      SELECT COALESCE(MAX(branch_incarnation), 0) + 1 AS branch_incarnation
+      FROM events
+      WHERE thread_id = ? AND branch_name = ?
+    `).get(input.threadId, newName) as SqlRow, "branch_incarnation");
     this.database
       .prepare(
-        "INSERT INTO branches(thread_id, branch_name, head_event_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO branches(thread_id, branch_name, branch_incarnation, head_event_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(input.threadId, newName, selectedHead ?? null, timestamp, timestamp);
+      .run(input.threadId, newName, incarnation, selectedHead ?? null, timestamp, timestamp);
     this.database
       .prepare("UPDATE threads SET updated_at = ? WHERE thread_id = ?")
       .run(timestamp, input.threadId);
@@ -2280,6 +2520,7 @@ export class SessionStore {
     const branch = validateBranchName(input.branch ?? requiredString(thread, "default_branch"));
     const branchRow = this.branchRow(input.threadId, branch);
     const currentHead = optionalString(branchRow, "head_event_id");
+    const branchIncarnation = requiredNumber(branchRow, "branch_incarnation");
     if (input.expectedHead !== undefined && (input.expectedHead ?? undefined) !== currentHead) {
       throw new HarnessError("STORAGE_HEAD_CONFLICT", `Branch ${branch} changed before append`);
     }
@@ -2307,9 +2548,9 @@ export class SessionStore {
     this.database
       .prepare(`
         INSERT INTO events(
-          event_id, thread_id, run_id, parent_event_id, branch_name,
+          event_id, thread_id, run_id, parent_event_id, branch_name, branch_incarnation,
           sequence, timestamp, kind, schema_version, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
       `)
       .run(
         eventId,
@@ -2317,6 +2558,7 @@ export class SessionStore {
         input.runId ?? null,
         currentHead ?? null,
         branch,
+        branchIncarnation,
         sequence,
         timestamp,
         event.type,
@@ -2394,31 +2636,250 @@ export class SessionStore {
       `)
       .all(threadId, head) as SqlRow[];
     const events = rows.map((row) => this.decodeEvent(row));
-    const progress = new Map<string, { sequence: number; stdoutBytes: number; stderrBytes: number }>();
-    for (const envelope of events) {
-      if (envelope.event.type !== "tool_progress") continue;
-      const key = `${envelope.runId ?? "unscoped"}\u0000${envelope.event.callId}`;
-      const previous = progress.get(key);
-      if (
-        envelope.event.sequence !== (previous?.sequence ?? -1) + 1 ||
-        (envelope.event.progress.type === "output" && (
-          envelope.event.progress.stdoutBytes < (previous?.stdoutBytes ?? 0) ||
-          envelope.event.progress.stderrBytes < (previous?.stderrBytes ?? 0)
+    validateToolProgressOrder(events);
+    return events;
+  }
+
+  private validateAllPagedToolProgress(threadId: ThreadId, headEventId: EventId): ToolProgressState | undefined {
+    const invalid = this.database.prepare(`
+      ${EVENT_BRANCH_PATH_CTE}, reachable_progress AS (
+        SELECT
+          event.event_id,
+          event.run_id,
+          event.sequence AS event_sequence,
+          json_extract(event.payload_json, '$.type') AS event_type,
+          json_extract(event.payload_json, '$.callId') AS call_id,
+          json_type(event.payload_json, '$.callId') AS call_id_type,
+          json_type(event.payload_json, '$.name') AS name_type,
+          json_extract(event.payload_json, '$.index') AS tool_index,
+          json_type(event.payload_json, '$.index') AS tool_index_type,
+          json_extract(event.payload_json, '$.sequence') AS progress_sequence,
+          json_type(event.payload_json, '$.sequence') AS progress_sequence_type,
+          json_type(event.payload_json, '$.progress') AS progress_object_type,
+          json_extract(event.payload_json, '$.progress.type') AS progress_type,
+          json_extract(event.payload_json, '$.progress.stream') AS progress_stream,
+          json_type(event.payload_json, '$.progress.delta') AS delta_type,
+          length(CAST(json_extract(event.payload_json, '$.progress.delta') AS BLOB)) AS delta_bytes,
+          json_extract(event.payload_json, '$.progress.stdoutBytes') AS stdout_bytes,
+          json_type(event.payload_json, '$.progress.stdoutBytes') AS stdout_bytes_type,
+          json_extract(event.payload_json, '$.progress.stderrBytes') AS stderr_bytes,
+          json_type(event.payload_json, '$.progress.stderrBytes') AS stderr_bytes_type,
+          json_extract(event.payload_json, '$.progress.elapsedMs') AS elapsed_ms,
+          json_type(event.payload_json, '$.progress.elapsedMs') AS elapsed_ms_type,
+          json_type(event.payload_json, '$.progress.content') AS content_type,
+          length(CAST(json_extract(event.payload_json, '$.progress.content') AS BLOB)) AS content_bytes,
+          json_type(event.payload_json, '$.progress.isError') AS is_error_type,
+          json_type(event.payload_json, '$.progress.truncated') AS truncated_type
+        FROM branch_path path
+        JOIN events event
+          ON event.thread_id = ?
+          AND event.branch_name = path.branch_name
+          AND event.branch_incarnation = path.branch_incarnation
+          AND event.sequence <= path.maximum_sequence
+          AND event.kind = 'tool_progress'
+      ), ordered AS (
+        SELECT *,
+          LAG(progress_sequence) OVER (
+            PARTITION BY run_id, call_id
+            ORDER BY event_sequence
+          ) AS previous_sequence,
+          MAX(CASE WHEN progress_type = 'output' THEN stdout_bytes END) OVER (
+            PARTITION BY run_id, call_id
+            ORDER BY event_sequence
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+          ) AS previous_stdout_bytes,
+          MAX(CASE WHEN progress_type = 'output' THEN stderr_bytes END) OVER (
+            PARTITION BY run_id, call_id
+            ORDER BY event_sequence
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+          ) AS previous_stderr_bytes
+        FROM reachable_progress
+      )
+      SELECT event_id, call_id
+      FROM ordered
+      WHERE event_type IS NOT 'tool_progress'
+        OR call_id_type IS NOT 'text'
+        OR name_type IS NOT 'text'
+        OR tool_index_type IS NOT 'integer'
+        OR tool_index < 0
+        OR progress_sequence_type IS NOT 'integer'
+        OR progress_sequence < 0
+        OR progress_sequence <> COALESCE(previous_sequence, -1) + 1
+        OR progress_object_type IS NOT 'object'
+        OR progress_type IS NULL
+        OR progress_type NOT IN ('output', 'result')
+        OR (progress_type = 'output' AND (
+          progress_stream NOT IN ('stdout', 'stderr')
+          OR progress_stream IS NULL
+          OR delta_type IS NOT 'text'
+          OR delta_bytes > 262144
+          OR stdout_bytes_type IS NOT 'integer'
+          OR stderr_bytes_type IS NOT 'integer'
+          OR stdout_bytes < 0
+          OR stderr_bytes < 0
+          OR (elapsed_ms_type IS NOT NULL AND elapsed_ms_type IS NOT 'integer')
+          OR elapsed_ms < 0
+          OR (truncated_type IS NOT NULL AND truncated_type NOT IN ('true', 'false'))
+          OR stdout_bytes < COALESCE(previous_stdout_bytes, 0)
+          OR stderr_bytes < COALESCE(previous_stderr_bytes, 0)
         ))
-      ) {
-        throw new HarnessError("STORAGE_CORRUPT", `Out-of-order tool progress ${envelope.event.callId}`);
-      }
-      progress.set(key, {
-        sequence: envelope.event.sequence,
-        stdoutBytes: envelope.event.progress.type === "output"
-          ? envelope.event.progress.stdoutBytes
-          : previous?.stdoutBytes ?? 0,
-        stderrBytes: envelope.event.progress.type === "output"
-          ? envelope.event.progress.stderrBytes
-          : previous?.stderrBytes ?? 0,
+        OR (progress_type = 'result' AND (
+          content_type IS NOT 'text'
+          OR content_bytes > 262144
+          OR is_error_type NOT IN ('true', 'false')
+          OR is_error_type IS NULL
+          OR (truncated_type IS NOT NULL AND truncated_type NOT IN ('true', 'false'))
+        ))
+      ORDER BY event_sequence ASC
+      LIMIT 1
+    `).get(threadId, headEventId, threadId, threadId) as SqlRow | undefined;
+    if (invalid !== undefined) {
+      throw new HarnessError("STORAGE_CORRUPT", `Out-of-order tool progress ${requiredString(invalid, "call_id")}`);
+    }
+
+    const rows = this.database.prepare(`
+      ${EVENT_BRANCH_PATH_CTE}, reachable_progress AS (
+        SELECT
+          event.run_id,
+          json_extract(event.payload_json, '$.callId') AS call_id,
+          json_extract(event.payload_json, '$.sequence') AS progress_sequence,
+          json_extract(event.payload_json, '$.progress.type') AS progress_type,
+          json_extract(event.payload_json, '$.progress.stdoutBytes') AS stdout_bytes,
+          json_extract(event.payload_json, '$.progress.stderrBytes') AS stderr_bytes
+        FROM branch_path path
+        JOIN events event
+          ON event.thread_id = ?
+          AND event.branch_name = path.branch_name
+          AND event.branch_incarnation = path.branch_incarnation
+          AND event.sequence <= path.maximum_sequence
+          AND event.kind = 'tool_progress'
+      )
+      SELECT
+        run_id,
+        call_id,
+        MAX(progress_sequence) AS progress_sequence,
+        MAX(CASE WHEN progress_type = 'output' THEN stdout_bytes ELSE 0 END) AS stdout_bytes,
+        MAX(CASE WHEN progress_type = 'output' THEN stderr_bytes ELSE 0 END) AS stderr_bytes
+      FROM reachable_progress
+      GROUP BY run_id, call_id
+      ORDER BY run_id, call_id
+      LIMIT ?
+    `).all(
+      threadId,
+      headEventId,
+      threadId,
+      threadId,
+      MAX_PAGED_PROGRESS_CACHE_STATES + 1,
+    ) as SqlRow[];
+    if (rows.length > MAX_PAGED_PROGRESS_CACHE_STATES) return undefined;
+    const state: ToolProgressState = new Map();
+    for (const row of rows) {
+      const runId = optionalString(row, "run_id");
+      const callId = requiredString(row, "call_id");
+      state.set(`${runId ?? "unscoped"}\u0000${callId}`, {
+        sequence: requiredNumber(row, "progress_sequence"),
+        stdoutBytes: requiredNumber(row, "stdout_bytes"),
+        stderrBytes: requiredNumber(row, "stderr_bytes"),
       });
     }
-    return events;
+    return state;
+  }
+
+  private validatePagedToolProgress(threadId: ThreadId, branch: string, headEventId: EventId): void {
+    this.invalidatePagedProgressCacheAfterExternalWrite();
+    const previous = this.cachedPagedProgress(threadId, branch);
+    if (previous?.headEventId === headEventId) return;
+    if (previous !== undefined) {
+      const rows = this.database.prepare(`
+        WITH RECURSIVE suffix AS (
+          SELECT * FROM events WHERE thread_id = ? AND event_id = ?
+          UNION ALL
+          SELECT event.*
+          FROM events event
+          JOIN suffix ON event.thread_id = suffix.thread_id AND event.event_id = suffix.parent_event_id
+          WHERE suffix.event_id <> ?
+        )
+        SELECT * FROM suffix
+        WHERE kind = 'tool_progress' OR event_id = ?
+        ORDER BY sequence ASC
+      `).all(threadId, headEventId, previous.headEventId, previous.headEventId) as SqlRow[];
+      if (rows.some((row) => requiredString(row, "event_id") === previous.headEventId)) {
+        const suffix = rows
+          .filter((row) => requiredString(row, "event_id") !== previous.headEventId)
+          .map((row) => this.decodeEvent(row));
+        const state = validateToolProgressOrder(suffix, new Map(previous.state));
+        this.cachePagedProgress(threadId, branch, headEventId, state);
+        return;
+      }
+    }
+    const state = this.validateAllPagedToolProgress(threadId, headEventId);
+    if (state !== undefined) this.cachePagedProgress(threadId, branch, headEventId, state);
+  }
+
+  /** Reads one exclusive-cursor page from a branch path without decoding the complete history. */
+  listEventPage(
+    threadId: ThreadId,
+    branch: string | undefined,
+    options: { afterSequence?: number; limit: number; throughSequence?: number },
+  ): { events: EventEnvelope[]; nextSequence: number; hasMore: boolean; snapshotSequence: number } {
+    const afterSequence = options.afterSequence ?? 0;
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new RangeError("Event page afterSequence must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > MAX_EVENT_TAIL_LIMIT) {
+      throw new RangeError(`Event page limit must be from 1 through ${MAX_EVENT_TAIL_LIMIT}`);
+    }
+    if (
+      options.throughSequence !== undefined &&
+      (!Number.isSafeInteger(options.throughSequence) || options.throughSequence < 0)
+    ) throw new RangeError("Event page throughSequence must be a non-negative safe integer");
+
+    const selectedBranch = validateBranchName(branch ?? this.getThread(threadId).defaultBranch);
+    const branchRow = this.branchRow(threadId, selectedBranch);
+    const head = optionalString(branchRow, "head_event_id");
+    if (head === undefined) {
+      return { events: [], nextSequence: afterSequence, hasMore: false, snapshotSequence: 0 };
+    }
+    const headRow = this.database
+      .prepare("SELECT sequence FROM events WHERE thread_id = ? AND event_id = ?")
+      .get(threadId, head) as SqlRow | undefined;
+    if (headRow === undefined) throw new HarnessError("STORAGE_CORRUPT", `Unknown branch head ${head}`);
+    const headSequence = requiredNumber(headRow, "sequence");
+    const snapshotSequence = Math.min(options.throughSequence ?? headSequence, headSequence);
+    this.validatePagedToolProgress(threadId, selectedBranch, head);
+    if (afterSequence >= snapshotSequence) {
+      return { events: [], nextSequence: afterSequence, hasMore: false, snapshotSequence };
+    }
+
+    const rows = this.database.prepare(`
+      ${EVENT_BRANCH_PATH_CTE}
+      SELECT event.*
+      FROM branch_path path
+      JOIN events event
+        ON event.thread_id = ?
+        AND event.branch_name = path.branch_name
+        AND event.branch_incarnation = path.branch_incarnation
+        AND event.sequence <= path.maximum_sequence
+      WHERE event.sequence > ? AND event.sequence <= ?
+      ORDER BY event.sequence ASC
+      LIMIT ?
+    `).all(
+      threadId,
+      head,
+      threadId,
+      threadId,
+      afterSequence,
+      snapshotSequence,
+      options.limit + 1,
+    ) as SqlRow[];
+    const hasMore = rows.length > options.limit;
+    const events = rows.slice(0, options.limit).map((row) => this.decodeEvent(row));
+    return {
+      events,
+      nextSequence: events.at(-1)?.sequence ?? afterSequence,
+      hasMore,
+      snapshotSequence,
+    };
   }
 
   /** Bounded recent projection for presentation. Canonical agent/session reconstruction must use listEvents(). */
@@ -2921,6 +3382,7 @@ export class SessionStore {
       ...eventRows.map((row) => ({
         type: "event" as const,
         branch: requiredString(row, "branch_name"),
+        branchIncarnation: requiredNumber(row, "branch_incarnation"),
         value: sessionExportEnvelope(this.decodeEvent(row)),
       })),
       ...artifacts.map((value) => ({
@@ -2975,6 +3437,7 @@ export class SessionStore {
       const result = this.database.prepare("DELETE FROM threads WHERE thread_id = ?").run(threadId);
       if (result.changes !== 1) throw new HarnessError("STORAGE_NOT_FOUND", `Unknown thread ${threadId}`);
     });
+    this.clearPagedProgressCache(threadId);
   }
 
   assertIntegrity(): void {

@@ -1,5 +1,6 @@
 import { isJsonValue, type JsonValue } from "../core/json.js";
-import type { AdapterError, ProviderId } from "../core/types.js";
+import { canonicalProviderResponseDiagnostics } from "../core/provider-diagnostics.js";
+import type { AdapterError, ProviderId, ProviderResponseDiagnostics } from "../core/types.js";
 
 export type FetchLike = typeof fetch;
 export type TokenSource = string | ((signal?: AbortSignal) => string | undefined | Promise<string | undefined>);
@@ -139,10 +140,19 @@ export function requestIdFromHeaders(headers: Headers): string | undefined {
   return undefined;
 }
 
+export function responseDiagnostics(response: Response): ProviderResponseDiagnostics {
+  return canonicalProviderResponseDiagnostics(response.status, response.headers.entries());
+}
+
 export function normalizeError(
   provider: ProviderId,
   error: unknown,
-  options: { partial: boolean; signal: AbortSignal; requestId?: string | undefined },
+  options: {
+    partial: boolean;
+    signal: AbortSignal;
+    requestId?: string | undefined;
+    diagnostics?: ProviderResponseDiagnostics | undefined;
+  },
 ): AdapterError {
   if (options.signal.aborted || isAbortError(error)) {
     return withOptionalFields(
@@ -152,7 +162,7 @@ export function normalizeError(
         retryable: false,
         partial: options.partial,
       },
-      { requestId: options.requestId },
+      { requestId: options.requestId, diagnostics: options.diagnostics },
     );
   }
 
@@ -165,7 +175,7 @@ export function normalizeError(
         partial: options.partial,
         ...(options.partial ? { bodyStarted: true } : {}),
       },
-      { requestId: options.requestId, raw: error.raw },
+      { requestId: options.requestId, diagnostics: options.diagnostics, raw: error.raw },
     );
   }
 
@@ -178,7 +188,7 @@ export function normalizeError(
         partial: options.partial,
         bodyStarted: true,
       },
-      { requestId: options.requestId, raw: error.raw },
+      { requestId: options.requestId, diagnostics: options.diagnostics, raw: error.raw },
     );
   }
 
@@ -190,7 +200,7 @@ export function normalizeError(
         retryable: false,
         partial: options.partial,
       },
-      { requestId: options.requestId },
+      { requestId: options.requestId, diagnostics: options.diagnostics },
     );
   }
 
@@ -209,6 +219,7 @@ export function normalizeError(
         providerCode,
         requestId,
         retryAfterMs: retryAfterMs(error.headers.get("retry-after")),
+        diagnostics: canonicalProviderResponseDiagnostics(error.status, error.headers.entries()),
         raw: error.body,
       },
     );
@@ -223,7 +234,12 @@ export function normalizeError(
         partial: options.partial,
         bodyStarted: true,
       },
-      { providerCode: error.code, requestId: options.requestId, raw: error.raw },
+      {
+        providerCode: error.code,
+        requestId: options.requestId,
+        diagnostics: options.diagnostics,
+        raw: error.raw,
+      },
     );
   }
 
@@ -236,7 +252,7 @@ export function normalizeError(
       retryable: network,
       partial: options.partial,
     },
-    { requestId: options.requestId, raw: jsonValueOrString(error) },
+    { requestId: options.requestId, diagnostics: options.diagnostics, raw: jsonValueOrString(error) },
   );
 }
 
@@ -301,6 +317,7 @@ function withOptionalFields(
     providerCode?: string | undefined;
     requestId?: string | undefined;
     retryAfterMs?: number | undefined;
+    diagnostics?: ProviderResponseDiagnostics | undefined;
     raw?: JsonValue | undefined;
   },
 ): AdapterError {
@@ -308,6 +325,7 @@ function withOptionalFields(
   if (optional.providerCode !== undefined) base.providerCode = boundedErrorText(optional.providerCode, 1_024);
   if (optional.requestId !== undefined) base.requestId = boundedErrorText(optional.requestId, 4_096);
   if (optional.retryAfterMs !== undefined) base.retryAfterMs = optional.retryAfterMs;
+  if (optional.diagnostics !== undefined) base.diagnostics = optional.diagnostics;
   if (optional.raw !== undefined) base.raw = boundedErrorRaw(optional.raw);
   return base;
 }

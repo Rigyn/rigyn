@@ -242,10 +242,9 @@ function validCutMessage(message: CanonicalMessage): boolean {
 }
 
 /**
- * Keep approximately the requested number of recent tokens, matching the
- * session-entry cut behavior used by the reference harness. A single oversized
- * turn may be split before an assistant message, but never between a tool call
- * and its result.
+ * Keep approximately the requested number of recent tokens while respecting
+ * session-entry boundaries. A single oversized turn may be split before an
+ * assistant message, but never between a tool call and its result.
  */
 function recentBoundary(
   groups: readonly ContextGroup[],

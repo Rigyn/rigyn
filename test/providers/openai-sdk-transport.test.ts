@@ -274,7 +274,7 @@ test("SDK streamed provider errors retain request IDs", async () => {
 
 test("SDK and direct transports normalize the same complex response identically", async () => {
   const body = sse(
-    { type: "response.created", response: { id: "response-parity", model: "gpt-test" } },
+    { type: "response.created", response: { id: "response-shared", model: "gpt-test" } },
     { type: "response.reasoning_summary_text.delta", summary_index: 0, delta: "plan" },
     { type: "response.output_text.delta", content_index: 0, delta: "hello" },
     {
@@ -293,7 +293,7 @@ test("SDK and direct transports normalize the same complex response identically"
     {
       type: "response.completed",
       response: {
-        id: "response-parity",
+        id: "response-shared",
         model: "gpt-test",
         output: [],
         usage: {
@@ -311,7 +311,7 @@ test("SDK and direct transports normalize the same complex response identically"
     posted.push(await incoming.json());
     return streamResponse(
       byteChunks(body, [1, 2, 3, 5, 8, 13]),
-      { "content-type": "text/event-stream", "x-request-id": "request-parity" },
+      { "content-type": "text/event-stream", "x-request-id": "request-shared" },
     );
   });
   const sdk = new OpenAIResponsesAdapter({ apiKey: "secret", fetch: transport() });

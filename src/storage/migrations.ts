@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export const CURRENT_SCHEMA_VERSION = 15;
+export const CURRENT_SCHEMA_VERSION = 18;
 const EARLIEST_UPGRADABLE_SCHEMA_VERSION = 13;
 
 interface SchemaMigration {
@@ -26,6 +26,10 @@ const CURRENT_SCHEMA = `
     parent_thread_id TEXT REFERENCES threads(thread_id) ON DELETE SET NULL,
     parent_run_id TEXT REFERENCES runs(run_id) ON DELETE SET NULL,
     workspace_root TEXT
+  ) STRICT;
+
+  CREATE TABLE runtime_child_threads (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE
   ) STRICT;
 
   CREATE TABLE runs (
@@ -54,6 +58,7 @@ const CURRENT_SCHEMA = `
     run_id TEXT,
     parent_event_id TEXT,
     branch_name TEXT NOT NULL,
+    branch_incarnation INTEGER NOT NULL DEFAULT 1 CHECK (branch_incarnation >= 1),
     sequence INTEGER NOT NULL CHECK (sequence >= 1),
     timestamp TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -67,10 +72,17 @@ const CURRENT_SCHEMA = `
 
   CREATE INDEX events_parent_idx ON events(parent_event_id);
   CREATE INDEX events_run_idx ON events(run_id, sequence);
+  CREATE INDEX events_branch_sequence_idx ON events(thread_id, branch_name, sequence);
+  CREATE INDEX events_branch_incarnation_sequence_idx
+    ON events(thread_id, branch_name, branch_incarnation, sequence);
+  CREATE INDEX events_tool_progress_incarnation_sequence_idx
+    ON events(thread_id, branch_name, branch_incarnation, sequence)
+    WHERE kind = 'tool_progress';
 
   CREATE TABLE branches (
     thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE,
     branch_name TEXT NOT NULL,
+    branch_incarnation INTEGER NOT NULL DEFAULT 1 CHECK (branch_incarnation >= 1),
     head_event_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -212,9 +224,120 @@ const RUNTIME_OWNER_FENCING = `
     ON runtime_queue_owners(owner_id, owner_generation);
 `;
 
+const EVENT_BRANCH_SEQUENCE_INDEX = `
+  CREATE INDEX events_branch_sequence_idx ON events(thread_id, branch_name, sequence);
+`;
+
+const EVENT_BRANCH_INCARNATIONS = `
+  ALTER TABLE events ADD COLUMN branch_incarnation INTEGER NOT NULL DEFAULT 1
+    CHECK (branch_incarnation >= 1);
+
+  WITH ordered AS (
+    SELECT
+      event_id,
+      thread_id,
+      branch_name,
+      sequence,
+      parent_event_id,
+      LAG(event_id) OVER (
+        PARTITION BY thread_id, branch_name
+        ORDER BY sequence
+      ) AS previous_event_id
+    FROM events
+  ), boundaries AS (
+    SELECT
+      event_id,
+      thread_id,
+      branch_name,
+      sequence,
+      CASE
+        WHEN previous_event_id IS NULL OR parent_event_id IS NOT previous_event_id THEN 1
+        ELSE 0
+      END AS begins_incarnation
+    FROM ordered
+  ), numbered AS (
+    SELECT
+      event_id,
+      SUM(begins_incarnation) OVER (
+        PARTITION BY thread_id, branch_name
+        ORDER BY sequence
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS branch_incarnation
+    FROM boundaries
+  )
+  UPDATE events
+  SET branch_incarnation = (
+    SELECT numbered.branch_incarnation
+    FROM numbered
+    WHERE numbered.event_id = events.event_id
+  );
+
+  ALTER TABLE branches ADD COLUMN branch_incarnation INTEGER NOT NULL DEFAULT 1
+    CHECK (branch_incarnation >= 1);
+  UPDATE branches
+  SET branch_incarnation = COALESCE((
+    SELECT MAX(events.branch_incarnation) + 1
+    FROM events
+    WHERE events.thread_id = branches.thread_id
+      AND events.branch_name = branches.branch_name
+  ), 1);
+
+  CREATE INDEX events_branch_incarnation_sequence_idx
+    ON events(thread_id, branch_name, branch_incarnation, sequence);
+  CREATE INDEX events_tool_progress_incarnation_sequence_idx
+    ON events(thread_id, branch_name, branch_incarnation, sequence)
+    WHERE kind = 'tool_progress';
+`;
+
+const RUNTIME_CHILD_THREADS = `
+  CREATE TABLE runtime_child_threads (
+    thread_id TEXT PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE
+  ) STRICT;
+
+  INSERT INTO runtime_child_threads(thread_id)
+  SELECT DISTINCT event.thread_id
+  FROM events event
+  WHERE event.kind = 'run_started'
+    AND event.schema_version = 1
+    AND event.run_id IS NOT NULL
+    AND json_type(event.payload_json, '$.type') = 'text'
+    AND json_extract(event.payload_json, '$.type') = 'run_started'
+    AND EXISTS (
+      SELECT 1
+      FROM json_each(
+        CASE
+          WHEN json_type(event.payload_json, '$.promptComposition.sources') = 'array'
+            AND json_array_length(event.payload_json, '$.promptComposition.sources') BETWEEN 1 AND 128
+          THEN json_extract(event.payload_json, '$.promptComposition.sources')
+          ELSE json('[]')
+        END
+      ) source
+      WHERE source.type = 'object'
+        AND json_type(
+          CASE WHEN source.type = 'object' THEN source.value ELSE '{}' END,
+          '$.kind'
+        ) = 'text'
+        AND json_extract(
+          CASE WHEN source.type = 'object' THEN source.value ELSE '{}' END,
+          '$.kind'
+        ) = 'additional_instructions'
+        AND json_type(
+          CASE WHEN source.type = 'object' THEN source.value ELSE '{}' END,
+          '$.source'
+        ) = 'text'
+        AND json_extract(
+          CASE WHEN source.type = 'object' THEN source.value ELSE '{}' END,
+          '$.source'
+        ) = 'runtime child run'
+    );
+`;
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = Object.freeze([
   { version: 14, sql: PRE_RELEASE_V13_CLEANUP },
   { version: 15, sql: RUNTIME_OWNER_FENCING },
+  { version: 16, sql: EVENT_BRANCH_SEQUENCE_INDEX },
+  { version: 17, sql: EVENT_BRANCH_INCARNATIONS },
+  { version: 18, sql: RUNTIME_CHILD_THREADS },
 ]);
 
 function scalarNumber(value: unknown, label: string): number {

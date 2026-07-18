@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { errorMessage } from "../core/errors.js";
 import type { ToolUpdate } from "../core/events.js";
 import { isJsonValue, type JsonValue } from "../core/json.js";
@@ -8,6 +10,7 @@ import type {
   HarnessTool,
   ResourceClaim,
   ToolContext,
+  ToolInputTransformationAudit,
   ToolInvocation,
   ToolInvocationProgress,
   ToolInvocationResult,
@@ -30,8 +33,14 @@ export const MAX_TOOL_PROGRESS_UPDATES = 256;
 export const MAX_TOOL_PROGRESS_BYTES = 256 * 1024;
 export const MAX_TOOL_BATCH_PROGRESS_UPDATES = 1_024;
 export const MAX_TOOL_BATCH_PROGRESS_BYTES = 768 * 1024;
+export const MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES = 128;
 
 export interface ToolCoordinatorObserver {
+  transformed?(
+    invocation: ToolInvocation,
+    audit: readonly ToolInputTransformationAudit[],
+    context: ToolContext,
+  ): Promise<void> | void;
   received?(invocation: ToolInvocation, context: ToolContext): Promise<void> | void;
   started?(invocation: ToolInvocation, context: ToolContext): Promise<void> | void;
   progress?(update: ToolInvocationProgress, context: ToolContext): Promise<void> | void;
@@ -42,8 +51,17 @@ export interface ToolCoordinatorInterceptor {
   beforeCall?(
     invocation: ToolInvocation,
     context: ToolContext,
-  ): Promise<{ invocation: ToolInvocation; blocked: boolean; reason?: string } | void> |
-    { invocation: ToolInvocation; blocked: boolean; reason?: string } | void;
+  ): Promise<{
+    invocation: ToolInvocation;
+    blocked: boolean;
+    reason?: string;
+    transformations?: readonly ToolInputTransformationAudit[];
+  } | void> | {
+    invocation: ToolInvocation;
+    blocked: boolean;
+    reason?: string;
+    transformations?: readonly ToolInputTransformationAudit[];
+  } | void;
   afterResult?(
     invocation: ToolInvocation,
     result: ToolResult,
@@ -132,6 +150,20 @@ function snapshotToolInput(value: unknown, invalidMessage: string): JsonValue {
     if (error instanceof Error && error.message === invalidMessage) throw error;
     throw new Error(invalidMessage);
   }
+}
+
+function transformationAudit(value: readonly ToolInputTransformationAudit[] | undefined): ToolInputTransformationAudit[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES) {
+    throw new Error("Tool transformation audit is invalid");
+  }
+  return value.map((entry) => {
+    if (entry === null || typeof entry !== "object" || typeof entry.actor !== "string"
+      || entry.actor === "" || entry.actor.includes("\0") || Buffer.byteLength(entry.actor, "utf8") > 256) {
+      throw new Error("Tool transformation audit actor is invalid");
+    }
+    return { actor: entry.actor };
+  });
 }
 
 function boundedMetadata(value: JsonValue | undefined, maxBytes: number): JsonValue | undefined {
@@ -473,6 +505,18 @@ export class ToolCoordinator {
         await settleWithSignal(context.signal, () => observer.received!(invocation, context));
       }
     };
+    const notifyTransformed = async (
+      invocation: ToolInvocation,
+      audit: readonly ToolInputTransformationAudit[],
+    ): Promise<void> => {
+      if (audit.length === 0) return;
+      if (this.#observer.transformed !== undefined) {
+        await settleWithSignal(context.signal, () => this.#observer.transformed!(invocation, audit, context));
+      }
+      if (observer.transformed !== undefined) {
+        await settleWithSignal(context.signal, () => observer.transformed!(invocation, audit, context));
+      }
+    };
     const deliverProgress = (update: ToolInvocationProgress, progressContext: ToolContext): void => {
       progressDelivery = progressDelivery.then(async () => {
         try {
@@ -524,6 +568,7 @@ export class ToolCoordinator {
         input: null,
         index: invocation.index,
       };
+      let observable = effective;
       let received = false;
       let receiving = false;
       const receive = async (value: ToolInvocation): Promise<void> => {
@@ -535,6 +580,7 @@ export class ToolCoordinator {
       try {
         const baselineInput = snapshotToolInput(invocation.input, "Tool invocation contains non-JSON input");
         effective = { ...effective, input: baselineInput };
+        observable = effective;
         const preparedInput = tool.prepareInput === undefined
           ? baselineInput
           : await settleWithSignal(
@@ -555,6 +601,10 @@ export class ToolCoordinator {
           ),
           index: invocation.index,
         };
+        observable = {
+          ...effective,
+          input: snapshotToolInput(effective.input, "Tool input preparation returned non-JSON input"),
+        };
         tool.validate(effective.input);
         const reduction = this.#interceptor.beforeCall === undefined
           ? undefined
@@ -564,6 +614,7 @@ export class ToolCoordinator {
           );
         let blockedReason: string | undefined;
         let blocked = false;
+        let transformations: ToolInputTransformationAudit[] = [];
         if (reduction !== undefined) {
           if (
             reduction.invocation.callId !== invocation.callId ||
@@ -582,10 +633,17 @@ export class ToolCoordinator {
             blocked = true;
             blockedReason = reduction.reason;
           }
+          transformations = transformationAudit(reduction.transformations);
         }
         // Extensions may mutate a previously valid input. Revalidate the final
         // value before durable observation, policy evaluation, or execution.
         tool.validate(effective.input);
+        if (!isDeepStrictEqual(observable.input, effective.input) && transformations.length === 0) {
+          // Public host interceptors predate explicit transformation ledgers.
+          transformations = [{ actor: "host" }];
+        }
+        await notifyTransformed(effective, transformations);
+        observable = effective;
         await receive(effective);
         if (blocked) {
           results.set(effective.index, {
@@ -609,13 +667,13 @@ export class ToolCoordinator {
       } catch (error) {
         context.signal.throwIfAborted();
         if (receiving) throw error;
-        if (!received) await receive(effective);
-        results.set(effective.index, {
-          invocation: effective,
+        if (!received) await receive(observable);
+        results.set(observable.index, {
+          invocation: observable,
           result: toolError(
             `Invalid tool request: ${errorMessage(error)}`,
             undefined,
-            [`Correct the arguments to match the ${effective.name} schema, then retry once.`],
+            [`Correct the arguments to match the ${observable.name} schema, then retry once.`],
           ),
         });
       }

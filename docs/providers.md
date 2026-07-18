@@ -184,7 +184,7 @@ Use `/login company` to store the credential. A runtime extension can alternativ
 
 ### Providers that are not fixed presets
 
-OpenCode Zen and OpenCode Go publish one model catalog but route individual models through OpenAI Responses, Anthropic Messages, or Chat Completions. Their `/models` responses do not identify the required route. Treating either service as one fixed OpenAI-compatible endpoint would therefore show selectable models that fail at runtime. A complete integration needs a model-to-protocol router supplied by a runtime extension; Rigyn does not guess from model names.
+OpenCode Zen and OpenCode Go publish one model catalog but route individual models through OpenAI Responses, Anthropic Messages, or Chat Completions. Their `/models` responses do not identify the required route. Treating either service as one fixed OpenAI-compatible endpoint would therefore show selectable models that fail at runtime. A runtime extension can compose independently configured adapters with `defineRoutedProviderAdapter`, but it must supply an exact route for every exposed model. Rigyn does not guess protocols from model names.
 
 Cloudflare AI Gateway also combines provider-specific routes and requires account/gateway identifiers plus Cloudflare-specific authorization headers. It is not represented as a fixed compatible preset. Cloudflare Workers AI is safely usable as a configured Chat Completions endpoint when the account ID and model are explicit:
 
@@ -241,3 +241,5 @@ Provider state is kept only when it is compatible with the next request's provid
 Normalized usage separates uncached input, cache reads, cache writes, output, and reasoning tokens where the upstream protocol reports them. Provider-reported costs take precedence. Otherwise the runtime calculates cost from provenance-bearing model pricing, including input-volume tiers and Anthropic's distinct 5-minute and 1-hour cache-write rates. If any non-zero counter lacks a price, cost stays unknown instead of being under-reported.
 
 Credential-gated protocol smoke tests are documented in [live-provider-testing.md](./live-provider-testing.md).
+
+Provider adapters attach bounded response diagnostics when their transport exposes an HTTP response. Runtime `after_provider_response` observers receive each observed HTTP attempt, including non-2xx attempts that will retry, and may read the status and a fixed allowlist of request-ID, content-type, retry, and rate-limit headers. Failed attempts include bounded error metadata without the raw response body. Rigyn drops every other header, revalidates custom-adapter diagnostics in the core, and applies the credential redactor before delivery; authentication, cookies, raw bodies, and arbitrary provider metadata never cross this boundary. WebSocket-only responses may omit diagnostics.

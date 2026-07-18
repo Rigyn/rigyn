@@ -22,6 +22,8 @@ The repository examples below are protocol references, not preinstalled optional
 | [Custom compaction](../examples/custom-compaction/README.md) | Bounded deterministic compaction override and completion event | None |
 | [Dynamic tools](../examples/dynamic-tools/README.md) | Session-local active-tool loader applied at provider-turn boundaries | None |
 | [MCP stdio](../examples/mcp-stdio/README.md) | Fixed external MCP process, protocol handshake, bounds, cancellation, and disposal | Local child process |
+| [Child coordinator](../examples/child-coordinator/README.md) | Parallel in-process child runs, native progress, settled results, and cancellation | Configured model provider |
+| [Approval gate](../examples/approval-gate/README.md) | Native confirmation with a fixed workspace action and headless fail-closed behavior | One fixed workspace file |
 | [Reference package](../examples/reference-package/README.md) | Integrated tool, provider, command, shortcut, flag, events, state, skill, prompt, and theme | None |
 | [Shared events](../examples/shared-events/README.md) | Bounded JSON coordination between two in-process runtime entries | None |
 | [Reload safety](../examples/reload-safety/README.md) | Candidate-first repeated activation, rollback probe, and disposal | None |
@@ -112,11 +114,13 @@ Declarative reconciliation never enables dependency lifecycle scripts. Use an im
 An npm-oriented package may omit `extension.json`. Rigyn then derives a strict manifest from `package.json`. With no `rigyn` object, these directories are discovered by convention when present:
 
 ```text
-extensions/   .ts, .mts, .js, and .mjs runtime entries (excluding .d.ts)
+extensions/   direct .ts, .mts, .js, and .mjs entries, plus one immediate child index entry
 skills/       skill roots containing SKILL.md, or declared Markdown skills
 prompts/      Markdown prompt templates
 themes/       JSON theme definitions
 ```
+
+Convention runtime discovery excludes TypeScript declaration files (`.d.ts` and `.d.mts`). It loads direct files under `extensions/` and, for each immediate child directory, the first available `index.ts`, `index.mts`, `index.js`, or `index.mjs` in that order. Other immediate-child helpers and deeper files are libraries, not independent extensions. Declare an exact file or explicit `rigyn.extensions` glob when a nested file is intentionally an activation entry. Handwritten manifests reject declaration files as runtime entries too.
 
 Use `rigyn` when the packed artifact needs explicit paths, globs, exclusions, or a host compatibility range:
 
@@ -127,21 +131,21 @@ Use `rigyn` when the packed artifact needs explicit paths, globs, exclusions, or
   "type": "module",
   "files": ["dist", "skills", "prompts"],
   "rigyn": {
-    "hostVersion": ">=0.1.0 <0.2.0",
+    "hostVersion": ">=0.1.0 <0.3.0",
     "extensions": ["dist/extensions"],
     "skills": ["skills", "!skills/internal/**"],
     "prompts": ["prompts/*.md"],
     "themes": []
   },
   "peerDependencies": {
-    "rigyn": ">=0.1.0 <0.2.0"
+    "rigyn": ">=0.1.0 <0.3.0"
   }
 }
 ```
 
-The only accepted `rigyn` keys are `extensions`, `skills`, `prompts`, `themes`, and `hostVersion`; unknown keys fail installation. Resource fields are arrays of package-relative paths or globs. `!` or `-` removes matches and `+` explicitly adds them. Paths cannot be absolute or escape the package root. Declaring a field replaces discovery for that resource type, so an empty array intentionally disables it. Runtime selection accepts only JavaScript or TypeScript entries, skills resolve to `SKILL.md` roots or declared Markdown files, prompts accept Markdown, and themes accept validated JSON definitions.
+The only accepted `rigyn` keys are `extensions`, `skills`, `prompts`, `themes`, and `hostVersion`; unknown keys fail installation. Resource fields are arrays of package-relative paths or globs and are applied sequentially. `!` or `-` removes matches selected earlier and `+` explicitly adds them again. Exact directory removals prune the whole selected subtree. Paths cannot be absolute or escape the package root. Declaring a field replaces discovery for that resource type, so an empty array intentionally disables it. Runtime selection accepts only executable JavaScript or TypeScript entries. Skill directory additions select direct root Markdown skills and recursively discovered `SKILL.md` roots; later file, glob, or directory exclusions remove those concrete candidates before the generated manifest is activated. Prompts accept Markdown, and themes accept validated JSON definitions.
 
-Runtime modules receive the host API during activation and should not import a separate agent SDK. For TypeScript authoring, use type-only imports from `rigyn/extensions`, keep `rigyn` as a development/peer dependency rather than bundling another runtime copy, and publish compiled JavaScript unless the documented scoped TypeScript transform is sufficient. Always inspect `npm pack --dry-run` and test the exact archive: files omitted by `files` or `.npmignore` do not exist after installation.
+Runtime modules receive the host API during activation and must not bundle a separate Rigyn runtime. Managed packages may value-import the exact host-owned modules `rigyn/extensions`, `rigyn/providers`, and `rigyn/tui`; Rigyn maps those specifiers to the active host for supported ESM, scoped TypeScript, and CommonJS runtime entries. The root package and all other `rigyn/*` subpaths are intentionally unavailable from managed runtime code. Keep `rigyn` as a development and peer dependency for declarations and local authoring, not as a production dependency or nested runtime copy. Publish compiled JavaScript unless the documented scoped TypeScript transform is sufficient. Always inspect `npm pack --dry-run` and test the exact archive: files omitted by `files` or `.npmignore` do not exist after installation.
 
 Runtime modules that need durable files use the host-created `api.dataPaths.user` or `api.dataPaths.workspace` directory. Installed builds keep these roots under harness state rather than inside the package, so an upgrade cannot overwrite them. Package removal currently leaves owned data intact for a later reinstall; remove it explicitly only as a separate user-approved data operation. These paths are not a credential store.
 
@@ -152,7 +156,7 @@ node --test activation.test.mjs
 rigyn --package . --offline --list-models
 ```
 
-A copied package must make its documented local test command work from a normal shell. A public-loader test may import `rigyn/extensions` only when the host is a resolvable development dependency; it must not rely on `RIGYN_INSTALL_DIR` or other process-local installation variables. When the host package is intentionally not installed into the extension project, keep unit tests dependency-free and use `rigyn --package . --offline --list-models` plus the managed install/reload/remove flow for loader verification.
+A copied package must make its documented local test command work from a normal shell. A standalone public-loader test may import `rigyn/extensions` only when the host is a resolvable development dependency; it must not rely on `RIGYN_INSTALL_DIR` or other process-local installation variables. A package installed and activated by Rigyn instead receives the bounded host-owned mappings described above without a nested `rigyn` dependency. When the host package is intentionally not installed into the extension project, keep unit tests dependency-free and use `rigyn --package . --offline --list-models` plus the managed install/reload/remove flow for loader verification.
 
 Package `dependencies`, `optionalDependencies`, and `peerDependencies` are installed into that package's private module tree. Development dependencies are unavailable at runtime. Dependency lifecycle scripts and npm bin links are disabled by default. After reviewing every production dependency, opt in for one install, update, or invocation-only package transaction:
 
@@ -187,7 +191,7 @@ Deliberate interoperability limits are explicit: Git submodules and Git LFS are 
 
   ```json
   {
-    "compatibility": { "hostVersion": ">=0.1.0 <0.2.0" }
+    "compatibility": { "hostVersion": ">=0.1.0 <0.3.0" }
   }
   ```
 

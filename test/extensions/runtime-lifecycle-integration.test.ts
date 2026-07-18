@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
+import { OpenAICompatibleAdapter } from "../../src/providers/openai-compatible.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import { HarnessService } from "../../src/service/harness.js";
 import { SessionStore } from "../../src/storage/store.js";
@@ -12,6 +13,7 @@ import { ScriptedProvider } from "../../src/testing/scripted-provider.js";
 import { sha256 } from "../../src/tools/hash.js";
 import type { HarnessTool } from "../../src/tools/types.js";
 import type { ProviderAdapter } from "../../src/core/types.js";
+import { byteChunks, fakeFetch, streamResponse } from "../providers/helpers.js";
 
 interface RecordedLifecycleEvent {
   name: string;
@@ -225,6 +227,7 @@ test("failed and cancelled runs settle once and close pending lifecycle phases",
             retryable: false,
             partial: true,
             bodyStarted: true,
+            diagnostics: { status: 400, headers: { "x-request-id": "lifecycle-private-diagnostic" } },
           },
         },
       },
@@ -314,8 +317,15 @@ test("failed and cancelled runs settle once and close pending lifecycle phases",
     assert.equal(cancelledTurn?.event.outcome.error.category, "cancelled");
     const failedTurn = events.find((entry) =>
       entry.name === "turn_end" && entry.event.threadId === failedThread);
+    assert.ok(failedTurn);
     assert.equal(failedTurn?.event.outcome.status, "failed");
     assert.equal(failedTurn?.event.outcome.error.message, "fixture provider failure");
+    assert.equal("diagnostics" in failedTurn.event.outcome.error, false);
+    for (const name of ["agent_end", "agent_settled"]) {
+      const lifecycle = events.find((entry) => entry.name === name && entry.event.threadId === failedThread);
+      assert.ok(lifecycle);
+      assert.equal("diagnostics" in lifecycle.event.outcome.error, false);
+    }
     assert.equal(store.listEvents(toolThread).some((entry) => entry.event.type === "run_cancelled"), true);
     assert.equal(store.listEvents(failedThread).some((entry) => entry.event.type === "run_failed"), true);
     assert.equal(store.listEvents(pendingThread).some((entry) => entry.event.type === "run_cancelled"), true);
@@ -436,9 +446,26 @@ test("provider boundary hooks run in canonical order, clear continuation, and is
   });
   const provider: ProviderAdapter = {
     id: scripted.id,
-    stream(request, signal) {
+    async *stream(request, signal) {
       order.push(`provider:${scripted.capturedRequests().length + 1}`);
-      return scripted.stream(request, signal);
+      for await (const event of scripted.stream(request, signal)) {
+        yield event.type === "response_start"
+          ? {
+              ...event,
+              responseId: `response-${scripted.capturedRequests().length}`,
+              requestId: `request-${scripted.capturedRequests().length}`,
+              diagnostics: {
+                status: 201,
+                headers: {
+                  "content-type": "text/event-stream",
+                  "retry-after": "5",
+                  authorization: "Bearer secret-that-must-not-escape",
+                  "set-cookie": "session=secret",
+                },
+              },
+            }
+          : event;
+      }
     },
     async listModels(signal) { return await scripted.listModels(signal); },
   };
@@ -479,6 +506,12 @@ test("provider boundary hooks run in canonical order, clear continuation, and is
     assert.equal(requests[1]?.reasoningEffort, "high");
     const after = (globalThis as Record<string, unknown>).__providerBoundaryAfter as Record<string, any>;
     assert.deepEqual(after.usage, { inputTokens: 20, outputTokens: 3, totalTokens: 23 });
+    assert.equal(after.responseId, "response-2");
+    assert.equal(after.requestId, "request-2");
+    assert.deepEqual(after.diagnostics, {
+      status: 201,
+      headers: { "content-type": "text/event-stream", "retry-after": "5" },
+    });
     assert.equal("headers" in after || "authorization" in after || "providerState" in after, false);
     assert.ok(host.diagnostics().some((entry) => entry.message.includes("after observer fixture failure")));
   } finally {
@@ -488,6 +521,182 @@ test("provider boundary hooks run in canonical order, clear continuation, and is
     delete (globalThis as Record<string, unknown>).__providerBoundaryLifecycleOrder;
     delete (globalThis as Record<string, unknown>).__providerBoundaryRequestKeys;
     delete (globalThis as Record<string, unknown>).__providerBoundaryAfter;
+  }
+});
+
+test("failed HTTP attempts expose only bounded allowlisted response diagnostics", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-provider-failure-diagnostics-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  (globalThis as Record<string, unknown>).__failedProviderResponses = [];
+  const source = `export default (api) => api.on("after_provider_response", (event) => {
+    globalThis.__failedProviderResponses.push(event);
+  });\n`;
+  const sourcePath = join(root, "provider-failure-diagnostics.mjs");
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "provider-failure-diagnostics",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root });
+  let requests = 0;
+  const id = "retrying-compatible";
+  const wire = new OpenAICompatibleAdapter({
+    id,
+    baseUrl: "https://provider.example.test/v1",
+    accessToken: "transport-secret",
+    fetch: fakeFetch(() => {
+      requests += 1;
+      if (requests === 1) {
+        return new Response(JSON.stringify({ error: { message: "slow down" } }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "x-request-id": "request-rate-limited",
+            "retry-after": "0",
+            "x-ratelimit-remaining-requests": "0",
+            authorization: "Bearer response-secret",
+            "set-cookie": "session=response-secret",
+          },
+        });
+      }
+      return streamResponse(byteChunks([
+        `data: ${JSON.stringify({
+          id: "response-recovered",
+          model: "retry-model",
+          choices: [{ index: 0, delta: { content: "recovered" }, finish_reason: "stop" }],
+        })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join("")), {
+        "content-type": "text/event-stream",
+        "x-request-id": "request-recovered",
+      });
+    }),
+  });
+  const catalog = new ScriptedProvider({ id, models: [{ id: "retry-model" }] });
+  const provider: ProviderAdapter = {
+    id,
+    stream(request, signal) { return wire.stream(request, signal); },
+    async listModels(signal) { return await catalog.listModels(signal); },
+  };
+  const store = new SessionStore(join(root, "sessions.sqlite"));
+  const service = new HarnessService({
+    store,
+    workspace: root,
+    providers: new ProviderRegistry([provider]),
+    runtimeExtensions: host,
+    retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+  await service.initialize();
+
+  try {
+    const result = await service.run({
+      prompt: "recover after one rate limit",
+      provider: id,
+      model: "retry-model",
+    });
+    assert.equal(result.results[0]?.finalText, "recovered");
+    assert.equal(requests, 2);
+    const observed = (globalThis as Record<string, unknown>).__failedProviderResponses as Array<Record<string, any>>;
+    assert.equal(observed.length, 2);
+    assert.equal(observed[0]?.finishReason, "error");
+    assert.equal(observed[0]?.attempt, 1);
+    assert.equal(observed[0]?.willRetry, true);
+    assert.equal(observed[0]?.requestId, "request-rate-limited");
+    assert.equal(observed[0]?.error?.category, "rate_limit");
+    assert.equal(observed[0]?.error?.httpStatus, 429);
+    assert.equal("raw" in (observed[0]?.error ?? {}), false);
+    assert.deepEqual(observed[0]?.diagnostics, {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "retry-after": "0",
+        "x-ratelimit-remaining-requests": "0",
+        "x-request-id": "request-rate-limited",
+      },
+    });
+    assert.equal("authorization" in observed[0]!.diagnostics.headers, false);
+    assert.equal("set-cookie" in observed[0]!.diagnostics.headers, false);
+    assert.equal(observed[1]?.finishReason, "stop");
+    assert.equal(observed[1]?.attempt, 2);
+    assert.equal(observed[1]?.willRetry, false);
+    assert.equal(observed[1]?.requestId, "request-recovered");
+    assert.deepEqual(observed[1]?.diagnostics, {
+      status: 200,
+      headers: { "content-type": "text/event-stream", "x-request-id": "request-recovered" },
+    });
+  } finally {
+    await service.close();
+    await host.close();
+    store.close();
+    delete (globalThis as Record<string, unknown>).__failedProviderResponses;
+  }
+});
+
+test("a successful HTTP response that fails before response_start still reaches after_provider_response", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-provider-early-stream-diagnostics-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  (globalThis as Record<string, unknown>).__earlyFailedProviderResponses = [];
+  const source = `export default (api) => api.on("after_provider_response", (event) => {
+    globalThis.__earlyFailedProviderResponses.push(event);
+  });\n`;
+  const sourcePath = join(root, "provider-early-stream-diagnostics.mjs");
+  await writeFile(sourcePath, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "provider-early-stream-diagnostics",
+    sourcePath,
+    sha256: sha256(source),
+  }], { workspace: root });
+  const id = "early-stream-compatible";
+  const wire = new OpenAICompatibleAdapter({
+    id,
+    baseUrl: "https://provider.example.test/v1",
+    fetch: fakeFetch(() => streamResponse([], {
+      "content-type": "text/event-stream",
+      "x-request-id": "request-empty-stream",
+      authorization: "Bearer response-secret",
+    })),
+  });
+  const catalog = new ScriptedProvider({ id, models: [{ id: "early-stream-model" }] });
+  const provider: ProviderAdapter = {
+    id,
+    stream(request, signal) { return wire.stream(request, signal); },
+    async listModels(signal) { return await catalog.listModels(signal); },
+  };
+  const store = new SessionStore(join(root, "sessions.sqlite"));
+  const service = new HarnessService({
+    store,
+    workspace: root,
+    providers: new ProviderRegistry([provider]),
+    runtimeExtensions: host,
+  });
+  await service.initialize();
+
+  try {
+    await assert.rejects(service.run({
+      prompt: "observe an empty successful response",
+      provider: id,
+      model: "early-stream-model",
+    }), /ended before any response chunk/u);
+    const observed = (globalThis as Record<string, unknown>).__earlyFailedProviderResponses as Array<Record<string, any>>;
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]?.finishReason, "error");
+    assert.equal(observed[0]?.attempt, 1);
+    assert.equal(observed[0]?.willRetry, false);
+    assert.equal(observed[0]?.requestId, "request-empty-stream");
+    assert.equal(observed[0]?.error?.category, "protocol");
+    assert.deepEqual(observed[0]?.diagnostics, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream",
+        "x-request-id": "request-empty-stream",
+      },
+    });
+    assert.equal("authorization" in observed[0]!.diagnostics.headers, false);
+  } finally {
+    await service.close();
+    await host.close();
+    store.close();
+    delete (globalThis as Record<string, unknown>).__earlyFailedProviderResponses;
   }
 });
 

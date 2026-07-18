@@ -751,11 +751,11 @@ export class TuiModel {
       return;
     }
     if (this.#messageIds.has(message.id)) return;
-    this.#messageIds.add(message.id);
     if (message.role === "system") return;
     const images = directMessageImages(message);
     const text = messageText(message, false);
     if (text.trim() === "" && images.length === 0) return;
+    this.#messageIds.add(message.id);
     const userShell = message.role === "user" && message.displayText === undefined && images.length === 0
       ? userShellProjection(text)
       : undefined;
@@ -786,6 +786,9 @@ export class TuiModel {
     if (message.role === "assistant") {
       const live = this.#entries.findLast((entry) => entry.kind === "assistant" && this.#mutableEntryIds.has(entry.id));
       if (live !== undefined) {
+        this.#mutableEntryIds.delete(live.id);
+        live.id = message.id;
+        this.#mutableEntryIds.add(live.id);
         live.text = sanitizeTerminalText(text);
         if (images.length > 0) live.images = images;
         this.#refreshEntryBytes(live);

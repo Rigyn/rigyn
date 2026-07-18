@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import type { EventEnvelope } from "../../src/core/events.js";
 import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
+import { MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES } from "../../src/tools/coordinator.js";
 import { sha256 } from "../../src/tools/hash.js";
 
 const renderContext = {
@@ -236,7 +237,14 @@ export default function activate(api) {
     }));
     await host.dispatch("event", envelope(4, {
       type: "run_failed",
-      error: { category: "provider", message: "failed", retryable: false, partial: false, raw: { private: true } },
+      error: {
+        category: "provider",
+        message: "failed",
+        retryable: false,
+        partial: false,
+        diagnostics: { status: 503, headers: { "x-request-id": "private-diagnostic" } },
+        raw: { private: true },
+      },
     }));
     await host.dispatch("event", envelope(5, {
       type: "extension_state",
@@ -268,6 +276,7 @@ export default function activate(api) {
       assert.deepEqual(events[1]!.event, { type: "reasoning_delta", text: "", part: 0, visibility: "provider_trace" });
       assert.deepEqual(events[2]!.event, { type: "usage", semantics: "final", usage: { totalTokens: 3 } });
       assert.equal(events[3]!.event.type === "run_failed" && "raw" in events[3]!.event.error, false);
+      assert.equal(events[3]!.event.type === "run_failed" && "diagnostics" in events[3]!.event.error, false);
     }
     assert.deepEqual(owner[4]!.event.type === "extension_state" ? owner[4]!.event.value : undefined, { secret: "owner-state" });
     assert.equal(observer[4]!.event.type === "extension_state" ? observer[4]!.event.value : undefined, null);
@@ -353,6 +362,198 @@ test("runtime renderer registrations expose bounded structural blocks without ra
     expanded: false,
   }, renderContext), { lines: [{ spans: [{ text: "result:done", role: "success" }] }] });
   await host.close();
+});
+
+test("runtime editor renderers replace only the bounded structural editor view", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-editor-renderer-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "editor-renderer.mjs");
+  const source = `export default (api) => {
+    api.registerEditorRenderer({
+      render(view) {
+        const prefix = "edit:";
+        return {
+          lines: [{ spans: [{ text: "\\u001b[31m" + prefix + view.text + "\\u001b[0m", role: "accent" }] }],
+          cursor: { row: 0, column: prefix.length + view.cursor }
+        };
+      }
+    });
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "editor-renderer",
+    sourcePath: path,
+    sha256: sha256(source),
+  }], { workspace: root });
+
+  assert.deepEqual(host.renderers().map((entry) => [entry.kind, entry.key]), [["editor", "editor"]]);
+  const block = host.renderEditor({ text: "hello", cursor: 2, label: "you", mode: "normal", blocked: false }, {
+    ...renderContext,
+    width: 20,
+    focused: true,
+  });
+  assert.deepEqual(block, {
+    lines: [{ spans: [{ text: "edit:hello", role: "accent" }] }],
+    cursor: { row: 0, column: 7 },
+  });
+  assert.doesNotMatch(block!.lines[0]!.spans[0]!.text, /\u001b/u);
+  await host.close();
+});
+
+test("invalid editor renderer output falls back and records a bounded diagnostic", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-editor-renderer-invalid-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "editor-renderer.mjs");
+  const source = `export default (api) => {
+    api.registerEditorRenderer({ render: () => ({ lines: [{ spans: [{ text: "missing cursor" }] }] }) });
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "invalid-editor-renderer",
+    sourcePath: path,
+    sha256: sha256(source),
+  }], { workspace: root });
+
+  const view = { text: "hello", cursor: 2, label: "you", mode: "normal" as const, blocked: false };
+  assert.equal(host.renderEditor(view, renderContext), undefined);
+  assert.equal(host.renderEditor(view, renderContext), undefined);
+  assert.equal(host.diagnostics().length, 1);
+  assert.match(host.diagnostics()[0]?.message ?? "", /editor renderer failed:.*must return a cursor/u);
+  await host.close();
+});
+
+test("renderer failure diagnostics redact credential-shaped exception text", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-renderer-secret-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "renderer-secret.mjs");
+  const secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const source = `export default (api) => {
+    api.registerToolRenderer("secret", { renderCall: () => { throw new Error(${JSON.stringify(secret)}); } });
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "renderer-secret",
+    sourcePath: path,
+    sha256: sha256(source),
+  }], { workspace: root });
+
+  assert.equal(host.renderToolCall("secret", {
+    callId: "call-secret",
+    name: "secret",
+    status: "pending",
+    expanded: false,
+  }, renderContext), undefined);
+  const diagnostic = host.diagnostics()[0]?.message ?? "";
+  assert.match(diagnostic, /\[REDACTED\]/u);
+  assert.doesNotMatch(diagnostic, new RegExp(secret, "u"));
+  await host.close();
+});
+
+test("tool-call listeners transform cloned input sequentially with durable actor attribution", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-tool-transform-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const legacyPath = join(root, "legacy.mjs");
+  const explicitPath = join(root, "explicit.mjs");
+  const legacySource = `export default (api) => api.on("tool_call", (event) => { event.input.value = "legacy"; });\n`;
+  const explicitSource = `export default (api) => api.on("tool_call", (event) => ({ input: { value: event.input.value + ":explicit" } }));\n`;
+  await writeFile(legacyPath, legacySource);
+  await writeFile(explicitPath, explicitSource);
+  const host = await loadRuntimeExtensions([
+    { extensionId: "legacy-transform", sourcePath: legacyPath, sha256: sha256(legacySource) },
+    { extensionId: "explicit-transform", sourcePath: explicitPath, sha256: sha256(explicitSource) },
+  ], { workspace: root });
+
+  const original = { value: "original" };
+  const reduced = await host.reduceToolCall({
+    callId: "call-transform",
+    name: "echo",
+    input: original,
+    index: 0,
+    threadId: "thread-transform",
+    runId: "run-transform",
+    branch: "main",
+  });
+  assert.deepEqual(original, { value: "original" });
+  assert.deepEqual(reduced.invocation.input, { value: "legacy:explicit" });
+  assert.deepEqual(reduced.transformations, [
+    { actor: "legacy-transform" },
+    { actor: "explicit-transform" },
+  ]);
+  assert.equal(reduced.blocked, false);
+  await host.close();
+});
+
+test("tool-call listener capacity matches the transformation audit maximum", async (context) => {
+  assert.equal(MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES, 128);
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-tool-listener-limit-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "boundary.mjs");
+  const source = `export default (api) => {
+    globalThis.__runtimeListenerLimitApi = api;
+    globalThis.__runtimeObserverCount = 0;
+    for (let index = 0; index < 128; index += 1) {
+      api.on("tool_call", (event) => ({ input: { value: event.input.value + 1 } }));
+    }
+    for (let index = 0; index < 129; index += 1) {
+      api.on("agent_start", () => { globalThis.__runtimeObserverCount += 1; });
+    }
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{
+    extensionId: "listener-boundary",
+    sourcePath: path,
+    sha256: sha256(source),
+  }], { workspace: root, activationFailure: "throw" });
+
+  const reduced = await host.reduceToolCall({
+    callId: "call-boundary",
+    name: "echo",
+    input: { value: 0 },
+    index: 0,
+    threadId: "thread-boundary",
+    runId: "run-boundary",
+    branch: "main",
+  });
+  assert.deepEqual(reduced.invocation.input, { value: 128 });
+  assert.equal(reduced.transformations?.length, MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES);
+
+  const api = (globalThis as Record<string, any>).__runtimeListenerLimitApi;
+  assert.throws(
+    () => api.on("tool_call", () => undefined),
+    /tool_call listeners exceed 128/u,
+  );
+  assert.doesNotThrow(() => api.on("agent_start", () => {
+    (globalThis as Record<string, any>).__runtimeObserverCount += 1;
+  }));
+  await host.dispatch("agent_start", {
+    threadId: "thread-boundary",
+    runId: "run-boundary",
+    branch: "main",
+    provider: "fixture",
+    model: "fixture-model",
+  });
+  assert.equal((globalThis as Record<string, unknown>).__runtimeObserverCount, 130);
+
+  await host.close();
+  delete (globalThis as Record<string, unknown>).__runtimeListenerLimitApi;
+  delete (globalThis as Record<string, unknown>).__runtimeObserverCount;
+});
+
+test("activation rejects a 129th tool-call listener transactionally", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-tool-listener-overflow-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "overflow.mjs");
+  const source = `export default (api) => {
+    api.registerCommand({ name: "must-not-commit-listeners", execute() {} });
+    for (let index = 0; index < 129; index += 1) api.on("tool_call", () => undefined);
+  };\n`;
+  await writeFile(path, source);
+
+  await assert.rejects(loadRuntimeExtensions([{
+    extensionId: "listener-overflow",
+    sourcePath: path,
+    sha256: sha256(source),
+  }], { workspace: root, activationFailure: "throw" }), /tool_call listeners exceed 128/u);
 });
 
 test("runtime renderer failures fall back and report one diagnostic per failure", async (context) => {

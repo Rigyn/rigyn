@@ -9,6 +9,7 @@ import type {
   NormalizedUsage,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { requireBody } from "./lines.js";
@@ -40,6 +41,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -188,6 +190,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const compatibility = this.#modelCompatibility(request.model);
@@ -211,6 +214,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         signal,
       }, auth.apiKey);
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -225,7 +229,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       const startResponse = (): AdapterEvent[] => {
         if (started) return [];
         started = true;
-        const start: AdapterEvent = { type: "response_start", model: responseModel };
+        const start: AdapterEvent = {
+          type: "response_start",
+          model: responseModel,
+          ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
         if (responseId !== undefined) start.responseId = responseId;
         if (requestId !== undefined) start.requestId = requestId;
         const events: AdapterEvent[] = [start];
@@ -434,7 +442,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }

@@ -80,6 +80,31 @@ test("collapsed reasoning wraps sequential summaries within the terminal width",
   assert.ok(lines.every((line) => cellWidth(line) <= width));
 });
 
+test("multiple collapsed reasoning rows wrap independently downward", () => {
+  const frame = renderFrame({
+    context: { status: "idle", model: "fixture" },
+    transcript: ["first", "second", "third"].map((name) => ({
+      id: `reasoning-${name}`,
+      kind: "reasoning" as const,
+      text: `**Planning ${name} workflow with enough detail to wrap**<!-- boundary -->**Reviewing ${name} workflow without horizontal concatenation**`,
+      expanded: false,
+    })),
+    transcriptOffset: 0,
+    editorText: "",
+    editorCursor: 0,
+    inputLabel: "you",
+    inputMode: "normal",
+  }, { columns: 52, rows: 24 }, createTheme("mono", { color: false, unicode: true }));
+  const lines = snapshot(frame.text).split("\n");
+  const starts = lines.flatMap((line, index) => line.includes("◆ summary ") ? [index] : []);
+
+  assert.equal(starts.length, 3);
+  assert.ok(starts[0]! < starts[1]! && starts[1]! < starts[2]!);
+  assert.ok(starts.every((index) => index + 1 < lines.length && !lines[index + 1]!.includes("◆ summary ")));
+  assert.doesNotMatch(frame.text, /workflowReviewing|concatenation◆/u);
+  assert.ok(lines.every((line) => cellWidth(line) <= 52));
+});
+
 test("frame renderer produces a stable transcript, editor, and footer layout", () => {
   const view: TuiViewState = {
     context: {
@@ -118,28 +143,28 @@ test("frame renderer produces a stable transcript, editor, and footer layout", (
   };
   const frame = renderFrame(view, { columns: 52, rows: 16 }, createTheme("mono", { color: false, unicode: false }));
   assert.equal(snapshot(frame.text), [
-    "",
     "-".repeat(52),
-    "+ Read · src/parser.ts · done",
-    "  | line 1",
-    "  | line 2",
-    "  | line 3",
-    "  | line 4",
-    "  | line 5",
-    "  \\ line 6",
+    "| + Read · src/parser.ts · done",
+    "|    line 1",
+    "|    line 2",
+    "|    line 3",
+    "|    line 4",
+    "|    line 5",
+    "|    line 6",
     "-".repeat(52),
     ". Ready",
-    "----------------------------------------------------",
+    "-".repeat(52),
     " next step",
-    "----------------------------------------------------",
-    ` ${join("~", "rigyn")} • parser fix`,
-    "↑10 ↓5 50.0%/20k (auto)            (openai) gpt-test",
+    "-".repeat(52),
+    " ~/rigyn • parser fix",
+    "(openai) gpt-test",
+    "in 10 · out 5 · ctx [##--] 50.0%/20k auto",
   ].join("\n"));
-  assert.deepEqual(frame.cursor, { row: 13, column: 6 });
-  assert.doesNotMatch(frame.text, /Rigyn|thr_1/u);
+  assert.deepEqual(frame.cursor, { row: 12, column: 6 });
+  assert.doesNotMatch(frame.text, /thr_1/u);
 });
 
-test("running reads show a bounded preview without depending on an expansion key", () => {
+test("completed reads show every stored line without depending on an expansion key", () => {
   const theme = createTheme("mono", { color: false, unicode: false });
   const read = {
     id: "tool:read",
@@ -152,31 +177,21 @@ test("running reads show a bounded preview without depending on an expansion key
     expanded: false,
   };
 
-  assert.equal(snapshot(renderTranscript([read], 60, theme)), [
+  const expected = [
     "-".repeat(60),
-    "+ Read · src/parser.ts:1-2 · done",
-    "  | first",
-    "  | second",
-    "  | third",
-    "  | fourth",
-    "  | fifth",
-    "  | sixth",
-    "  \\ ... (2 more lines)",
+    "| + Read · src/parser.ts:1-2 · done",
+    "|    first",
+    "|    second",
+    "|    third",
+    "|    fourth",
+    "|    fifth",
+    "|    sixth",
+    "|    seventh",
+    "|    eighth",
     "-".repeat(60),
-  ].join("\n"));
-  assert.equal(snapshot(renderTranscript([{ ...read, expanded: true }], 60, theme)), [
-    "-".repeat(60),
-    "+ Read · src/parser.ts:1-2 · done",
-    "  | first",
-    "  | second",
-    "  | third",
-    "  | fourth",
-    "  | fifth",
-    "  | sixth",
-    "  | seventh",
-    "  \\ eighth",
-    "-".repeat(60),
-  ].join("\n"));
+  ].join("\n");
+  assert.equal(snapshot(renderTranscript([read], 60, theme)), expected);
+  assert.equal(snapshot(renderTranscript([{ ...read, expanded: true }], 60, theme)), expected);
 });
 
 test("native tool cards combine bounded previews, metadata, and one frame", () => {
@@ -202,14 +217,39 @@ test("native tool cards combine bounded previews, metadata, and one frame", () =
   const lines = rendered.split("\n");
 
   assert.equal(lines[0], "─".repeat(52));
-  assert.match(lines[1] ?? "", /✓ Read · \[ts\] src\/parser\.ts · 7 lines read · limited/u);
-  assert.match(rendered, /│ one/u);
-  assert.match(rendered, /│   two/u);
-  assert.match(rendered, /… \(1 more lines\)/u);
-  assert.doesNotMatch(rendered, /Ctrl\+O/u);
+  assert.match(lines[1] ?? "", /│ ✓ Read · \[ts\] src\/parser\.ts · 7 lines · limited/u);
+  assert.match(rendered, /│ {4}one/u);
+  assert.match(rendered, /│ {6}two/u);
+  assert.match(rendered, /│ {4}seven/u);
+  assert.doesNotMatch(rendered, /more rows|Ctrl\+O/u);
   assert.equal(lines.at(-1), "─".repeat(52));
-  assert.equal(lines.filter((line) => /^─+$/u.test(line)).length, 2);
   assert.ok(lines.every((line) => cellWidth(line) <= 52));
+});
+
+test("completed code reads reuse the native syntax tokenizer without changing stored text", () => {
+  const source = "const answer: number = 42;\nconst label = \"ready\";";
+  const theme = createTheme("dark", { color: true, unicode: true });
+  const rendered = renderTranscript([{
+    id: "tool:syntax-read",
+    kind: "tool",
+    title: "read",
+    summary: "src/value.ts:1-2",
+    status: "completed",
+    text: source,
+    toolData: {
+      input: { path: "src/value.ts" },
+      result: { content: source, isError: false, metadata: { shownLines: 2 } },
+    },
+  }], 52, theme);
+  const lines = rendered.split("\n");
+  const stored = stripAnsi(rendered).split("\n").slice(2, -1)
+    .map((line) => line.replace(/^│ {4}/u, ""))
+    .join("\n");
+
+  assert.equal(stored, source);
+  assert.ok(lines[2]?.includes(theme.codes.accent));
+  assert.ok(lines[2]?.includes(theme.codes.warning));
+  assert.ok(lines[3]?.includes(theme.codes.success));
 });
 
 test("narrow native tool headers preserve the operation target before metadata", () => {
@@ -228,7 +268,7 @@ test("narrow native tool headers preserve the operation target before metadata",
   }], width, createTheme("mono", { color: false, unicode: true })));
   const lines = rendered.split("\n");
 
-  assert.match(lines[1] ?? "", /Read · \[ts\] src\/重要/u);
+  assert.match(lines[1] ?? "", /Read · src\/重要/u);
   assert.ok(lines.every((line) => cellWidth(line) <= width));
 });
 
@@ -250,8 +290,141 @@ test("failed shell headers remain explicit when result metadata is missing or in
     toolData: { result: { content: "command failed", isError: true, metadata: { exitCode: 0 } } },
   }], 48, theme));
 
-  assert.match(withoutMetadata, /x Bash · failed/u);
-  assert.match(inconsistentMetadata, /x Bash · failed · exit 0/u);
+  assert.match(withoutMetadata, /\| x Bash · failed/u);
+  assert.match(inconsistentMetadata, /\| x Bash · failed · exit 0/u);
+});
+
+test("narrow shell headers reserve decisive running and exit metadata", () => {
+  const theme = createTheme("mono", { color: false, unicode: false });
+  const failed = snapshot(renderTranscript([{
+    id: "tool:narrow-failed-shell",
+    kind: "tool",
+    title: "bash",
+    summary: "npm run an-extremely-long-command",
+    status: "failed",
+    text: "failed",
+    toolData: { result: { content: "failed", isError: true, metadata: { exitCode: 17 } } },
+  }], 24, theme));
+  const running = snapshot(renderTranscript([{
+    id: "tool:narrow-running-shell",
+    kind: "tool",
+    title: "bash",
+    summary: "npm run an-extremely-long-command",
+    status: "running",
+    text: "waiting",
+    toolData: { progress: { stdout: "waiting", stderr: "", stdoutBytes: 7, stderrBytes: 0, elapsedMs: 2_000, truncated: false } },
+  }], 24, theme));
+
+  assert.match(failed, /^\| x Bash.*· exit 17$/mu);
+  assert.match(running, /^\| \* Bash.*· 2s$/mu);
+  assert.ok([...failed.split("\n"), ...running.split("\n")].every((line) => cellWidth(line) <= 24));
+});
+
+test("running tools present structured channel tails and bounded partial errors", () => {
+  const theme = createTheme("mono", { color: false, unicode: true });
+  const progress = snapshot(renderTranscript([{
+    id: "tool:live-progress",
+    kind: "tool",
+    title: "bash",
+    summary: "npm test",
+    status: "running",
+    text: "flattened fallback must not render",
+    toolData: {
+      progress: {
+        stdout: "one\ntwo\nthree",
+        stderr: "warning line",
+        stdoutBytes: 13,
+        stderrBytes: 12,
+        elapsedMs: 2_000,
+        truncated: true,
+      },
+    },
+  }], 52, theme));
+  const partial = renderTranscript([{
+    id: "tool:partial-error",
+    kind: "tool",
+    title: "read",
+    summary: "src/missing.ts",
+    status: "running",
+    text: "fallback",
+    toolData: {
+      partialResult: { content: "permission denied", isError: true, truncated: true },
+    },
+  }], 52, createTheme("dark", { color: true, unicode: true }));
+
+  assert.match(progress, /│ ● Bash · npm test · running · 2s/u);
+  assert.match(progress, /stdout · 13 bytes · tail/u);
+  assert.match(progress, /three/u);
+  assert.match(progress, /stderr · 12 bytes/u);
+  assert.match(progress, /warning line/u);
+  assert.match(progress, /live output · limited/u);
+  assert.doesNotMatch(progress, /flattened fallback/u);
+  assert.match(stripAnsi(partial), /partial result · limited/u);
+  assert.match(stripAnsi(partial), /permission denied/u);
+  assert.ok(partial.includes(createTheme("dark", { color: true, unicode: true }).codes.error));
+});
+
+test("running shell output keeps a small live tail until the canonical result arrives", () => {
+  const output = Array.from({ length: 12 }, (_, index) => `live ${index + 1}`).join("\n");
+  const rendered = snapshot(renderTranscript([{
+    id: "tool:live-tail",
+    kind: "tool",
+    title: "bash",
+    summary: "npm test",
+    status: "running",
+    text: "stored fallback must not render",
+    toolData: {
+      progress: {
+        stdout: output,
+        stderr: "",
+        stdoutBytes: Buffer.byteLength(output),
+        stderrBytes: 0,
+        elapsedMs: 3_000,
+        truncated: false,
+      },
+    },
+  }], 52, createTheme("mono", { color: false, unicode: true })));
+
+  assert.match(rendered, /live 9\n│ {4}live 10\n│ {4}live 11\n│ {4}live 12/u);
+  assert.doesNotMatch(rendered, /live [1-8](?:\n|$)|stored fallback/u);
+  assert.ok(rendered.split("\n").length <= 9);
+});
+
+test("completed narrow shell output renders every stored row", () => {
+  const rendered = snapshot(renderTranscript([{
+    id: "tool:narrow-tail",
+    kind: "tool",
+    title: "bash",
+    summary: "run",
+    status: "completed",
+    text: Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n"),
+    toolData: { result: { content: "done", isError: false, metadata: { exitCode: 0 } } },
+  }], 24, createTheme("mono", { color: false, unicode: false })));
+
+  assert.match(rendered, /\| {4}line 1/u);
+  assert.match(rendered, /\| {4}line 10/u);
+  assert.doesNotMatch(rendered, /earlier rows|Ctrl\+O/u);
+  assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= 24));
+});
+
+test("completed narrow tool output wraps without dropping stored text", () => {
+  const source = "src/parser.test.ts:52:7 error expected ParseError assertion";
+  const rendered = snapshot(renderTranscript([{
+    id: "tool:narrow-long-line",
+    kind: "tool",
+    title: "bash",
+    summary: "npm run lint",
+    status: "failed",
+    text: source,
+    toolData: { result: { content: source, isError: true, metadata: { exitCode: 1 } } },
+  }], 32, createTheme("mono", { color: false, unicode: false })));
+  const content = rendered.split("\n").slice(2, -1)
+    .map((line) => line.replace(/^\| {4}/u, "").trimEnd())
+    .join(" ")
+    .replace(/\s+/gu, " ");
+
+  assert.equal(content, source);
+  assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= 32));
 });
 
 test("native tool status uses canonical built-in metadata without naming companion tools", () => {
@@ -388,7 +561,9 @@ test("footer truncates an oversized model identity to the terminal width", () =>
     inputMode: "normal",
   }, { columns: 26, rows: 8 }, createTheme("mono", { color: false, unicode: false }));
 
-  assert.equal(snapshot(frame.text).split("\n").at(-1), "  model-with-a-very-long-…");
+  const footer = snapshot(frame.text).split("\n").at(-1) ?? "";
+  assert.match(footer, /model-with-a-very/u);
+  assert.ok(cellWidth(footer) <= 26);
 });
 
 test("footer distinguishes explicit thinking off from a model without reasoning", () => {
@@ -411,7 +586,7 @@ test("footer distinguishes explicit thinking off from a model without reasoning"
     context: { ...base.context, thinkingSupported: false },
   }, { columns: 40, rows: 8 }, theme).text;
 
-  assert.match(snapshot(reasoning).split("\n").at(-1) ?? "", /fixture • thinking off$/u);
+  assert.match(snapshot(reasoning).split("\n").at(-1) ?? "", /fixture · thinking off$/u);
   assert.equal(snapshot(nonReasoning).split("\n").at(-1)?.trim(), "fixture");
 });
 
@@ -449,10 +624,10 @@ test("pending image attachments render metadata only and reserve the editor curs
   assert.deepEqual(frame.cursor, { row: 8, column: 9 });
 });
 
-test("picker overlay is searchable and temporarily replaces the editor body", () => {
+test("narrow command decks own the middle and restore the unchanged draft when closed", () => {
   const frame = renderFrame({
     context: { status: "idle" },
-    transcript: [],
+    transcript: [{ id: "a", kind: "assistant", text: "underlying transcript" }],
     transcriptOffset: 0,
     editorText: "draft remains",
     editorCursor: 5,
@@ -468,12 +643,159 @@ test("picker overlay is searchable and temporarily replaces the editor body", ()
     },
   }, { columns: 40, rows: 12 }, createTheme("mono", { color: false, unicode: false }));
   const rendered = snapshot(frame.text);
-  assert.match(rendered, /Models:/u);
-  assert.match(rendered, /search> sm/u);
-  assert.match(rendered, /> smart — large context/u);
-  assert.doesNotMatch(rendered, /small|swift|draft remains/u);
-  assert.match(rendered.split("\n").at(-1) ?? "", /no-model/u);
+  assert.match(rendered, /^-- \[ Models · 1\/1 \]/mu);
+  assert.match(rendered, /^SEARCH  sm$/mu);
+  assert.match(rendered, /^> smart$/mu);
+  assert.doesNotMatch(rendered, /underlying transcript|draft remains/u);
+  assert.equal(rendered.split("\n").at(-1), "no model");
   assert.equal(frame.cursor?.column, 11);
+});
+
+test("wide pickers use the released full-width overlay geometry", () => {
+  const frame = renderFrame({
+    context: { status: "idle", workspace: "/workspace", model: "fixture" },
+    transcript: [{ id: "a", kind: "assistant", text: "context remains visible while this deliberately long line reaches the drawer edge" }],
+    transcriptOffset: 0,
+    editorText: "unfinished draft",
+    editorCursor: 8,
+    inputLabel: "you",
+    inputMode: "normal",
+    overlay: {
+      title: "Models",
+      states: ["scoped"],
+      query: "",
+      selected: 0,
+      items: [{ id: "one", label: "fixture", value: "one" }],
+      hints: ["Up/Down navigate · Enter select · Esc cancel"],
+    },
+  }, { columns: 80, rows: 16 }, createTheme("mono", { color: false, unicode: true }));
+  const lines = snapshot(frame.text).split("\n");
+  const title = lines.findIndex((line) => /^── \[ Models · 1\/1 \]/u.test(line));
+  assert.ok(title > 0);
+  assert.ok(lines.slice(0, title).every((line) => line === ""));
+  assert.match(frame.text, /^› fixture\s*$/mu);
+  assert.doesNotMatch(frame.text, /context remains visible|unfinished draft/u);
+  assert.equal(lines.at(-3), "─".repeat(80));
+  assert.ok(lines.every((line) => cellWidth(line) <= 80));
+  assert.equal(frame.cursor?.row, lines.findIndex((line) => line.startsWith("SEARCH")) + 1);
+});
+
+test("composer wraps whole words and keeps the grapheme cursor at the wrapped draft end", () => {
+  const frame = renderFrame({
+    context: { status: "idle", model: "fixture" },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "Switch to the balanced model and continue the audit",
+    editorCursor: 51,
+    inputLabel: "you",
+    inputMode: "normal",
+  }, { columns: 52, rows: 12 }, createTheme("mono", { color: false, unicode: true }));
+  const lines = snapshot(frame.text).split("\n");
+  const composer = lines.findIndex((line) => line === "─".repeat(52));
+
+  assert.equal(lines[composer + 1], " Switch to the balanced model and continue the");
+  assert.equal(lines[composer + 2], " audit");
+  assert.deepEqual(frame.cursor, { row: 10, column: 7 });
+  assert.doesNotMatch(lines[composer + 1] ?? "", /\s[a-z]$/u);
+});
+
+test("narrow telemetry is stacked into readable chips instead of clipping one rail", () => {
+  const frame = renderFrame({
+    context: {
+      status: "idle",
+      workspace: "/home/user/rigyn-demo",
+      sessionName: "renderer polish",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      availableProviderCount: 4,
+      thinking: "high",
+      thinkingSupported: true,
+      contextTokens: 48_300,
+      contextWindowTokens: 372_000,
+    },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "draft",
+    editorCursor: 5,
+    inputLabel: "you",
+    inputMode: "normal",
+    usage: {
+      total: { inputTokens: 15_200, outputTokens: 2_760, cacheReadTokens: 9_800, cost: "0.214" },
+      latestCacheHitRate: 64.5,
+    },
+  }, { columns: 52, rows: 12 }, createTheme("mono", { color: false, unicode: true }));
+  const lines = snapshot(frame.text).split("\n");
+
+  assert.equal(lines.at(-4), " /home/user/rigyn-demo • renderer polish");
+  assert.equal(lines.at(-3), "(openai-codex) gpt-5.6-sol · high");
+  assert.equal(lines.at(-2), "in 15k · out 2.8k · cache 9.8k (65%)");
+  assert.equal(lines.at(-1), "$0.214 · ctx [#---] 13.0%/372k auto");
+  assert.ok(lines.slice(-2).every((line) => line !== "…" && cellWidth(line ?? "") <= 52));
+});
+
+test("responsive picker composition is deterministic across wide narrow wide resize", () => {
+  const view: TuiViewState = {
+    context: { status: "idle", workspace: "/workspace", model: "fixture" },
+    transcript: [{ id: "a", kind: "assistant", text: "wide transcript context" }],
+    transcriptOffset: 0,
+    editorText: "unfinished draft",
+    editorCursor: 8,
+    inputLabel: "you",
+    inputMode: "normal",
+    overlay: {
+      title: "Models",
+      states: ["available"],
+      query: "fix",
+      selected: 0,
+      items: [{ id: "fixture", label: "fixture", detail: "balanced", value: "fixture" }],
+      hints: ["Up/Down navigate · Enter select · Esc cancel"],
+    },
+  };
+  const theme = createTheme("mono", { color: false, unicode: true });
+  const wideBefore = renderFrame(view, { columns: 80, rows: 16 }, theme);
+  const narrow = renderFrame(view, { columns: 52, rows: 16 }, theme);
+  const wideAfter = renderFrame(view, { columns: 80, rows: 16 }, theme);
+
+  assert.equal(wideAfter.text, wideBefore.text);
+  assert.deepEqual(wideAfter.cursor, wideBefore.cursor);
+  assert.match(wideBefore.text, /── \[ Models · 1\/1 \]/u);
+  assert.match(narrow.text, /── \[ Models · 1\/1 \]/u);
+  assert.doesNotMatch(wideBefore.text, /wide transcript context|unfinished draft/u);
+  assert.doesNotMatch(narrow.text, /wide transcript context|unfinished draft/u);
+});
+
+test("a deeply nested selected tree row keeps its active marker and tail label visible", () => {
+  const frame = renderFrame({
+    context: { status: "idle" },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "",
+    editorCursor: 0,
+    inputLabel: "you",
+    inputMode: "normal",
+    overlay: {
+      title: "Session Tree",
+      query: "",
+      selected: 0,
+      items: [{
+        id: "deep",
+        label: `● ${"   ".repeat(30)}└─ selected-branch-tail`,
+        value: "deep",
+        tree: {
+          eventId: "deep",
+          kind: "user",
+          depth: 30,
+          prefix: `${"   ".repeat(30)}└─ `,
+          branches: ["main"],
+          paths: ["main"],
+          active: true,
+        },
+      }],
+    },
+  }, { columns: 32, rows: 9 }, createTheme("mono", { color: false, unicode: true }));
+  const rendered = snapshot(frame.text);
+  assert.match(rendered, /› ● ….*selected-branch-tail/u);
+  assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= 32));
 });
 
 test("tiny generic pickers keep their title, selected item, and one non-duplicated action row", () => {
@@ -498,12 +820,16 @@ test("tiny generic pickers keep their title, selected item, and one non-duplicat
   }, { columns: 32, rows: 10 }, createTheme("mono", { color: false, unicode: true }));
   const rendered = snapshot(frame.text);
   const lines = rendered.split("\n");
-  assert.match(rendered, /Resume Session:/u);
-  assert.match(rendered, /search> ui/u);
-  assert.match(rendered, /> UI audit session/u);
+  assert.match(rendered, /Resume Session .* 1\/1/u);
+  assert.match(rendered, /^SEARCH  ui$/mu);
+  assert.match(rendered, /^› UI audit session$/mu);
   assert.match(rendered, /Enter select · Esc cancel/u);
   assert.equal(rendered.match(/Enter select/gu)?.length, 1);
+  const title = lines.findIndex((line) => line.startsWith("── [ Resume Session · 1/1 ]"));
+  assert.ok(title >= 0);
+  assert.ok(lines.slice(0, title).every((line) => line === ""));
   assert.equal(lines.at(-3), "─".repeat(32));
+  assert.doesNotMatch(rendered, /draft remains/u);
 });
 
 test("tiny empty model pickers wrap their recovery message and retain cancel help", () => {
@@ -525,12 +851,11 @@ test("tiny empty model pickers wrap their recovery message and retain cancel hel
     },
   }, { columns: 32, rows: 10 }, createTheme("mono", { color: false, unicode: true }));
   const rendered = snapshot(frame.text);
-  const lines = rendered.split("\n");
   assert.match(rendered, /No available models/u);
-  assert.match(rendered, /\/login to connect/u);
+  assert.match(rendered.replace(/\s+/gu, " "), /\/login to connect/u);
   assert.match(rendered, /provider\./u);
   assert.match(rendered, /Esc cancel/u);
-  assert.equal(lines.at(-3), "─".repeat(32));
+  assert.doesNotMatch(rendered, /[╭╮╰╯]/u);
 });
 
 test("tiny settings keep multiple choices and compact change and cancel help", () => {
@@ -545,6 +870,8 @@ test("tiny settings keep multiple choices and compact change and cancel help", (
     overlay: {
       title: "Settings",
       settings: true,
+      states: ["project"],
+      status: "Changes save immediately",
       query: "",
       selected: 0,
       selectedDescription: "Automatically compact context when it gets too large",
@@ -561,8 +888,11 @@ test("tiny settings keep multiple choices and compact change and cancel help", (
   const lines = rendered.split("\n");
   assert.match(rendered, /→ Auto-compact\s+true/u);
   assert.match(rendered, /Setting 2/u);
-  assert.match(rendered, /Enter change · Esc close/u);
-  assert.equal(lines.at(-3), "─".repeat(32));
+  assert.match(rendered, /Enter\/Space change/u);
+  assert.match(rendered, /Esc close/u);
+  assert.match(lines[0] ?? "", /^── \[ Settings · 1\/9 \]/u);
+  assert.doesNotMatch(rendered, /[╭╮╰╯]/u);
+  assert.equal(frame.cursor?.row, lines.findIndex((line) => line.startsWith("SEARCH")) + 1);
 });
 
 test("runtime overlays compose by terminal cells without replacing the editor", () => {
@@ -679,12 +1009,12 @@ test("compact frames omit fixed-height top padding without losing the editor cur
   const compact = renderFrame(view, { columns: 40, rows: 24 }, theme, { compact: true });
   const full = renderFrame(view, { columns: 40, rows: 24 }, theme);
   assert.equal(compact.text.split("\n").length, 4);
-  assert.equal(snapshot(compact.text).split("\n")[0], "----------------------------------------");
+  assert.equal(snapshot(compact.text).split("\n")[0], "-".repeat(40));
   assert.deepEqual(compact.cursor, { row: 2, column: 7 });
   assert.equal(full.text.split("\n").length, 24);
 });
 
-test("bounded tool output stays multiline and expands without duplicating its header", () => {
+test("completed shell output stays complete and preserves truncation metadata", () => {
   const base: TuiViewState = {
     context: { status: "idle" },
     transcript: [{
@@ -712,13 +1042,13 @@ test("bounded tool output stays multiline and expands without duplicating its he
   };
   const theme = createTheme("mono", { color: false, unicode: false });
   const collapsed = snapshot(renderTranscript(base.transcript, 80, theme));
-  assert.match(collapsed, /\+ Shell · npm test · 1m 1s · exit 0 · full output: \/tmp\/npm-test\.log/u);
-  assert.match(collapsed, /\| \.\.\. \(2 earlier lines\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
-  assert.doesNotMatch(collapsed, /\| one|\| two/u);
+  assert.match(collapsed, /\| \+ Shell · npm test · 1m 1s · exit 0 · full output: \/tmp\/npm-test\.log/u);
+  assert.match(collapsed, /\| {4}one\n\| {4}two\n\| {4}three\n\| {4}four\n\| {4}five\n\| {4}six\n\| {4}seven\n\| {4}eight/u);
+  assert.doesNotMatch(collapsed, /earlier rows|Ctrl\+O/u);
 
   const expanded = snapshot(renderTranscript([{ ...base.transcript[0]!, expanded: true }], 80, theme));
-  assert.match(expanded, /\| one\n  \| two\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
-  assert.equal(expanded.match(/\+ Shell/gu)?.length, 1);
+  assert.equal(expanded, collapsed);
+  assert.equal(expanded.match(/\| \+ Shell/gu)?.length, 1);
 });
 
 test("persisted user shell history renders as one expanded shell card by default", () => {
@@ -737,15 +1067,14 @@ test("persisted user shell history renders as one expanded shell card by default
   }, 1));
   const theme = createTheme("mono", { color: false, unicode: false });
   const expanded = snapshot(renderTranscript(model.entries, 80, theme));
-  assert.match(expanded, /\+ Shell · npm test · exit 0/u);
-  assert.match(expanded, /\| one\n  \| two\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
+  assert.match(expanded, /\| \+ Shell · npm test · exit 0/u);
+  assert.match(expanded, /\| {4}one\n\| {4}two\n\| {4}three\n\| {4}four\n\| {4}five\n\| {4}six\n\| {4}seven\n\| {4}eight/u);
   assert.doesNotMatch(expanded, /\[User shell command\]|user-shell-render/u);
 
   assert.equal(model.toggleTool("user-shell:user-shell-render"), true);
   const collapsed = snapshot(renderTranscript(model.entries, 80, theme));
-  assert.match(collapsed, /\| \.\.\. \(2 earlier lines\)\n  \| three\n  \| four\n  \| five\n  \| six\n  \| seven\n  \\ eight/u);
-  assert.doesNotMatch(collapsed, /\| one|\| two/u);
-  assert.equal(collapsed.match(/\+ Shell/gu)?.length, 1);
+  assert.equal(collapsed, expanded);
+  assert.equal(collapsed.match(/\| \+ Shell/gu)?.length, 1);
 });
 
 test("mutation cards render structured input through the existing collapse and keep errors visible", () => {
@@ -763,13 +1092,13 @@ test("mutation cards render structured input through the existing collapse and k
   }], 60, theme));
   assert.equal(rendered, [
     "-".repeat(60),
-    "x Edit · src/a.ts · failed",
-    "  | oldText was not found",
-    "  | --- old",
-    "  | - first",
-    "  | - second",
-    "  | +++ new",
-    "  \\ + replacement",
+    "| x Edit · src/a.ts · failed",
+    "|    oldText was not found",
+    "|    --- old",
+    "|    - first",
+    "|    - second",
+    "|    +++ new",
+    "|    + replacement",
     "-".repeat(60),
   ].join("\n"));
 
@@ -786,9 +1115,9 @@ test("mutation cards render structured input through the existing collapse and k
   }], 60, theme));
   assert.equal(write, [
     "-".repeat(60),
-    "+ Write · src/new.ts · done",
-    "  | + one",
-    "  \\ + two",
+    "| + Write · src/new.ts · done",
+    "|    + one",
+    "|    + two",
     "-".repeat(60),
   ].join("\n"));
   assert.doesNotMatch(write, /sha256/u);
@@ -806,6 +1135,32 @@ test("mutation cards render structured input through the existing collapse and k
   assert.ok(colored.includes(coloredTheme.codes.accent));
   assert.ok(colored.includes(coloredTheme.codes.error));
   assert.ok(colored.includes(coloredTheme.codes.success));
+});
+
+test("completed edit cards render the complete stored diff", () => {
+  const diff = [
+    "--- src/a.ts",
+    "+++ src/a.ts",
+    "@@ parser @@",
+    ...Array.from({ length: 12 }, (_, index) => `+ added line ${index + 1}`),
+  ].join("\n");
+  const rendered = snapshot(renderTranscript([{
+    id: "tool:complete-edit",
+    kind: "tool",
+    title: "edit",
+    summary: "src/a.ts",
+    status: "completed",
+    inputPreview: diff,
+    text: "",
+    toolData: { result: { content: "edited", isError: false, metadata: { replacements: 12 } } },
+    expanded: false,
+  }], 64, createTheme("mono", { color: false, unicode: true })));
+
+  assert.match(rendered, /│ {4}--- src\/a\.ts/u);
+  assert.match(rendered, /│ {4}\+ added line 1/u);
+  assert.match(rendered, /│ {4}\+ added line 12/u);
+  assert.match(rendered, /│ ✓ Edit · src\/a\.ts · 12 replacements/u);
+  assert.doesNotMatch(rendered, /more rows|Ctrl\+O/u);
 });
 
 test("tool renderer slots preserve safe span roles and fall back per invalid slot", () => {
@@ -838,7 +1193,7 @@ test("tool renderer slots preserve safe span roles and fall back per invalid slo
       call: { lines: [], raw: "not allowed" } as never,
     }]]),
   }));
-  assert.match(fallback, /\+ Read · fallback\.txt · done\n  \\ built-in result/u);
+  assert.match(fallback, /\| \+ Read · fallback\.txt · done\n\| {4}built-in result/u);
 });
 
 test("extension session render blocks override bounded data-only fallbacks", () => {
@@ -1025,6 +1380,21 @@ test("assistant Markdown wrapping is cell-aware and strips injected terminal con
   assert.equal(rendered.split("\n").join(""), expected);
   assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= 20));
   assert.doesNotMatch(rendered, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u001b]/u);
+});
+
+test("assistant prose wraps on word boundaries at narrow widths", () => {
+  const rendered = renderTranscript([{
+    id: "assistant",
+    kind: "assistant",
+    text: "I found the unsafe fallback. I’m checking the call sites before changing it.",
+  }], 52, createTheme("mono", { color: false, unicode: true }));
+  const lines = rendered.split("\n");
+
+  assert.deepEqual(lines.slice(-2), [
+    "I found the unsafe fallback. I’m checking the call ",
+    "sites before changing it.",
+  ]);
+  assert.doesNotMatch(rendered, /\bs\nites\b/u);
 });
 
 test("malformed Markdown and HTML-like text remain readable literal text", () => {
@@ -1230,39 +1600,13 @@ test("transcript cards distinguish speakers and every tool state without noisy l
     { id: "failed", kind: "tool", title: "web_fetch", summary: "https://example.test", status: "failed", text: "network error" },
   ], 48, theme));
 
-  assert.equal(rendered, [
-    "",
-    " Fix the parser",
-    " and keep the API stable",
-    "",
-    "",
-    "## Plan",
-    "I will inspect the parser.",
-    "",
-    "-".repeat(48),
-    "> Read · src/parser.ts · queued",
-    "-".repeat(48),
-    "",
-    "-".repeat(48),
-    ". Shell · npm test · running",
-    "  \\ waiting",
-    "-".repeat(48),
-    "",
-    "-".repeat(48),
-    "+ Edit · src/parser.ts · done",
-    "  | one",
-    "  | two",
-    "  | three",
-    "  | four",
-    "  | five",
-    "  \\ six",
-    "-".repeat(48),
-    "",
-    "-".repeat(48),
-    "x Web fetch · https://example.test · failed",
-    "  \\ network error",
-    "-".repeat(48),
-  ].join("\n"));
+  assert.match(rendered, / Fix the parser\n and keep the API stable/u);
+  assert.match(rendered, /## Plan\nI will inspect the parser\./u);
+  assert.match(rendered, /\| o Read · src\/parser\.ts · queued/u);
+  assert.match(rendered, /\| \* Shell · npm test · running\n\| {4}waiting/u);
+  assert.match(rendered, /\| \+ Edit · src\/parser\.ts · done\n\| {4}one[\s\S]*\| {4}six/u);
+  assert.match(rendered, /\| x Web fetch · https:\/\/example\.test · failed\n\| {4}network error/u);
+  assert.doesNotMatch(rendered, /\b(?:CALL|RESULT|Ctrl\+O)\b/u);
   assert.doesNotMatch(rendered, /\b(?:you|agent)\b/u);
 
   const coloredTheme = createTheme("dark", { color: true, unicode: true });
@@ -1273,17 +1617,16 @@ test("transcript cards distinguish speakers and every tool state without noisy l
     { id: "s", kind: "tool", title: "edit", status: "completed", text: "" },
     { id: "e", kind: "tool", title: "fetch", status: "failed", text: "" },
   ], 20, coloredTheme).split("\n");
-  assert.ok([coloredLines[0], coloredLines[5], coloredLines[9], coloredLines[13], coloredLines[17]]
-    .every((line) => cellWidth(line ?? "") > 0 && cellWidth(line ?? "") <= 20));
+  assert.ok(coloredLines.every((line) => cellWidth(line) <= 20));
   assert.ok(coloredLines[0]?.startsWith(coloredTheme.codes.userMessage));
-  assert.ok(coloredLines[5]?.startsWith(coloredTheme.codes.toolPending));
-  assert.ok(coloredLines[9]?.startsWith(coloredTheme.codes.toolRunning));
-  assert.ok(coloredLines[13]?.startsWith(coloredTheme.codes.toolSuccess));
-  assert.ok(coloredLines[17]?.startsWith(coloredTheme.codes.toolError));
+  assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.working)));
+  assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.success)));
+  assert.ok(coloredLines.some((line) => line.includes(coloredTheme.codes.error)));
+  assert.ok(coloredLines.every((line) => !line.includes(coloredTheme.codes.toolRunning)));
   assert.equal(coloredTheme.codes.assistant, coloredTheme.codes.code);
 });
 
-test("thinking level changes the editor border role", () => {
+test("thinking level changes the released composer separator accent", () => {
   const theme = createTheme("dark", { color: true, unicode: true });
   const frame = renderFrame({
     context: { status: "idle", thinking: "high" },
@@ -1294,5 +1637,6 @@ test("thinking level changes the editor border role", () => {
     inputLabel: "you",
     inputMode: "normal",
   }, { columns: 60, rows: 10 }, theme);
+  assert.ok(frame.text.includes(theme.codes.editorActive));
   assert.ok(frame.text.includes(theme.codes.warning));
 });

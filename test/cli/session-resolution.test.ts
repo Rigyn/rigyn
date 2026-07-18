@@ -243,6 +243,56 @@ test("runtime switch staging closes failed candidates and leaves source sessions
   assert.equal(trustChecks, 2);
 });
 
+test("fifty staged session switches transfer or release every candidate exactly once", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-session-switch-soak-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const current = join(root, "current");
+  const target = join(root, "target");
+  await mkdir(current);
+  await mkdir(target);
+  const currentRoot = await realpath(current);
+  const targetRoot = await realpath(target);
+  const savedStore = new SessionStore(":memory:");
+  t.after(() => savedStore.close());
+  const saved = thread(savedStore, "thread-switch-soak", "Switch soak", targetRoot);
+  let opened = 0;
+  let closed = 0;
+  let active = 0;
+
+  for (let iteration = 0; iteration < 50; iteration += 1) {
+    const prepared = await prepareSessionRuntimeSwitch(saved, currentRoot, { isTrusted: async () => true }, async () => {
+      const store = new SessionStore(":memory:");
+      thread(store, saved.threadId, saved.name, targetRoot);
+      opened += 1;
+      active += 1;
+      let released = false;
+      return {
+        workspace: targetRoot,
+        trusted: true,
+        store,
+        async close() {
+          if (released) return;
+          released = true;
+          store.close();
+          active -= 1;
+          closed += 1;
+        },
+      };
+    });
+    if (iteration % 2 === 0) {
+      await prepared.rollback();
+      await prepared.rollback();
+    } else {
+      const runtime = prepared.commit();
+      await runtime.close();
+    }
+    assert.equal(active, 0);
+  }
+
+  assert.equal(opened, 50);
+  assert.equal(closed, 50);
+});
+
 test("all-workspace index resolution keeps duplicate IDs ambiguous unless explicitly qualified", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "harness-session-all-resolution-"));
   const index = await WorkspaceSessionIndex.open(join(root, "index.sqlite"));

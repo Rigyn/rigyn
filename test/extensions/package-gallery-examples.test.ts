@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -25,6 +25,8 @@ const exampleIds = {
   "custom-compaction": "custom-compaction-example",
   "dynamic-tools": "dynamic-tools-example",
   "mcp-stdio": "mcp-stdio-example",
+  "child-coordinator": "child-coordinator-example",
+  "approval-gate": "approval-gate-example",
 } as const;
 
 async function loadExample(t: TestContext, directory: keyof typeof exampleIds) {
@@ -104,12 +106,95 @@ test("the focused custom tool validates input and returns a deterministic observ
   };
   assert.deepEqual(await tool.resources(input, context), []);
   const result = await tool.execute(input, context);
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, false, result.content);
   assert.equal(result.status, "success");
   assert.equal(result.summary, "Measured 2 lines, 3 words, and 13 UTF-8 bytes.");
   assert.deepEqual(result.nextActions, []);
   assert.deepEqual(JSON.parse(result.content), { metrics: { lines: 2, words: 3, bytes: 13 } });
   assert.throws(() => tool.validate({ text: "", extra: true }));
+});
+
+test("the child coordinator example awaits parallel children and reports native progress", async (t) => {
+  const { host, workspace } = await loadExample(t, "child-coordinator");
+  let childIndex = 0;
+  host.setSessionHandler({
+    async runChild(input: Parameters<RuntimeExtensionSessionHandler["runChild"]>[0]) {
+      const index = childIndex++;
+      input.onStart?.({
+        threadId: `child-gallery-${index}`,
+        branch: "main",
+        model: { provider: "fixture", model: "fixture" },
+        persisted: false,
+      });
+      input.onEvent?.({
+        threadId: `child-gallery-${index}`,
+        branch: "main",
+        sequence: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        event: { type: "text_delta", text: `result ${index}`, part: 0 },
+      });
+      return {
+        status: "success",
+        summary: `review ${index} complete`,
+        nextActions: [],
+        finalText: `result ${index}`,
+        truncated: false,
+        threadId: `child-gallery-${index}`,
+        branch: "main",
+        model: { provider: "fixture", model: "fixture" },
+        persisted: false,
+        usage: { totalTokens: index + 1 },
+        execution: { backend: "local", required: false, routedTools: [], localTools: [] },
+        artifacts: [],
+        artifactCount: 0,
+        artifactsTruncated: false,
+      };
+    },
+  } as unknown as RuntimeExtensionSessionHandler);
+  const tool = host.tools().find((entry) => entry.definition.name === "coordinate_reviews");
+  assert.ok(tool);
+  const progress: unknown[] = [];
+  const result = await tool.execute({ tasks: ["review auth", "review storage"] }, {
+    workspace: await WorkspaceBoundary.create(workspace),
+    runner: new DirectProcessRunner(),
+    signal: new AbortController().signal,
+    runId: "run-gallery-children",
+    threadId: "thread-gallery-children",
+    branch: "main",
+    reportProgress(update) { progress.push(update); },
+  });
+  assert.equal(childIndex, 2);
+  assert.equal(result.status, "success");
+  assert.deepEqual(JSON.parse(result.content).results.map((entry: { finalText: string }) => entry.finalText), [
+    "result 0",
+    "result 1",
+  ]);
+  assert.ok(progress.length >= 3);
+});
+
+test("the approval gate example fails closed headlessly and deletes only after confirmation", async (t) => {
+  const { host, workspace } = await loadExample(t, "approval-gate");
+  const marker = join(workspace, ".rigyn-approval-example");
+  await writeFile(marker, "example");
+  const tool = host.tools().find((entry) => entry.definition.name === "delete_example_marker");
+  assert.ok(tool);
+  const context = {
+    workspace: await WorkspaceBoundary.create(workspace),
+    runner: new DirectProcessRunner(),
+    signal: new AbortController().signal,
+    runId: "run-gallery-approval",
+    threadId: "thread-gallery-approval",
+    branch: "main",
+  };
+  const headless = await tool.execute({}, context);
+  assert.equal(headless.status, "error");
+  await access(marker);
+
+  host.setInteractiveUiHandler(() => commandUi({ async confirm() { return true; } }));
+  const approved = await tool.execute({}, context);
+  assert.equal(approved.status, "success");
+  await assert.rejects(access(marker), (error: unknown) =>
+    error instanceof Error && "code" in error && error.code === "ENOENT");
 });
 
 test("the focused custom provider lists and streams its offline model", async (t) => {
@@ -249,7 +334,7 @@ test("the tool-lifecycle example blocks private calls and transforms only its ow
   const invocation = { ...target, callId: "call-lifecycle", name: "guarded_echo", input: { text: "review me" }, index: 0 };
   assert.deepEqual(await host.reduceToolCall(invocation), { invocation, blocked: false });
   const base = await tool.execute(invocation.input, context);
-  assert.deepEqual(await host.reduceToolResult({ invocation, result: base }), {
+  assert.deepEqual(await host.reduceToolResult({ ...target, invocation, result: base }), {
     ...base,
     content: JSON.stringify({ echo: "review me", reviewed: true }),
     metadata: { reviewedBy: "tool-lifecycle-example" },
@@ -276,6 +361,9 @@ test("the custom-compaction example returns a bounded deterministic role outline
     createdAt: "2026-01-01T00:00:00.000Z",
   }));
   const event = {
+    threadId: "thread-gallery-compaction",
+    runId: "run-gallery-compaction",
+    branch: "main",
     plan: {
       kind: "compact",
       provider: "offline",
@@ -388,7 +476,7 @@ test("the MCP stdio example performs a fixed tool round trip and stops its child
     runId: "run-gallery-mcp",
     threadId: "thread-gallery-mcp",
   });
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, false, result.content);
   assert.equal(result.status, "success");
   assert.deepEqual(JSON.parse(result.content), { text: "nygiR" });
   const serverPid = (result.metadata as { serverPid?: unknown } | undefined)?.serverPid;

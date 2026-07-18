@@ -86,6 +86,25 @@ export interface RuntimeToolRendererBinding {
   renderResult(name: string, view: RuntimeToolRenderView, context: RuntimeUiRenderContext): RuntimeUiBlock | undefined;
 }
 
+/** Bounded editor state exposed to an extension renderer. Input handling stays host-owned. */
+export interface RuntimeEditorRenderView {
+  text: string;
+  /** Grapheme-indexed cursor in text. */
+  cursor: number;
+  label: string;
+  mode: "normal" | "follow_up";
+  blocked: boolean;
+}
+
+/** Replaces only the structural editor block; core editing and submission semantics remain host-owned. */
+export interface RuntimeEditorRenderer {
+  render(view: Readonly<RuntimeEditorRenderView>, context: RuntimeUiRenderContext): RuntimeUiBlock | undefined;
+}
+
+export interface RuntimeEditorRendererBinding {
+  render(view: RuntimeEditorRenderView, context: RuntimeUiRenderContext): RuntimeUiBlock | undefined;
+}
+
 export interface RuntimeSessionRendererBinding {
   renderState(
     envelope: EventEnvelope<ExtensionStateEvent>,
@@ -123,6 +142,7 @@ export interface RuntimeUiOverlayMargin {
 
 export interface RuntimeUiComponentHandle {
   close(): void;
+  /** @deprecated Permanent alias for close(). Use setHidden(true) for temporary hiding. */
   hide(): void;
   setHidden(hidden: boolean): void;
   isHidden(): boolean;

@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { chmod, lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { registerHooks } from "node:module";
 import { dirname, extname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { register as registerTsxCommonJsLoader } from "tsx/cjs/api";
 import { register as registerTsxModuleLoader } from "tsx/esm/api";
@@ -36,6 +38,8 @@ import type {
   ProviderAdapter,
   ProviderId,
   ProviderRequest,
+  ProviderResponseDiagnostics,
+  ProviderResponseFailureMetadata,
   ToolDefinition,
   ToolResultBlock,
 } from "../core/types.js";
@@ -43,6 +47,8 @@ import { defaultSecretRedactor } from "../auth/redaction.js";
 import {
   sanitizeRuntimeUiBlock,
   sanitizeRuntimeUiRenderContext,
+  type RuntimeEditorRenderer,
+  type RuntimeEditorRenderView,
   type RuntimeToolRenderer,
   type RuntimeToolRenderView,
   type RuntimeUiBlock,
@@ -52,6 +58,7 @@ import {
   type RuntimeUiRenderContext,
 } from "../tui/components.js";
 import { sanitizeTerminalText, splitGraphemes } from "../tui/unicode.js";
+import { MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES } from "../tools/coordinator.js";
 import { sha256 } from "../tools/hash.js";
 import { assertSchema } from "../tools/schema.js";
 import { assertCanonicalDirectoryCreationPath } from "../config/canonical-path.js";
@@ -62,6 +69,7 @@ import type {
   ToolContext,
   ToolExecutionMode,
   ToolInputPreparer,
+  ToolInputTransformationAudit,
   ToolInvocation,
   ToolResult,
 } from "../tools/types.js";
@@ -101,6 +109,8 @@ export type {
   RuntimeUiOverlayUnfocusOptions,
   RuntimeUiRenderContext,
   RuntimeUiSpan,
+  RuntimeEditorRenderer,
+  RuntimeEditorRenderView,
 } from "../tui/components.js";
 
 const NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/u;
@@ -132,6 +142,7 @@ const MAX_RUNTIME_CHILD_PROMPT_BYTES = 256 * 1024;
 const MAX_RUNTIME_CHILD_OUTPUT_BYTES = ABSOLUTE_CHILD_RUN_LIMITS.maxOutputLimitBytes;
 const MAX_RUNTIME_AUTOCOMPLETE_PROVIDERS = 128;
 const MAX_RUNTIME_EDITOR_MIDDLEWARE = 128;
+const MAX_RUNTIME_EDITOR_RENDERERS = 16;
 const MAX_RUNTIME_USER_SHELL_COMMAND_BYTES = 128 * 1024;
 const MAX_RUNTIME_USER_SHELL_CWD_BYTES = 16 * 1024;
 const MAX_RUNTIME_USER_SHELL_RESULT_BYTES = 1024 * 1024;
@@ -139,6 +150,7 @@ export const DEFAULT_RUNTIME_EXTENSION_ACTIVATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_RUNTIME_EXTENSION_LOAD_TIMEOUT_MS = 30_000;
 export const DEFAULT_RUNTIME_EXTENSION_SHUTDOWN_TIMEOUT_MS = 5_000;
 export const DEFAULT_RUNTIME_RESOURCE_DISCOVERY_TIMEOUT_MS = 30_000;
+const MAX_RUNTIME_HOST_IMPORT_ROOTS = 4_096;
 let runtimeImportGeneration = 0;
 
 export type RuntimeExtensionEvent =
@@ -187,11 +199,20 @@ export type RuntimeExtensionChange =
   | "provider_auth"
   | "autocomplete"
   | "editor_middleware"
+  | "editor_renderer"
   | "session_renderer"
   | "tool_renderer";
 
 export type RuntimeInputSource = "tui" | "rpc" | "extension";
 export type RuntimeInputDelivery = "steer" | "follow_up";
+
+/** Immutable host-owned identity for one exact run and resolved session branch. */
+export interface RuntimeRunScope {
+  readonly threadId: string;
+  readonly runId: string;
+  readonly branch: string;
+  readonly step?: number;
+}
 
 export interface RuntimeInputEvent {
   text: string;
@@ -205,10 +226,12 @@ export type RuntimeInputResult =
   | { action: "handled" }
   | { action: "transform"; text: string; images?: ImageBlock[] };
 
-export interface RuntimeBeforeAgentStartEvent {
+export interface RuntimeBeforeAgentStartEvent extends RuntimeRunScope {
   prompt: string;
   images?: ImageBlock[];
   systemPrompt: string;
+  /** Content-free provenance for the exact prompt composed by the host. */
+  promptComposition?: PromptCompositionMetadata;
 }
 
 export interface RuntimeBeforeAgentStartResult {
@@ -216,7 +239,7 @@ export interface RuntimeBeforeAgentStartResult {
   systemPrompt?: string;
 }
 
-export interface RuntimeContextEvent {
+export interface RuntimeContextEvent extends RuntimeRunScope {
   messages: CanonicalMessage[];
 }
 
@@ -224,14 +247,11 @@ export interface RuntimeContextResult {
   messages?: CanonicalMessage[];
 }
 
-export interface RuntimeMessageEvent {
+export interface RuntimeMessageEvent extends RuntimeRunScope {
   message: CanonicalMessage;
 }
 
-export interface RuntimeAgentStartEvent {
-  threadId: string;
-  runId: string;
-  branch?: string;
+export interface RuntimeAgentStartEvent extends RuntimeRunScope {
   provider: ProviderId;
   model: string;
 }
@@ -241,64 +261,51 @@ export type RuntimeAgentOutcome =
   | { status: "cancelled"; reason: string }
   | { status: "failed"; error: AdapterError | { category: "internal"; message: string } };
 
-export interface RuntimeAgentEndEvent {
-  threadId: string;
-  runId: string;
+export interface RuntimeAgentEndEvent extends RuntimeRunScope {
   outcome: RuntimeAgentOutcome;
 }
 
 export interface RuntimeAgentSettledEvent extends RuntimeAgentEndEvent {}
 
-export interface RuntimeTurnStartEvent {
-  threadId: string;
-  runId: string;
+export interface RuntimeTurnStartEvent extends RuntimeRunScope {
   provider: ProviderId;
   model: string;
-  step: number;
+  readonly step: number;
   messageCount: number;
   toolCount: number;
 }
 
-export interface RuntimeTurnEndEvent {
-  threadId: string;
-  runId: string;
+export interface RuntimeTurnEndEvent extends RuntimeRunScope {
   provider: ProviderId;
   model: string;
-  step: number;
+  readonly step: number;
   outcome:
     | { status: "completed"; finishReason: FinishReason; usage?: NormalizedUsage }
     | { status: "failed"; error: AdapterError };
 }
 
-export interface RuntimeMessageStartEvent {
-  threadId: string;
-  runId: string;
-  step: number;
+export interface RuntimeMessageStartEvent extends RuntimeRunScope {
+  readonly step: number;
   role: "assistant";
 }
 
-export type RuntimeMessageUpdateEvent =
+export type RuntimeMessageUpdateEvent = RuntimeRunScope & (
   | {
-      threadId: string;
-      runId: string;
-      step: number;
+      readonly step: number;
       kind: "text";
       part: number;
       delta: string;
     }
   | {
-      threadId: string;
-      runId: string;
-      step: number;
+      readonly step: number;
       kind: "reasoning";
       part: number;
       delta: string;
       visibility: "summary" | "provider_trace";
-    };
+    }
+);
 
-export interface RuntimeToolExecutionStartEvent {
-  threadId: string;
-  runId: string;
+export interface RuntimeToolExecutionStartEvent extends RuntimeRunScope {
   invocation: ToolInvocation;
 }
 
@@ -336,10 +343,8 @@ export type RuntimeProviderRequestFields = Pick<
   "messages" | "tools" | "maxOutputTokens" | "reasoningEffort" | "metadata"
 >;
 
-export interface RuntimeBeforeProviderRequestEvent {
-  threadId: string;
-  runId: string;
-  step: number;
+export interface RuntimeBeforeProviderRequestEvent extends RuntimeRunScope {
+  readonly step: number;
   provider: ProviderId;
   model: string;
   request: RuntimeProviderRequestFields;
@@ -353,15 +358,23 @@ export interface RuntimeBeforeProviderRequestPatch {
   metadata?: Record<string, string> | null;
 }
 
-export interface RuntimeAfterProviderResponseEvent {
-  threadId: string;
-  runId: string;
-  step: number;
+export interface RuntimeAfterProviderResponseEvent extends RuntimeRunScope {
+  readonly step: number;
   provider: ProviderId;
   model: string;
   finishReason: FinishReason;
+  /** One-based transport attempt within this model step. */
+  attempt?: number;
+  /** Present on observed failed attempts; true when the core will retry safely. */
+  willRetry?: boolean;
+  /** Bounded failure metadata. Raw provider response bodies are never exposed. */
+  error?: ProviderResponseFailureMetadata;
+  responseId?: string;
+  requestId?: string;
   rawReason?: string;
   usage?: NormalizedUsage;
+  /** Redacted transport telemetry containing only an allowlisted header projection. */
+  diagnostics?: ProviderResponseDiagnostics;
 }
 
 export interface RuntimeUserShellResult {
@@ -398,16 +411,11 @@ export interface RuntimeMessageEndResult {
   message?: CanonicalMessage;
 }
 
-export interface RuntimeToolCallEvent extends ToolInvocation {
-  /** Session that owns this invocation. */
-  readonly threadId: string;
-  /** Run that produced this invocation. */
-  readonly runId: string;
-  /** Exact branch selected for the run, including the resolved default branch. */
-  readonly branch: string;
-}
+export interface RuntimeToolCallEvent extends ToolInvocation, RuntimeRunScope {}
 
 export interface RuntimeToolCallResult {
+  /** Replaces only the JSON input. Call identity is immutable and the selected tool revalidates this value. */
+  input?: JsonValue;
   block?: boolean;
   reason?: string;
 }
@@ -416,9 +424,10 @@ export interface RuntimeToolCallReduction {
   invocation: RuntimeToolCallEvent;
   blocked: boolean;
   reason?: string;
+  transformations?: ToolInputTransformationAudit[];
 }
 
-export interface RuntimeToolResultEvent {
+export interface RuntimeToolResultEvent extends RuntimeRunScope {
   invocation: ToolInvocation;
   result: ToolResult;
 }
@@ -776,6 +785,8 @@ export interface RuntimeSessionTreeEvent {
 
 export interface RuntimeSessionBeforeForkEvent {
   sourceThreadId: string;
+  /** Host-selected identity for the prospective copied session. */
+  targetThreadId?: string;
   sourceEventId?: string;
   targetBranch?: string;
 }
@@ -796,7 +807,7 @@ export interface RuntimeTreeResult extends RuntimeSessionGuardResult {
   summary?: { text: string; metadata?: JsonValue };
 }
 
-export interface RuntimeSessionBeforeCompactEvent {
+export interface RuntimeSessionBeforeCompactEvent extends RuntimeRunScope {
   plan: CompactionPlan;
   customInstructions?: string;
   signal: AbortSignal;
@@ -816,7 +827,7 @@ export interface RuntimeBeforeAgentStartReduction {
   systemPrompt: string;
 }
 
-export interface RuntimeSessionCompactEvent {
+export interface RuntimeSessionCompactEvent extends RuntimeRunScope {
   reason: CompactionReason;
   summary: CanonicalMessage;
   sourceMessageIds: string[];
@@ -908,6 +919,53 @@ export interface RuntimeExtensionEventResultMap {
   event: void;
 }
 
+const RUNTIME_RUN_SCOPED_EVENTS: ReadonlySet<RuntimeExtensionEvent> = new Set([
+  "session_before_compact",
+  "session_compact",
+  "before_agent_start",
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "tool_call",
+  "tool_result",
+  "context",
+  "before_provider_request",
+  "after_provider_response",
+]);
+
+const RUNTIME_REQUESTER_THREAD_EVENTS: ReadonlySet<RuntimeExtensionEvent> = new Set([
+  ...RUNTIME_RUN_SCOPED_EVENTS,
+  "session_start",
+  "session_info_changed",
+  "session_end",
+  "session_before_tree",
+  "session_tree",
+  "model_select",
+  "thinking_level_select",
+  "event",
+]);
+
+function freezeRuntimeRunEvent<T>(event: RuntimeExtensionEvent, value: T): T {
+  return RUNTIME_RUN_SCOPED_EVENTS.has(event) ? Object.freeze(value) : value;
+}
+
+function runtimeRequesterThreadId(event: RuntimeExtensionEvent, value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as { threadId?: unknown; sourceThreadId?: unknown; targetThreadId?: unknown };
+  const threadId = event === "session_before_fork"
+    ? record.targetThreadId ?? record.sourceThreadId
+    : RUNTIME_REQUESTER_THREAD_EVENTS.has(event) ? record.threadId : undefined;
+  return typeof threadId === "string" ? threadId : undefined;
+}
+
 export interface RuntimeExtensionListenerContext {
   readonly extensionId: string;
   readonly sourcePath: string;
@@ -958,7 +1016,7 @@ export interface RuntimeToolContext extends ToolContext {
 export interface RuntimeRendererDescription {
   extensionId: string;
   sourcePath: string;
-  kind: "tool" | "session";
+  kind: "tool" | "session" | "editor";
   key: string;
 }
 
@@ -1368,6 +1426,7 @@ export interface RuntimeExtensionApi {
   registerProvider(provider: ProviderAdapter): void;
   registerProviderAuth(descriptor: ProviderAuthDescriptor): void;
   registerToolRenderer(name: string, renderer: RuntimeToolRenderer): void;
+  registerEditorRenderer(renderer: RuntimeEditorRenderer): void;
   getActiveTools(target: RuntimeExtensionSessionTarget): Promise<string[]>;
   getAllTools(target: RuntimeExtensionSessionTarget): Promise<RuntimeToolCatalogEntry[]>;
   /** Runtime extension commands only; prompt, skill, and built-in commands remain host resources. */
@@ -1460,6 +1519,7 @@ interface StagedActivation {
   sharedListeners: Array<{ topic: string; listener: RuntimeSharedEventListener }>;
   autocompleteProviders: RuntimeAutocompleteProvider[];
   editorMiddleware: RuntimeEditorMiddleware[];
+  editorRenderers: RuntimeEditorRenderer[];
   disposers: Array<() => void | Promise<void>>;
   moduleDisposers: Array<() => void | Promise<void>>;
   ui: RuntimeInitialUiOperation[];
@@ -1564,6 +1624,67 @@ function pathInside(root: string, target: string): boolean {
   const local = relative(root, target);
   return local === "" || (local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local));
 }
+
+const runtimeHostModuleExtension = extname(fileURLToPath(import.meta.url));
+const RUNTIME_HOST_IMPORTS = new Map<string, string>([
+  ["rigyn/extensions", new URL(`./index${runtimeHostModuleExtension}`, import.meta.url).href],
+  ["rigyn/providers", new URL(`../providers/index${runtimeHostModuleExtension}`, import.meta.url).href],
+  ["rigyn/tui", new URL(`../tui/index${runtimeHostModuleExtension}`, import.meta.url).href],
+]);
+
+function runtimeImportParentPath(parentURL: string | undefined): string | undefined {
+  if (parentURL === undefined || !parentURL.startsWith("file:")) return undefined;
+  try {
+    return fileURLToPath(parentURL);
+  } catch {
+    return undefined;
+  }
+}
+
+function unsupportedRuntimeHostImport(specifier: string): Error & { code: string } {
+  return Object.assign(
+    new Error(`Runtime extensions may import only documented host modules: ${[...RUNTIME_HOST_IMPORTS.keys()].join(", ")}; ${specifier} is not exposed`),
+    { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" },
+  );
+}
+
+class RuntimeHostImportController {
+  readonly #roots: string[];
+  #hook: ReturnType<typeof registerHooks> | undefined;
+
+  constructor(entries: readonly ExtensionRuntimeEntry[]) {
+    this.#roots = [...new Set(entries.map((entry) => resolve(entry.resourceRoot ?? dirname(entry.sourcePath))))];
+    if (this.#roots.length > MAX_RUNTIME_HOST_IMPORT_ROOTS) {
+      throw new RangeError(`Runtime extension host imports exceed ${MAX_RUNTIME_HOST_IMPORT_ROOTS} package roots`);
+    }
+  }
+
+  refresh(): void {
+    this.#hook?.deregister();
+    const roots = this.#roots;
+    this.#hook = registerHooks({
+      resolve(specifier, context, nextResolve) {
+        const parentPath = runtimeImportParentPath(context.parentURL);
+        if (parentPath === undefined || !roots.some((root) => pathInside(root, parentPath))) {
+          return nextResolve(specifier, context);
+        }
+        const target = RUNTIME_HOST_IMPORTS.get(specifier);
+        if (target !== undefined) return { url: target, shortCircuit: true };
+        if (specifier === "rigyn" || specifier.startsWith("rigyn/")) {
+          throw unsupportedRuntimeHostImport(specifier);
+        }
+        return nextResolve(specifier, context);
+      },
+    });
+  }
+
+  close(): void {
+    this.#hook?.deregister();
+    this.#hook = undefined;
+  }
+}
+
+const runtimeHostImportControllers = new WeakMap<RuntimeExtensionHost, RuntimeHostImportController>();
 
 function extensionDataPaths(
   dataRoot: string,
@@ -2308,8 +2429,8 @@ function observedDurableEvent(event: RuntimeEvent, listenerExtensionId: string):
       return { ...event, usage };
     }
     case "run_failed": {
-      if (!("raw" in event.error)) return event;
-      const { raw: _raw, ...error } = event.error;
+      if (!("retryable" in event.error)) return event;
+      const { raw: _raw, diagnostics: _diagnostics, ...error } = event.error;
       return { ...event, error };
     }
     case "compaction_completed":
@@ -2694,6 +2815,7 @@ function activation(
     sharedListeners: [],
     autocompleteProviders: [],
     editorMiddleware: [],
+    editorRenderers: [],
     disposers: [],
     moduleDisposers: [],
     ui: [],
@@ -3044,6 +3166,17 @@ function activation(
       if (staged.committed) host.registerLiveToolRenderer(staged.entry, staged.generation, name, renderer);
       else staged.toolRenderers.push({ name, renderer });
     },
+    registerEditorRenderer(renderer) {
+      assertActive();
+      if (renderer === null || typeof renderer !== "object" || typeof renderer.render !== "function") {
+        throw new Error("Runtime editor renderer must define render");
+      }
+      if (staged.committed) host.registerLiveEditorRenderer(staged.entry, staged.generation, renderer);
+      else {
+        if (staged.editorRenderers.length > 0) throw new Error("Runtime extension registered a duplicate editor renderer");
+        staged.editorRenderers.push(renderer);
+      }
+    },
     on(event, listener) {
       assertActive();
       if (![
@@ -3101,6 +3234,7 @@ export class RuntimeExtensionHost {
   readonly #commands: OwnedCommand[] = [];
   readonly #autocompleteProviders: OwnedAutocompleteProvider[] = [];
   readonly #editorMiddleware: OwnedEditorMiddleware[] = [];
+  readonly #editorRenderers: Array<OwnedRenderer<RuntimeEditorRenderer>> = [];
   readonly #shortcuts = new Map<string, OwnedShortcut>();
   readonly #flags = new Map<string, OwnedFlag>();
   readonly #flagValues = new Map<string, boolean | string>();
@@ -3120,7 +3254,7 @@ export class RuntimeExtensionHost {
   readonly #activeLifecycleListeners = new Map<RuntimeExtensionGeneration, number>();
   readonly #registrationCleanups: Array<() => void | Promise<void>> = [];
   readonly #changeListeners = new Set<(change: RuntimeExtensionChange) => void>();
-  readonly #toolExecution = new AsyncLocalStorage<{ threadId: string }>();
+  readonly #requesterThread = new AsyncLocalStorage<{ threadId: string }>();
   #liveRegistrationHandler: RuntimeLiveRegistrationHandler | undefined;
   #sessionHandler: RuntimeExtensionSessionHandler | undefined;
   #uiHandler: ((operation: RuntimeInitialUiOperation) => void) | undefined;
@@ -3199,7 +3333,51 @@ export class RuntimeExtensionHost {
         kind: "session",
         key: key.slice(key.lastIndexOf("\0") + 1),
       })),
+      ...this.#editorRenderers.filter((value) => value.generation.active).map((value): RuntimeRendererDescription => ({
+        extensionId: value.entry.extensionId,
+        sourcePath: value.entry.sourcePath,
+        kind: "editor",
+        key: "editor",
+      })),
     ];
+  }
+
+  renderEditor(view: RuntimeEditorRenderView, context: RuntimeUiRenderContext): RuntimeUiBlock | undefined {
+    if (this.#closed) throw new Error("Runtime extension host is closed");
+    if (view === null || typeof view !== "object" || typeof view.text !== "string" || typeof view.label !== "string") {
+      throw new Error("Runtime editor render view is invalid");
+    }
+    bounded(view.text, "Runtime editor render text", 256 * 1024);
+    bounded(view.label, "Runtime editor render label", 4 * 1024);
+    const length = splitGraphemes(view.text).length;
+    if (!Number.isSafeInteger(view.cursor) || view.cursor < 0 || view.cursor > length) {
+      throw new Error("Runtime editor render cursor is invalid");
+    }
+    if ((view.mode !== "normal" && view.mode !== "follow_up") || typeof view.blocked !== "boolean") {
+      throw new Error("Runtime editor render state is invalid");
+    }
+    const safeView = Object.freeze({
+      text: view.text,
+      cursor: view.cursor,
+      label: sanitizeTerminalText(view.label).replaceAll("\n", " "),
+      mode: view.mode,
+      blocked: view.blocked,
+    });
+    const safeContext = sanitizeRuntimeUiRenderContext(context);
+    for (const selected of [...this.#editorRenderers].reverse()) {
+      if (!selected.generation.active) continue;
+      const rendered = this.#renderBlock(selected, "editor", safeContext, (selectedContext) => {
+        const value = selected.renderer.render(safeView, selectedContext);
+        if (value !== undefined && value.cursor === undefined) {
+          throw new Error("Runtime editor renderer must return a cursor");
+        }
+        return value;
+      });
+      if (rendered !== undefined) {
+        return sanitizeRuntimeUiBlock(rendered, { width: safeContext.width, maxLines: safeContext.height });
+      }
+    }
+    return undefined;
   }
 
   renderToolCall(name: string, view: RuntimeToolRenderView, context: RuntimeUiRenderContext): RuntimeUiBlock | undefined {
@@ -3502,7 +3680,7 @@ export class RuntimeExtensionHost {
     const tool = new RuntimeHarnessTool(
       registration,
       (context) => this.#runtimeToolContext(entry, generation, context),
-      async (context, execute) => await this.#toolExecution.run({ threadId: context.threadId }, execute),
+      async (context, execute) => await this.#requesterThread.run({ threadId: context.threadId }, execute),
     );
     const cleanup = this.#liveRegistrationHandler?.registerTool(tool);
     if (cleanup !== undefined) this.#registrationCleanups.push(cleanup);
@@ -4057,7 +4235,7 @@ export class RuntimeExtensionHost {
             ...(selected.requireAllTools === undefined ? {} : { requireAllTools: selected.requireAllTools as boolean }),
           };
     }
-    const requesterThreadId = this.#toolExecution.getStore()?.threadId;
+    const requesterThreadId = this.#requesterThread.getStore()?.threadId;
     return await this.#runSessionOperation(entry, generation, target.signal, "Runtime child run", async (handler, signal) =>
       runtimeChildRunResult(await handler.runChild({
         threadId: target.threadId,
@@ -4081,7 +4259,11 @@ export class RuntimeExtensionHost {
           onStart: (value: RuntimeChildSession) => {
             if (!generation.active) return;
             try {
-              return (record.onStart as (session: RuntimeChildSession) => unknown)(runtimeChildSession(value, "Runtime child start"));
+              const session = runtimeChildSession(value, "Runtime child start");
+              return this.#requesterThread.run(
+                { threadId: session.threadId },
+                () => (record.onStart as (session: RuntimeChildSession) => unknown)(session),
+              );
             } catch (cause) {
               this.addDiagnostic({
                 extensionId: entry.extensionId,
@@ -4095,7 +4277,11 @@ export class RuntimeExtensionHost {
           onEvent: (value: RuntimeChildEvent) => {
             if (!generation.active) return;
             try {
-              return (record.onEvent as (event: RuntimeChildEvent) => unknown)(runtimeChildEvent(value, "Runtime child event"));
+              const event = runtimeChildEvent(value, "Runtime child event");
+              return this.#requesterThread.run(
+                { threadId: event.threadId },
+                () => (record.onEvent as (event: RuntimeChildEvent) => unknown)(event),
+              );
             } catch (cause) {
               this.addDiagnostic({
                 extensionId: entry.extensionId,
@@ -4706,6 +4892,22 @@ export class RuntimeExtensionHost {
     this.#changed("tool_renderer", entry);
   }
 
+  registerLiveEditorRenderer(
+    entry: ExtensionRuntimeEntry,
+    generation: RuntimeExtensionGeneration,
+    renderer: RuntimeEditorRenderer,
+  ): void {
+    this.#assertLive(entry, generation);
+    if (this.#editorRenderers.some((owned) => ownerKey(owned.entry) === ownerKey(entry))) {
+      throw new Error("Runtime extension registered a duplicate editor renderer");
+    }
+    if (this.#editorRenderers.length >= MAX_RUNTIME_EDITOR_RENDERERS) {
+      throw new Error("Runtime editor renderer limit exceeded");
+    }
+    this.#editorRenderers.push({ entry, generation, renderer });
+    this.#changed("editor_renderer", entry);
+  }
+
   registerLiveSessionRenderer(
     entry: ExtensionRuntimeEntry,
     generation: RuntimeExtensionGeneration,
@@ -4727,6 +4929,9 @@ export class RuntimeExtensionHost {
   ): void {
     this.#assertLive(entry, generation);
     const listeners = this.#listeners.get(event) ?? [];
+    if (event === "tool_call" && listeners.length >= MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES) {
+      throw new Error(`Runtime tool_call listeners exceed ${MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES}`);
+    }
     listeners.push({ entry, generation, event, listener });
     this.#listeners.set(event, listeners);
   }
@@ -4804,6 +5009,11 @@ export class RuntimeExtensionHost {
       if (remaining === 0) this.#activeLifecycleListeners.delete(owned.generation);
       else this.#activeLifecycleListeners.set(owned.generation, remaining);
     }
+  }
+
+  #withRequesterThread<T>(event: RuntimeExtensionEvent, value: unknown, operation: () => T): T {
+    const threadId = runtimeRequesterThreadId(event, value);
+    return threadId === undefined ? operation() : this.#requesterThread.run({ threadId }, operation);
   }
 
   #changed(change: RuntimeExtensionChange, entry: ExtensionRuntimeEntry): void {
@@ -5182,9 +5392,14 @@ export class RuntimeExtensionHost {
         const listenerSnapshot = event === "event"
           ? observedEventForListener(snapshot as RuntimeObservedEvent, owned.entry.extensionId)
           : snapshot;
-        await this.#withLifecycleListener(owned, async () => await withAbort(
-          Promise.resolve(owned.listener(cloneBounded(listenerSnapshot, `Runtime ${event} listener event`), context)),
-          listenerSignal,
+        const listenerEvent = freezeRuntimeRunEvent(
+          event,
+          cloneBounded(listenerSnapshot, `Runtime ${event} listener event`),
+        );
+        await this.#withLifecycleListener(owned, async () => await this.#withRequesterThread(
+          event,
+          listenerEvent,
+          async () => await withAbort(Promise.resolve(owned.listener(listenerEvent, context)), listenerSignal),
         ));
       } catch (cause) {
         failures.push(cause);
@@ -5215,8 +5430,9 @@ export class RuntimeExtensionHost {
     step: (
       current: T,
       listener: (value: RuntimeExtensionEventMap[K]) => RuntimeExtensionEventResultMap[K] | Promise<RuntimeExtensionEventResultMap[K]>,
+      entry: ExtensionRuntimeEntry,
     ) => Promise<{ value: T; stop?: boolean }>,
-    options: { failClosed?: (cause: unknown) => T; signal?: AbortSignal } = {},
+    options: { failClosed?: (cause: unknown, current: T) => T; signal?: AbortSignal } = {},
   ): Promise<T> {
     if (this.#closed) throw new Error("Runtime extension host is closed");
     let current = initial;
@@ -5230,9 +5446,13 @@ export class RuntimeExtensionHost {
         listenerSignal.throwIfAborted();
         const context = this.#listenerContext(owned, listenerSignal);
         const ownedListener = owned.listener as unknown as RuntimeExtensionListener<K>;
-        const listener = (value: RuntimeExtensionEventMap[K]) => ownedListener(value, context);
+        const listener = (value: RuntimeExtensionEventMap[K]) => this.#withRequesterThread(
+          event,
+          value,
+          () => ownedListener(freezeRuntimeRunEvent(event, value), context),
+        );
         const next = await this.#withLifecycleListener(owned, async () => await withAbort(
-          step(current, listener),
+          step(current, listener, owned.entry),
           listenerSignal,
         ));
         current = next.value;
@@ -5241,7 +5461,7 @@ export class RuntimeExtensionHost {
         if (listenerSignal.aborted) throw abortError(listenerSignal);
         this.#recordListenerFailure(owned, cause);
         if (options.failClosed !== undefined) {
-          current = options.failClosed(cause);
+          current = options.failClosed(cause, current);
           break;
         }
       }
@@ -5372,6 +5592,7 @@ export class RuntimeExtensionHost {
     const identity = cloneBounded({
       threadId: event.threadId,
       runId: event.runId,
+      branch: event.branch,
       step: event.step,
       provider: event.provider,
       model: event.model,
@@ -5387,17 +5608,31 @@ export class RuntimeExtensionHost {
     }, signal === undefined ? {} : { signal });
   }
 
-  async reduceContext(messages: readonly CanonicalMessage[], signal?: AbortSignal): Promise<CanonicalMessage[]> {
-    return await this.#reduce("context", canonicalMessages([...messages], "Runtime context messages"), async (current, listener) => {
-      const result = await listener({ messages: current });
+  async reduceContext(event: RuntimeContextEvent, signal?: AbortSignal): Promise<CanonicalMessage[]> {
+    const initial = cloneBounded(event, "Runtime context event");
+    const identity = {
+      threadId: initial.threadId,
+      runId: initial.runId,
+      branch: initial.branch,
+      ...(initial.step === undefined ? {} : { step: initial.step }),
+    };
+    return await this.#reduce("context", canonicalMessages(initial.messages, "Runtime context messages"), async (current, listener) => {
+      const result = await listener({ ...identity, messages: current });
       if (result?.messages === undefined) return { value: current };
       return { value: canonicalMessages(result.messages, "Runtime context messages") };
     }, signal === undefined ? {} : { signal });
   }
 
-  async reduceMessageEnd(message: CanonicalMessage, signal?: AbortSignal): Promise<CanonicalMessage> {
-    return await this.#reduce("message_end", canonicalMessages([message], "Runtime message")[0]!, async (current, listener) => {
-      const result = await listener({ message: current });
+  async reduceMessageEnd(event: RuntimeMessageEvent, signal?: AbortSignal): Promise<CanonicalMessage> {
+    const initial = cloneBounded(event, "Runtime message event");
+    const identity = {
+      threadId: initial.threadId,
+      runId: initial.runId,
+      branch: initial.branch,
+      ...(initial.step === undefined ? {} : { step: initial.step }),
+    };
+    return await this.#reduce("message_end", canonicalMessages([initial.message], "Runtime message")[0]!, async (current, listener) => {
+      const result = await listener({ ...identity, message: current });
       if (result?.message === undefined) return { value: current };
       const replacement = canonicalMessages([result.message], "Runtime message replacement")[0]!;
       if (replacement.role !== current.role) throw new Error("Runtime message replacement cannot change the message role");
@@ -5412,23 +5647,52 @@ export class RuntimeExtensionHost {
       invocation: Object.freeze(cloneBounded(event, "Runtime tool call")),
       blocked: false,
     };
-    return await this.#reduce("tool_call", initial, async (current, listener) => {
-      const result = await listener(current.invocation);
-      if (!isJsonValue(current.invocation.input)) throw new Error("Runtime tool call input is not JSON-safe");
-      if (result?.block !== true) return { value: current };
-      const reason = result.reason === undefined ? undefined : bounded(result.reason, "Runtime tool block reason", 16 * 1024);
+    return await this.#reduce("tool_call", initial, async (current, listener, entry) => {
+      const offered = cloneBounded(current.invocation, "Runtime tool call listener input");
+      const result = await listener(Object.freeze(offered));
+      const selected = result === undefined
+        ? undefined
+        : runtimeSessionRecord(result, ["input", "block", "reason"], "Runtime tool_call result");
+      if (selected?.block !== undefined && typeof selected.block !== "boolean") {
+        throw new Error("Runtime tool_call block must be boolean");
+      }
+      if (selected?.reason !== undefined && typeof selected.reason !== "string") {
+        throw new Error("Runtime tool_call reason must be a string");
+      }
+      const candidate = selected?.input === undefined ? offered.input : selected.input;
+      if (!isJsonValue(candidate)) throw new Error("Runtime tool call input is not JSON-safe");
+      const transformed = !isDeepStrictEqual(candidate, current.invocation.input);
+      const invocation: RuntimeToolCallEvent = transformed
+        ? Object.freeze({
+            ...current.invocation,
+            input: cloneBounded(candidate, "Runtime transformed tool input"),
+          })
+        : current.invocation;
+      const transformations = transformed
+        ? [...(current.transformations ?? []), { actor: entry.extensionId }]
+        : current.transformations;
+      if (selected?.block !== true) return {
+        value: {
+          ...current,
+          invocation,
+          ...(transformations === undefined ? {} : { transformations }),
+        },
+      };
+      const reason = selected.reason === undefined ? undefined : bounded(selected.reason, "Runtime tool block reason", 16 * 1024);
       return {
         value: {
-          invocation: current.invocation,
+          invocation,
           blocked: true,
+          ...(transformations === undefined ? {} : { transformations }),
           ...(reason === undefined ? {} : { reason }),
         },
         stop: true,
       };
     }, {
-      failClosed: (cause) => ({
-        invocation: initial.invocation,
+      failClosed: (cause, current) => ({
+        invocation: current.invocation,
         blocked: true,
+        ...(current.transformations === undefined ? {} : { transformations: current.transformations }),
         reason: `Runtime extension failed before tool execution: ${error(cause).message.slice(0, 1024)}`,
       }),
       ...(signal === undefined ? {} : { signal }),
@@ -5437,6 +5701,10 @@ export class RuntimeExtensionHost {
 
   async reduceToolResult(event: RuntimeToolResultEvent, signal?: AbortSignal): Promise<ToolResult> {
     const initial = {
+      threadId: event.threadId,
+      runId: event.runId,
+      branch: event.branch,
+      ...(event.step === undefined ? {} : { step: event.step }),
       invocation: cloneBounded(event.invocation, "Runtime tool invocation"),
       result: validateResult(cloneBounded(event.result, "Runtime tool result")),
     };
@@ -5453,7 +5721,16 @@ export class RuntimeExtensionHost {
         ...(patch.artifacts === undefined ? {} : { artifacts: cloneBounded(patch.artifacts, "Runtime tool artifacts") }),
         ...(patch.images === undefined ? {} : { images: cloneBounded(patch.images, "Runtime tool images") }),
       });
-      return { value: { invocation: current.invocation, result } };
+      return {
+        value: {
+          threadId: current.threadId,
+          runId: current.runId,
+          branch: current.branch,
+          ...(current.step === undefined ? {} : { step: current.step }),
+          invocation: current.invocation,
+          result,
+        },
+      };
     }, signal === undefined ? {} : { signal });
     return validateResult(cloneBounded(reduced.result, "Runtime tool result"));
   }
@@ -5485,6 +5762,10 @@ export class RuntimeExtensionHost {
   async reduceSessionBeforeCompact(event: RuntimeSessionBeforeCompactEvent): Promise<RuntimeSessionBeforeCompactResult> {
     return await this.#reduce("session_before_compact", {} as RuntimeSessionBeforeCompactResult, async (current, listener) => {
       const result = await listener({
+        threadId: event.threadId,
+        runId: event.runId,
+        branch: event.branch,
+        ...(event.step === undefined ? {} : { step: event.step }),
         plan: cloneBounded(event.plan, "Runtime compaction plan"),
         ...(event.customInstructions === undefined ? {} : { customInstructions: event.customInstructions }),
         signal: event.signal,
@@ -5530,7 +5811,7 @@ export class RuntimeExtensionHost {
       if (value === undefined) return undefined;
       return sanitizeRuntimeUiBlock(value, { width: safeContext.width });
     } catch (cause) {
-      const detail = error(cause).message.slice(0, 4096);
+      const detail = defaultSecretRedactor.redact(error(cause).message).slice(0, 4096);
       const failureKey = `${selected.entry.extensionId}\u0000${selected.entry.sourcePath}\u0000${slot}\u0000${detail}`;
       if (!this.#rendererFailureKeys.has(failureKey) && this.#rendererFailureKeys.size < MAX_RENDERER_FAILURE_DIAGNOSTICS) {
         this.#rendererFailureKeys.add(failureKey);
@@ -5580,6 +5861,10 @@ export class RuntimeExtensionHost {
     if (sharedListenerCount + staged.sharedListeners.length > MAX_RUNTIME_SHARED_EVENT_LISTENERS) {
       throw new Error(`Runtime shared event listeners exceed ${MAX_RUNTIME_SHARED_EVENT_LISTENERS}`);
     }
+    const toolCallListenerCount = staged.listeners.filter((listener) => listener.event === "tool_call").length;
+    if ((this.#listeners.get("tool_call")?.length ?? 0) + toolCallListenerCount > MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES) {
+      throw new Error(`Runtime tool_call listeners exceed ${MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES}`);
+    }
     const reservedCommand = commands.find((command) => isBuiltinSlashCommand(command.name));
     if (reservedCommand !== undefined) throw new Error(`Runtime extension command name is reserved: ${reservedCommand.name}`);
     if (providerIds.size !== staged.providers.length || staged.providers.some((provider) => this.#providers.has(provider.id))) throw new Error("Runtime extension registered a duplicate provider");
@@ -5587,6 +5872,9 @@ export class RuntimeExtensionHost {
       throw new Error("Runtime extension registered a duplicate provider auth descriptor");
     }
     if (toolRendererNames.size !== staged.toolRenderers.length || staged.toolRenderers.some((entry) => this.#toolRenderers.has(entry.name))) throw new Error("Runtime extension registered a duplicate tool renderer");
+    if (staged.editorRenderers.length > 1 || this.#editorRenderers.length + staged.editorRenderers.length > MAX_RUNTIME_EDITOR_RENDERERS) {
+      throw new Error("Runtime editor renderer limit exceeded");
+    }
     // Extension tools use first-owner wins across packages. Re-registering within
     // one activation keeps the last definition, matching ordinary map semantics.
     for (const tool of tools) {
@@ -5595,7 +5883,7 @@ export class RuntimeExtensionHost {
         const runtimeTool = new RuntimeHarnessTool(
           tool,
           (context) => this.#runtimeToolContext(staged.entry, staged.generation, context),
-          async (context, execute) => await this.#toolExecution.run({ threadId: context.threadId }, execute),
+          async (context, execute) => await this.#requesterThread.run({ threadId: context.threadId }, execute),
         );
         this.#tools.set(tool.name, runtimeTool);
         this.#toolOwners.set(runtimeTool, {
@@ -5660,6 +5948,11 @@ export class RuntimeExtensionHost {
       entry: staged.entry,
       generation: staged.generation,
       renderer: entry.renderer,
+    });
+    for (const renderer of staged.editorRenderers) this.#editorRenderers.push({
+      entry: staged.entry,
+      generation: staged.generation,
+      renderer,
     });
     for (const entry of sessionRenderers) this.#sessionRenderers.set(
       sessionRendererKey(staged.entry.extensionId, entry.schemaVersion),
@@ -5732,8 +6025,12 @@ export class RuntimeExtensionHost {
       this.#shutdownTimeoutMs,
       "Runtime live registration cleanup",
     ));
+    const hostImports = runtimeHostImportControllers.get(this);
+    runtimeHostImportControllers.delete(this);
+    const moduleDisposers = this.#moduleDisposers.splice(0).reverse();
+    if (hostImports !== undefined) moduleDisposers.unshift(() => hostImports.close());
     failures.push(...await runRuntimeCleanupPhase(
-      this.#moduleDisposers.splice(0).reverse(),
+      moduleDisposers,
       this.#shutdownTimeoutMs,
       "Runtime module loader cleanup",
     ));
@@ -5741,6 +6038,7 @@ export class RuntimeExtensionHost {
     this.#commands.length = 0;
     this.#autocompleteProviders.length = 0;
     this.#editorMiddleware.length = 0;
+    this.#editorRenderers.length = 0;
     this.#shortcuts.clear();
     this.#flags.clear();
     this.#flagValues.clear();
@@ -5827,6 +6125,8 @@ export async function loadRuntimeExtensions(
       ? {}
       : { resourceDiscoveryTimeoutMs: options.resourceDiscoveryTimeoutMs }),
   });
+  const hostImports = new RuntimeHostImportController(entries);
+  runtimeHostImportControllers.set(host, hostImports);
   const loadTimeoutSignal = AbortSignal.timeout(loadTimeoutMs);
   for (const entry of entries) {
     options.signal?.throwIfAborted();
@@ -5852,6 +6152,7 @@ export async function loadRuntimeExtensions(
       if (await withAbort(runtimeEntryUsesCommonJs(entry.sourcePath), signal)) {
         const loader = registerTsxCommonJsLoader({ namespace });
         staged.moduleDisposers.push(async () => loader.unregister());
+        hostImports.refresh();
         importPromise = Promise.resolve().then(() => loader.require(entry.sourcePath, import.meta.url));
       } else {
         const url = pathToFileURL(entry.sourcePath);
@@ -5859,6 +6160,7 @@ export async function loadRuntimeExtensions(
         url.searchParams.set("generation", importGeneration);
         const loader = registerTsxModuleLoader({ namespace });
         staged.moduleDisposers.push(async () => await loader.unregister());
+        hostImports.refresh();
         importPromise = loader.import(url.href, import.meta.url);
       }
       const module = await withAbort(

@@ -483,7 +483,7 @@ export default function activate(api: any) {
       name: "temporary-package",
       version: "1.0.0",
       rigyn: {
-        hostVersion: ">=0.1.0 <0.2.0",
+        hostVersion: ">=0.1.0 <0.3.0",
         extensions: ["extensions"],
         prompts: ["prompts"],
         skills: ["skills"],

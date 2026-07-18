@@ -30,6 +30,7 @@ export const INTERACTIVE_COMMANDS: readonly InteractiveCommandDefinition[] = [
   { name: "copy", syntax: "copy", activePolicy: DEFER, hidden: false, help: true, palette: { id: "copy", label: "Copy last assistant message", detail: "/copy", value: "/copy" } },
   { name: "name", syntax: "name [NAME]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "name", label: "Set session name", detail: "/name [NAME]", value: "/name" } },
   { name: "session", syntax: "session", activePolicy: DEFER, hidden: false, help: true, palette: { id: "session", label: "Show session information", detail: "/session", value: "/session" } },
+  { name: "context", syntax: "context", activePolicy: DEFER, hidden: false, help: true, palette: { id: "context", label: "Show model context provenance", detail: "/context", value: "/context" } },
   { name: "resources", syntax: "resources", activePolicy: DEFER, hidden: false, help: true, palette: { id: "resources", label: "Show loaded resources", detail: "/resources", value: "/resources" } },
   { name: "hotkeys", syntax: "hotkeys", activePolicy: DEFER, hidden: false, help: true, palette: { id: "hotkeys", label: "Show keyboard shortcuts", detail: "/hotkeys", value: "/hotkeys" } },
   { name: "fork", syntax: "fork", activePolicy: DEFER, hidden: false, help: true, palette: { id: "fork", label: "Fork from an earlier message", detail: "/fork", value: "/fork" } },

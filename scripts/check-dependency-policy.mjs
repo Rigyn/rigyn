@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -16,4 +17,4 @@ if (nonExact.length > 0) {
   throw new Error(`Direct dependencies must use exact registry versions:\n${nonExact.join("\n")}`);
 }
 
-process.stdout.write("Direct dependency policy passed.\n");
+writeFileSync(1, "Direct dependency policy passed.\n");

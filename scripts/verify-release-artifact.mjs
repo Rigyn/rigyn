@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { checkReleaseMetadata } from "./check-release-metadata.mjs";
+import { runBoundedCommand } from "./bounded-command.mjs";
 import { resolveNpmInvocation } from "./lifecycle-common.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const SENSITIVE_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const OUTPUT_MARKER = ".rigyn-release-output.json";
 const SHARP_SMOKE_PROGRAM = [
@@ -42,58 +42,6 @@ function parseArguments(argv) {
     expectedPlatform: values.get("--expected-platform"),
     expectedArch: values.get("--expected-arch"),
   };
-}
-
-async function run(command, args, options) {
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  const stdout = [];
-  const stderr = [];
-  let total = 0;
-  let outputFailure;
-  const capture = (target, chunk) => {
-    if (outputFailure !== undefined) return;
-    total += chunk.byteLength;
-    if (total > MAX_OUTPUT_BYTES) {
-      outputFailure = new Error(`${options.label} output exceeded ${MAX_OUTPUT_BYTES} bytes`);
-      child.kill("SIGKILL");
-      return;
-    }
-    target.push(chunk);
-  };
-  child.stdout.on("data", (chunk) => capture(stdout, chunk));
-  child.stderr.on("data", (chunk) => capture(stderr, chunk));
-  const result = await new Promise((resolveResult, reject) => {
-    const timeout = setTimeout(() => {
-      outputFailure = new Error(`${options.label} timed out after ${options.timeoutMs} ms`);
-      child.kill("SIGKILL");
-    }, options.timeoutMs);
-    timeout.unref();
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", (code, signal) => {
-      clearTimeout(timeout);
-      resolveResult({ code, signal });
-    });
-  });
-  const output = {
-    stdout: Buffer.concat(stdout).toString("utf8"),
-    stderr: Buffer.concat(stderr).toString("utf8"),
-  };
-  if (outputFailure !== undefined) throw outputFailure;
-  if (result.code !== 0) {
-    throw new Error(
-      `${options.label} failed${result.code === null ? ` with signal ${result.signal ?? "unknown"}` : ` with exit ${result.code}`}\n${output.stderr.slice(-8192)}`,
-    );
-  }
-  return output;
 }
 
 function isolatedEnvironment(paths) {
@@ -246,7 +194,7 @@ async function main() {
       paths.install,
       archivePath,
     ]);
-    await run(invocation.command, invocation.args, {
+    await runBoundedCommand(invocation.command, invocation.args, {
       cwd: paths.install,
       env: environment,
       timeoutMs: 300_000,
@@ -257,7 +205,7 @@ async function main() {
     assert.equal(packageManifest.name, manifest.product);
     assert.equal(packageManifest.version, manifest.version);
 
-    const cli = await run(process.execPath, [resolve(packageRoot, packageManifest.bin["rigyn"]), "--version"], {
+    const cli = await runBoundedCommand(process.execPath, [resolve(packageRoot, packageManifest.bin["rigyn"]), "--version"], {
       cwd: paths.install,
       env: environment,
       timeoutMs: 30_000,
@@ -280,7 +228,7 @@ async function main() {
 
     const requireFromPackage = createRequire(resolve(packageRoot, "package.json"));
     const sharpEntry = requireFromPackage.resolve("sharp");
-    const sharpSmoke = await run(process.execPath, [
+    const sharpSmoke = await runBoundedCommand(process.execPath, [
       "--input-type=module",
       "--eval",
       SHARP_SMOKE_PROGRAM,
@@ -297,7 +245,7 @@ async function main() {
     const ripgrepModule = await import(pathToFileURL(resolve(packageRoot, "dist/tools/ripgrep.js")).href);
     const ripgrep = await ripgrepModule.resolveRipgrep({ environment: { PATH: "" } });
     assert.equal(typeof ripgrep, "string", "Bundled ripgrep is unavailable");
-    const ripgrepVersion = await run(ripgrep, ["--version"], {
+    const ripgrepVersion = await runBoundedCommand(ripgrep, ["--version"], {
       cwd: paths.install,
       env: { ...environment, PATH: "" },
       timeoutMs: 30_000,
@@ -307,12 +255,12 @@ async function main() {
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
-  process.stdout.write(`Verified ${manifest.archive.file} on ${expectedPlatform}/${expectedArch}.\n`);
+  writeFileSync(1, `Verified ${manifest.archive.file} on ${expectedPlatform}/${expectedArch}.\n`);
 }
 
 try {
   await main();
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  writeFileSync(2, `${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exitCode = 1;
 }

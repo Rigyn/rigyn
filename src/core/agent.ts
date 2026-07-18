@@ -15,11 +15,14 @@ import type {
   PromptCompositionMetadata,
   ProviderAdapter,
   ProviderRequest,
+  ProviderResponseDiagnostics,
+  ProviderResponseFailureMetadata,
   ProviderState,
   ToolDefinition,
   ToolCallBlock,
   ToolResultBlock,
 } from "./types.js";
+import { validateProviderResponseDiagnostics } from "./provider-diagnostics.js";
 import { isNormalizedUsage, normalizedContextTokens } from "./usage.js";
 import {
   DEFAULT_RETRY_POLICY,
@@ -56,14 +59,31 @@ import { isJsonValue, type JsonValue } from "./json.js";
 
 const DEFAULT_AGENT_MAX_STEPS = 64;
 
+export interface AgentExtensionRunScope {
+  readonly threadId: ThreadId;
+  readonly runId: RunId;
+  /** Exact branch when the owning host can resolve it. */
+  readonly branch?: string;
+  readonly step?: number;
+}
+
 export interface AgentExtensionReducers {
-  beforeAgentStart?(event: {
+  beforeAgentStart?(event: AgentExtensionRunScope & {
     prompt: string;
     images?: ImageBlock[];
     systemPrompt: string;
+    promptComposition?: PromptCompositionMetadata;
   }, signal: AbortSignal): Promise<{ messages: CanonicalMessage[]; systemPrompt: string }>;
-  context?(messages: readonly CanonicalMessage[], signal: AbortSignal): Promise<CanonicalMessage[]>;
-  messageEnd?(message: CanonicalMessage, signal: AbortSignal): Promise<CanonicalMessage>;
+  context?(
+    messages: readonly CanonicalMessage[],
+    signal: AbortSignal,
+    scope: AgentExtensionRunScope,
+  ): Promise<CanonicalMessage[]>;
+  messageEnd?(
+    message: CanonicalMessage,
+    signal: AbortSignal,
+    scope: AgentExtensionRunScope,
+  ): Promise<CanonicalMessage>;
   beforeProviderRequest?(
     event: AgentBeforeProviderRequestEvent,
     signal: AbortSignal,
@@ -75,9 +95,7 @@ export type AgentProviderRequestFields = Pick<
   "messages" | "tools" | "maxOutputTokens" | "reasoningEffort" | "metadata"
 >;
 
-export interface AgentBeforeProviderRequestEvent {
-  threadId: ThreadId;
-  runId: RunId;
+export interface AgentBeforeProviderRequestEvent extends AgentExtensionRunScope {
   step: number;
   provider: ProviderAdapter["id"];
   model: string;
@@ -310,6 +328,7 @@ export interface AgentLifecycleObserver {
   afterRun?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     outcome:
       | { status: "completed"; finishReason: FinishReason }
       | { status: "cancelled"; reason: string }
@@ -318,6 +337,7 @@ export interface AgentLifecycleObserver {
   beforeModel?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     provider: ProviderAdapter["id"];
     model: string;
     step: number;
@@ -327,6 +347,7 @@ export interface AgentLifecycleObserver {
   afterModel?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     provider: ProviderAdapter["id"];
     model: string;
     step: number;
@@ -337,16 +358,24 @@ export interface AgentLifecycleObserver {
   afterProviderResponse?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     provider: ProviderAdapter["id"];
     model: string;
     step: number;
     finishReason: FinishReason;
+    attempt?: number;
+    willRetry?: boolean;
+    error?: ProviderResponseFailureMetadata;
+    responseId?: string;
+    requestId?: string;
     rawReason?: string;
     usage?: NormalizedUsage;
+    diagnostics?: ProviderResponseDiagnostics;
   }, signal: AbortSignal): Promise<void> | void;
   beforeCompaction?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     plan: CompactionPlan;
     sourceMessageIds: string[];
     estimatedTokens: number;
@@ -357,6 +386,7 @@ export interface AgentLifecycleObserver {
   afterCompaction?(event: {
     threadId: ThreadId;
     runId: RunId;
+    branch?: string;
     sourceMessageIds: string[];
     summaryMessageId: string;
     estimatedTokens: number;
@@ -536,14 +566,62 @@ function providerUsage(value: unknown): NormalizedUsage {
   return structuredClone(value);
 }
 
+function validatedProviderError(value: AdapterError): AdapterError {
+  if (value.diagnostics === undefined) return value;
+  try {
+    return { ...value, diagnostics: validateProviderResponseDiagnostics(value.diagnostics) };
+  } catch {
+    throw new ProviderFailure({
+      category: "protocol",
+      message: "Provider returned invalid response diagnostics",
+      retryable: false,
+      partial: true,
+      bodyStarted: true,
+    });
+  }
+}
+
+function boundedProviderTelemetryText(value: string, maximumBytes = 4 * 1024): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
+  const encoded = Buffer.from(normalized, "utf8");
+  if (encoded.byteLength <= maximumBytes) return normalized;
+  return encoded.subarray(0, maximumBytes).toString("utf8").replace(/\uFFFD+$/u, "");
+}
+
+function providerResponseFailureMetadata(value: AdapterError): ProviderResponseFailureMetadata {
+  return {
+    category: value.category,
+    message: boundedProviderTelemetryText(value.message),
+    retryable: value.retryable === true,
+    partial: value.partial === true,
+    ...(Number.isSafeInteger(value.httpStatus) && value.httpStatus! >= 100 && value.httpStatus! <= 599
+      ? { httpStatus: value.httpStatus }
+      : {}),
+    ...(typeof value.providerCode === "string"
+      ? { providerCode: boundedProviderTelemetryText(value.providerCode) }
+      : {}),
+    ...(typeof value.requestId === "string"
+      ? { requestId: boundedProviderTelemetryText(value.requestId) }
+      : {}),
+    ...(Number.isSafeInteger(value.retryAfterMs) && value.retryAfterMs! >= 0
+      ? { retryAfterMs: value.retryAfterMs }
+      : {}),
+    ...(typeof value.bodyStarted === "boolean" ? { bodyStarted: value.bodyStarted } : {}),
+  };
+}
+
 interface StepResult {
   message: CanonicalMessage;
   text: string;
   finishReason: FinishReason;
+  attempt: number;
   rawReason?: string;
+  responseId?: string;
+  requestId?: string;
   state: ProviderState;
   toolCalls: ToolCallBlock[];
   usage?: NormalizedUsage;
+  diagnostics?: ProviderResponseDiagnostics;
 }
 
 interface PartialCall {
@@ -629,10 +707,11 @@ async function reduceMessage(
   reducers: AgentExtensionReducers | undefined,
   value: CanonicalMessage,
   signal: AbortSignal,
+  scope: AgentExtensionRunScope,
 ): Promise<CanonicalMessage> {
   if (reducers?.messageEnd === undefined) return value;
   signal.throwIfAborted();
-  const reduced = await reducers.messageEnd(value, signal);
+  const reduced = await reducers.messageEnd(value, signal, scope);
   signal.throwIfAborted();
   assertMessageReplacement(value, reduced);
   return reduced;
@@ -642,9 +721,10 @@ async function reduceQueuedUserMessage(
   reducers: AgentExtensionReducers | undefined,
   value: QueuedRunMessage,
   signal: AbortSignal,
+  scope: AgentExtensionRunScope,
 ): Promise<CanonicalMessage> {
   beginQueuedRunDelivery(value);
-  return durableQueuedMessage(value, await reduceMessage(reducers, queuedUserMessage(value), signal));
+  return durableQueuedMessage(value, await reduceMessage(reducers, queuedUserMessage(value), signal, scope));
 }
 
 function effectiveSystemContext(
@@ -1062,6 +1142,12 @@ export class AgentRunner {
     const runId = createId("run");
     const signal = control.abortController.signal;
     const sink = this.#events(request.threadId, runId, request.branch, signal);
+    const extensionScope = (scopeStep?: number): AgentExtensionRunScope => Object.freeze({
+      threadId: request.threadId,
+      runId,
+      ...(request.branch === undefined ? {} : { branch: request.branch }),
+      ...(scopeStep === undefined ? {} : { step: scopeStep }),
+    });
     const maxSteps = request.maxSteps ?? DEFAULT_AGENT_MAX_STEPS;
     let step = 0;
     let finalText = "";
@@ -1140,6 +1226,7 @@ export class AgentRunner {
           () => this.#lifecycle.afterRun?.({
             threadId: request.threadId,
             runId,
+            ...(request.branch === undefined ? {} : { branch: request.branch }),
             outcome: { status: "completed", finishReason: "stop" },
           }, signal),
           sink,
@@ -1161,11 +1248,15 @@ export class AgentRunner {
         ?.content.find((block) => block.type === "text")?.text ?? "";
       const beforeAgent = request.extensions?.beforeAgentStart === undefined
         ? { messages: [] as CanonicalMessage[], systemPrompt: baseSystemPrompt }
-        : await request.extensions.beforeAgentStart({
+        : await request.extensions.beforeAgentStart(Object.freeze({
+            ...extensionScope(),
             prompt: request.prompt,
             ...(request.images === undefined ? {} : { images: cloneImages(request.images)! }),
             systemPrompt: baseSystemPrompt,
-          }, signal);
+            ...(request.promptComposition === undefined
+              ? {}
+              : { promptComposition: structuredClone(request.promptComposition) }),
+          }), signal);
       signal.throwIfAborted();
       if (
         typeof beforeAgent.systemPrompt !== "string" ||
@@ -1189,13 +1280,15 @@ export class AgentRunner {
           ...(request.images ?? []),
         ]),
         ...(request.displayPrompt === undefined ? {} : { displayText: request.displayPrompt }),
-      }, signal);
+      }, signal, extensionScope());
       if (request.promptQueueMessage !== undefined) {
         user = durableQueuedMessage(request.promptQueueMessage, user);
       }
       if (user.content.length === 0) throw new Error("User prompt has no text or images");
       const injected: CanonicalMessage[] = [];
-      for (const value of beforeAgent.messages) injected.push(await reduceMessage(request.extensions, value, signal));
+      for (const value of beforeAgent.messages) {
+        injected.push(await reduceMessage(request.extensions, value, signal, extensionScope()));
+      }
       for (const initial of request.initialMessages ?? []) {
         await sink.emit({ type: "message_appended", message: initial });
       }
@@ -1221,7 +1314,7 @@ export class AgentRunner {
       for (const queued of queuedPromptMessages) {
         await sink.emit({
           type: "message_appended",
-          message: await reduceQueuedUserMessage(request.extensions, queued, signal),
+          message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope()),
         });
         completeQueuedRunDelivery(queued);
       }
@@ -1230,7 +1323,7 @@ export class AgentRunner {
       while (maxSteps === undefined || step < maxSteps) {
         if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
         for (const steering of control.takeSteeringMessages()) {
-          const steeringMessage = await reduceQueuedUserMessage(request.extensions, steering, signal);
+          const steeringMessage = await reduceQueuedUserMessage(request.extensions, steering, signal, extensionScope(step || undefined));
           await sink.emit({ type: "message_appended", message: steeringMessage });
           completeQueuedRunDelivery(steering);
           await sink.emit({ type: "steering_queued" });
@@ -1347,7 +1440,7 @@ export class AgentRunner {
         let requestContext = context;
         const instructionMessageId = requestContext.findLast((entry) => entry.purpose === "instructions")?.id;
         if (request.extensions?.context !== undefined) {
-          const reduced = await request.extensions.context(requestContext, signal);
+          const reduced = await request.extensions.context(requestContext, signal, extensionScope(step));
           signal.throwIfAborted();
           if (!sameValue(requestContext, reduced)) {
             providerState = undefined;
@@ -1404,6 +1497,7 @@ export class AgentRunner {
             validatedProviderRequestFields(await request.extensions.beforeProviderRequest({
               threadId: request.threadId,
               runId,
+              ...(request.branch === undefined ? {} : { branch: request.branch }),
               step,
               provider: turnRequest.provider.id,
               model: turnRequest.model,
@@ -1492,6 +1586,7 @@ export class AgentRunner {
           await this.#lifecycle.beforeModel?.({
             threadId: request.threadId,
             runId,
+            ...(request.branch === undefined ? {} : { branch: request.branch }),
             provider: turnRequest.provider.id,
             model: turnRequest.model,
             step,
@@ -1503,6 +1598,7 @@ export class AgentRunner {
             providerRequest,
             request.threadId,
             runId,
+            request.branch,
             sink,
             signal,
             step,
@@ -1515,6 +1611,7 @@ export class AgentRunner {
             () => this.#lifecycle.afterModel?.({
               threadId: request.threadId,
               runId,
+              ...(request.branch === undefined ? {} : { branch: request.branch }),
               provider: turnRequest.provider.id,
               model: turnRequest.model,
               step,
@@ -1539,6 +1636,7 @@ export class AgentRunner {
           () => this.#lifecycle.afterModel?.({
             threadId: request.threadId,
             runId,
+            ...(request.branch === undefined ? {} : { branch: request.branch }),
             provider: turnRequest.provider.id,
             model: turnRequest.model,
             step,
@@ -1555,12 +1653,18 @@ export class AgentRunner {
           () => this.#lifecycle.afterProviderResponse?.({
             threadId: request.threadId,
             runId,
+            ...(request.branch === undefined ? {} : { branch: request.branch }),
             provider: turnRequest.provider.id,
             model: turnRequest.model,
             step,
             finishReason: response.finishReason,
+            attempt: response.attempt,
+            willRetry: false,
+            ...(response.responseId === undefined ? {} : { responseId: response.responseId }),
+            ...(response.requestId === undefined ? {} : { requestId: response.requestId }),
             ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
             ...(response.usage === undefined ? {} : { usage: response.usage }),
+            ...(response.diagnostics === undefined ? {} : { diagnostics: response.diagnostics }),
           }, signal),
           sink,
           "extension_provider_response_after",
@@ -1587,7 +1691,7 @@ export class AgentRunner {
           continue;
         }
         const originalAssistant = response.message;
-        response.message = await reduceMessage(request.extensions, originalAssistant, signal);
+        response.message = await reduceMessage(request.extensions, originalAssistant, signal, extensionScope(step));
         response.text = textOf(response.message);
         const continuationSafe = sameValue(
           { role: originalAssistant.role, content: originalAssistant.content, provider: originalAssistant.provider },
@@ -1623,7 +1727,7 @@ export class AgentRunner {
             for (const queued of steering) {
               await sink.emit({
                 type: "message_appended",
-                message: await reduceQueuedUserMessage(request.extensions, queued, signal),
+                message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope(step)),
               });
               completeQueuedRunDelivery(queued);
             }
@@ -1635,6 +1739,7 @@ export class AgentRunner {
             () => this.#lifecycle.afterRun?.({
               threadId: request.threadId,
               runId,
+              ...(request.branch === undefined ? {} : { branch: request.branch }),
               outcome: { status: "completed", finishReason: response.finishReason },
             }, signal),
             sink,
@@ -1706,8 +1811,18 @@ export class AgentRunner {
             signal,
             runId,
             threadId: request.threadId,
+            step,
           },
           {
+            transformed: async (invocation, audit) => {
+              await sink.emit({
+                type: "tool_input_transformed",
+                callId: invocation.callId,
+                name: invocation.name,
+                index: invocation.index,
+                actors: audit.map((entry) => entry.actor),
+              });
+            },
             received: async (invocation) => {
               await sink.emit({
                 type: "tool_requested",
@@ -1760,7 +1875,7 @@ export class AgentRunner {
         });
         await sink.emit({
           type: "message_appended",
-          message: await reduceMessage(request.extensions, message("tool", toolBlocks), signal),
+          message: await reduceMessage(request.extensions, message("tool", toolBlocks), signal, extensionScope(step)),
         });
         // Capture steering accepted while tools were executing, not only the
         // messages that were already queued when the assistant turn ended.
@@ -1768,7 +1883,7 @@ export class AgentRunner {
         for (const queued of steering) {
           await sink.emit({
             type: "message_appended",
-            message: await reduceQueuedUserMessage(request.extensions, queued, signal),
+            message: await reduceQueuedUserMessage(request.extensions, queued, signal, extensionScope(step)),
           });
           completeQueuedRunDelivery(queued);
         }
@@ -1785,6 +1900,7 @@ export class AgentRunner {
             () => this.#lifecycle.afterRun?.({
               threadId: request.threadId,
               runId,
+              ...(request.branch === undefined ? {} : { branch: request.branch }),
               outcome: { status: "completed", finishReason: "stop" },
             }, signal),
             sink,
@@ -1821,6 +1937,7 @@ export class AgentRunner {
           () => this.#lifecycle.afterRun?.({
             threadId: request.threadId,
             runId,
+            ...(request.branch === undefined ? {} : { branch: request.branch }),
             outcome: { status: "cancelled", reason: cancellation.message },
           }, signal),
           sink,
@@ -1843,7 +1960,12 @@ export class AgentRunner {
       await sink.emit({ type: "run_state", state: "failed" });
       await sink.emit({ type: "run_failed", error: detail });
       await this.#afterLifecycle(
-        () => this.#lifecycle.afterRun?.({ threadId: request.threadId, runId, outcome: { status: "failed", error: detail } }, signal),
+        () => this.#lifecycle.afterRun?.({
+          threadId: request.threadId,
+          runId,
+          ...(request.branch === undefined ? {} : { branch: request.branch }),
+          outcome: { status: "failed", error: detail },
+        }, signal),
         sink,
         "extension_run_after",
         false,
@@ -1866,6 +1988,7 @@ export class AgentRunner {
     const directive = await this.#lifecycle.beforeCompaction?.({
       threadId: request.threadId,
       runId,
+      ...(request.branch === undefined ? {} : { branch: request.branch }),
       plan,
       sourceMessageIds: [...plan.sourceMessageIds],
       estimatedTokens: plan.estimatedTokensBefore,
@@ -1910,6 +2033,7 @@ export class AgentRunner {
       () => this.#lifecycle.afterCompaction?.({
         threadId: request.threadId,
         runId,
+        ...(request.branch === undefined ? {} : { branch: request.branch }),
         sourceMessageIds: [...summary.sourceMessageIds],
         summaryMessageId: observedSummary.id,
         estimatedTokens: projection.estimatedTokens,
@@ -1950,6 +2074,7 @@ export class AgentRunner {
     request: ProviderRequest,
     _threadId: ThreadId,
     _runId: RunId,
+    branch: string | undefined,
     sink: EventSink,
     signal: AbortSignal,
     step: number,
@@ -1957,12 +2082,15 @@ export class AgentRunner {
   ): Promise<StepResult> {
     for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
       let bodyStarted = false;
+      let requestId: string | undefined;
+      let responseDiagnostics: ProviderResponseDiagnostics | undefined;
       try {
         const blocks: ContentBlock[] = [];
         const textParts = new Map<number, string>();
         const calls = new Map<number, PartialCall>();
         let terminal: AdapterEvent & { type: "response_end" } | undefined;
         let responseStarted = false;
+        let responseId: string | undefined;
         let usage: NormalizedUsage | undefined;
         for await (const event of abortableAsyncIterable(provider.stream(request, signal), signal)) {
           if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
@@ -1980,16 +2108,32 @@ export class AgentRunner {
                 });
               }
               responseStarted = true;
+              responseId = event.responseId === undefined
+                ? undefined
+                : boundedProviderIdentity(event.responseId, "response ID", 4_096);
+              requestId = event.requestId === undefined
+                ? undefined
+                : boundedProviderIdentity(event.requestId, "request ID", 4_096);
+              if (event.diagnostics === undefined) responseDiagnostics = undefined;
+              else {
+                try {
+                  responseDiagnostics = validateProviderResponseDiagnostics(event.diagnostics);
+                } catch {
+                  throw new ProviderFailure({
+                    category: "protocol",
+                    message: "Provider returned invalid response diagnostics",
+                    retryable: false,
+                    partial: true,
+                    bodyStarted: true,
+                  });
+                }
+              }
               await sink.emit({
                 type: "provider_response_started",
                 step,
                 model: boundedProviderIdentity(event.model, "response model", 1_024),
-                ...(event.responseId === undefined
-                  ? {}
-                  : { responseId: boundedProviderIdentity(event.responseId, "response ID", 4_096) }),
-                ...(event.requestId === undefined
-                  ? {}
-                  : { requestId: boundedProviderIdentity(event.requestId, "request ID", 4_096) }),
+                ...(responseId === undefined ? {} : { responseId }),
+                ...(requestId === undefined ? {} : { requestId }),
               });
               break;
             case "text_delta":
@@ -2033,7 +2177,7 @@ export class AgentRunner {
               terminal = event;
               break;
             case "error":
-              throw new ProviderFailure(event.error);
+              throw new ProviderFailure(validatedProviderError(event.error));
           }
         }
         if (terminal === undefined) throw new ProviderFailure({
@@ -2064,13 +2208,17 @@ export class AgentRunner {
           message: message("assistant", blocks, provider.id),
           text,
           finishReason: terminal.reason,
+          attempt,
+          ...(responseId === undefined ? {} : { responseId }),
+          ...(requestId === undefined ? {} : { requestId }),
           ...(terminal.rawReason === undefined ? {} : { rawReason: terminal.rawReason }),
           state: terminal.state,
           toolCalls,
           ...(usage === undefined ? {} : { usage }),
+          ...(responseDiagnostics === undefined ? {} : { diagnostics: responseDiagnostics }),
         };
       } catch (error) {
-        const detail = error instanceof ProviderFailure
+        let detail = error instanceof ProviderFailure
           ? error.detail
           : signal.aborted
             ? abortedError(signal.reason)
@@ -2081,8 +2229,35 @@ export class AgentRunner {
                 partial: bodyStarted,
                 bodyStarted,
               };
+        if (detail.diagnostics === undefined && responseDiagnostics !== undefined) {
+          detail = { ...detail, diagnostics: responseDiagnostics };
+        }
+        if (detail.requestId === undefined && requestId !== undefined) detail = { ...detail, requestId };
+        const willRetry = detail.category !== "cancelled" && mayRetry(detail, attempt, retry, bodyStarted);
+        const diagnostics = detail.diagnostics;
+        if (diagnostics !== undefined) {
+          const failure = providerResponseFailureMetadata(detail);
+          await this.#afterLifecycle(
+            () => this.#lifecycle.afterProviderResponse?.({
+              threadId: _threadId,
+              runId: _runId,
+              ...(branch === undefined ? {} : { branch }),
+              provider: provider.id,
+              model: request.model,
+              step,
+              finishReason: "error",
+              attempt,
+              willRetry,
+              error: failure,
+              ...(failure.requestId === undefined ? {} : { requestId: failure.requestId }),
+              diagnostics,
+            }, signal),
+            sink,
+            "extension_provider_response_after",
+          );
+        }
         if (detail.category === "cancelled") throw new ProviderFailure(detail);
-        if (!mayRetry(detail, attempt, retry, bodyStarted)) throw new ProviderFailure(detail);
+        if (!willRetry) throw new ProviderFailure(detail);
         const milliseconds = retryDelay(detail, attempt, retry, this.#random);
         await sink.emit({ type: "retry_scheduled", attempt: attempt + 1, delayMs: milliseconds, category: detail.category });
         try {

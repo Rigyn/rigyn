@@ -37,6 +37,8 @@ Treat every bundled example and installed documentation file as read-only refere
 | Dynamic active-tool catalog or loader | `../../../examples/dynamic-tools/` |
 | Custom session compaction lifecycle | `../../../examples/custom-compaction/` |
 | Fixed MCP stdio server boundary | `../../../examples/mcp-stdio/` |
+| Parallel child delegation or agent-style tool | `../../../examples/child-coordinator/` |
+| Destructive or privileged action requiring approval | `../../../examples/approval-gate/` |
 | Provider adapter and model catalog | `../../../examples/custom-provider/` |
 | Provider adapter with API key, OAuth, or ambient authentication | `../../../examples/brokered-provider/` |
 | Durable extension-owned session state | `../../../examples/session-notes/` |

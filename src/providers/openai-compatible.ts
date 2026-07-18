@@ -11,6 +11,7 @@ import type {
   ProviderAdapter,
   ProviderId,
   ProviderRequest,
+  ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { catalogId, catalogLimit } from "./catalog.js";
@@ -44,6 +45,7 @@ import {
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
+  responseDiagnostics,
   readJsonResponse,
   resolveToken,
   type TokenSource,
@@ -222,6 +224,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
     let partial = false;
     let terminal = false;
     let requestId: string | undefined;
+    let diagnostics: ProviderResponseDiagnostics | undefined;
 
     try {
       const headers = await this.#headers(signal);
@@ -251,6 +254,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
         redirect: "error",
       });
       requestId = requestIdFromHeaders(response.headers);
+      diagnostics = responseDiagnostics(response);
       await assertResponseOk(response);
 
       let started = false;
@@ -289,7 +293,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
         responseModel = asString(chunk.model) ?? responseModel;
         if (!started) {
           started = true;
-          const start: AdapterEvent = { type: "response_start", model: responseModel };
+          const start: AdapterEvent = { type: "response_start", model: responseModel, diagnostics };
           if (responseId !== undefined) start.responseId = responseId;
           if (requestId !== undefined) start.requestId = requestId;
           yield start;
@@ -433,7 +437,7 @@ class ChatCompletionsAdapter implements ProviderAdapter {
     } catch (error) {
       if (!terminal) {
         terminal = true;
-        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId }) };
+        yield { type: "error", error: normalizeError(this.id, error, { partial, signal, requestId, diagnostics }) };
       }
     }
   }
