@@ -1713,11 +1713,15 @@ async function secureExtensionDataDirectory(path: string): Promise<string> {
   return canonical;
 }
 
-async function prepareExtensionDataPaths(paths: RuntimeExtensionDataPaths): Promise<RuntimeExtensionDataPaths> {
-  const [user, workspace] = await Promise.all([
-    secureExtensionDataDirectory(paths.user),
-    secureExtensionDataDirectory(paths.workspace),
-  ]);
+async function prepareExtensionDataPaths(
+  paths: RuntimeExtensionDataPaths,
+  signal: AbortSignal,
+): Promise<RuntimeExtensionDataPaths> {
+  signal.throwIfAborted();
+  const user = await secureExtensionDataDirectory(paths.user);
+  signal.throwIfAborted();
+  const workspace = await secureExtensionDataDirectory(paths.workspace);
+  signal.throwIfAborted();
   return Object.freeze({ user, workspace });
 }
 
@@ -6139,10 +6143,19 @@ export async function loadRuntimeExtensions(
       entrySignal.throwIfAborted();
       const bytes = await withAbort(readFile(entry.sourcePath), entrySignal);
       if (sha256(bytes) !== entry.sha256) throw new Error("Runtime entry changed after extension discovery");
-      const dataPaths = await withAbort(
-        prepareExtensionDataPaths(extensionDataPaths(dataRoot, workspace, entry)),
+      const dataPathPreparation = prepareExtensionDataPaths(
+        extensionDataPaths(dataRoot, workspace, entry),
         entrySignal,
       );
+      let dataPaths: RuntimeExtensionDataPaths;
+      try {
+        dataPaths = await withAbort(dataPathPreparation, entrySignal);
+      } catch (cause) {
+        // Filesystem directory preparation cannot be cancelled. Drain it so a
+        // timed-out load cannot recreate extension state after the host returns.
+        await dataPathPreparation.catch(() => undefined);
+        throw cause;
+      }
       const activationResult = activation(entry, workspace, dataPaths, host);
       staged = activationResult.staged;
       const signal = AbortSignal.any([staged.generation.abortController.signal, entrySignal]);

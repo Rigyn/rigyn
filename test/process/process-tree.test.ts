@@ -6,9 +6,10 @@ import { terminateTrackedProcessGroups } from "../../src/process/active-groups.j
 import { runProcess } from "../../src/process/runner.js";
 
 function inheritedPipeParent(descendantSource: string): string {
+  // libuv's Windows job object kills non-detached children when their spawning process exits.
   return [
     "const { spawn } = require('node:child_process')",
-    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] })`,
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}], { detached: process.platform === 'win32', stdio: ['ignore', 'inherit', 'inherit', 'ipc'], windowsHide: true })`,
     "child.once('message', () => process.exit(0))",
   ].join(";");
 }

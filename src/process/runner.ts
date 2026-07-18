@@ -178,7 +178,7 @@ export async function runProcess(spec: CommandSpec, signal: AbortSignal): Promis
       if ((!timedOut && !cancelled) || killEscalated) beginDrain();
     });
     child.once("close", (exitCode, exitSignal) => {
-      // Windows can close the direct child while inherited pipes remain readable.
+      // Keep the bounded post-exit drain authoritative until both pipes reach readable EOF.
       if (drainMaximum !== undefined && (!child.stdout.readableEnded || !child.stderr.readableEnded)) return;
       finish(parentOutcome ?? { exitCode, signal: exitSignal });
     });

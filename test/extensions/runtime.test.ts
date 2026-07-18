@@ -695,6 +695,7 @@ test("runtime extension loading has one aggregate deadline across entries", { ti
   assert.ok(diagnostics.some((message) => /activation timed out after 40ms/u.test(message)));
   assert.ok(diagnostics.some((message) => /load timed out after 65ms/u.test(message)));
   await host.close();
+  await rm(join(root, ".rigyn"), { recursive: true, force: true });
   delete (globalThis as Record<string, unknown>).__runtimeLoadStarts;
   delete (globalThis as Record<string, unknown>).__runtimeLoadFinalActivated;
 });
