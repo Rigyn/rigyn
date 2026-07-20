@@ -53,6 +53,7 @@ async function command(commandValue: string, args: readonly string[], cwd: strin
 
 async function writeExtension(root: string, options: { id?: string; version: string; word: string; marker?: string }): Promise<void> {
   await mkdir(join(root, "prompts"), { recursive: true });
+  await mkdir(join(root, "runtime"), { recursive: true });
   await writeFile(join(root, "extension.json"), `${JSON.stringify({
     schemaVersion: 1,
     id: options.id ?? "remote-reference",
@@ -60,9 +61,11 @@ async function writeExtension(root: string, options: { id?: string; version: str
     version: options.version,
     contributions: {
       prompts: [{ id: "remote-reference", path: "prompts/reference.md" }],
+      runtime: [{ path: "runtime/index.mjs" }],
     },
   }, null, 2)}\n`);
   await writeFile(join(root, "prompts", "reference.md"), `${options.word} {{input}}\n`);
+  await writeFile(join(root, "runtime", "index.mjs"), `export default () => { globalThis.__rigynPackageSourceActivation = ${JSON.stringify(`${options.version}:${options.word}`)}; };\n`);
   if (options.marker !== undefined) {
     const script = `node -e "require('node:fs').writeFileSync(${JSON.stringify(options.marker)}, 'ran')"`;
     await writeFile(join(root, "package.json"), `${JSON.stringify({
@@ -151,6 +154,11 @@ test("package source parser accepts bounded npm and Git forms and rejects unsafe
     source: "npm:@scope/name@latest",
     specifier: "@scope/name@latest",
   });
+  assert.deepEqual(parseExtensionPackageSource("npm:@scope/name@>=1.2.0 <2.0.0"), {
+    kind: "npm",
+    source: "npm:@scope/name@>=1.2.0 <2.0.0",
+    specifier: "@scope/name@>=1.2.0 <2.0.0",
+  });
   assert.deepEqual(parseExtensionPackageSource("https://example.com/owner/repo.git#main"), {
     kind: "git",
     source: "git:https://example.com/owner/repo.git#main",
@@ -235,11 +243,13 @@ await copyFile(sources[specifier], join(destination, "package.tgz"));
   await packages.remove("remote-reference");
 
   const installed = await packages.install("npm:remote-reference@1||2", "user", { allowScripts: true });
+  assert.equal((globalThis as Record<string, unknown>).__rigynPackageSourceActivation, "1.0.0:first");
   assert.equal(installed.version, "1.0.0");
   assert.equal(installed.provenance.kind, "npm");
   assert.equal(installed.provenance.packageName, "rigyn-remote-reference");
   assert.equal(installed.provenance.source, "npm:remote-reference@1||2");
   const updated = await packages.update("remote-reference", "user", "npm:remote-reference@2");
+  assert.equal((globalThis as Record<string, unknown>).__rigynPackageSourceActivation, "2.0.0:second");
   assert.equal(updated.version, "2.0.0");
   assert.equal(updated.provenance.kind, "npm");
   assert.equal(updated.provenance.resolvedVersion, "2.0.0");
@@ -258,6 +268,7 @@ await copyFile(sources[specifier], join(destination, "package.tgz"));
   assert.ok(calls.every((args) => args.includes("--") && args[args.length - 1]?.startsWith("remote-reference@")));
   await packages.remove("remote-reference");
   assert.deepEqual(await packages.list(), []);
+  delete (globalThis as Record<string, unknown>).__rigynPackageSourceActivation;
 });
 
 test("npm archive traversal, links, checksum corruption, and command output overflow fail closed", async (t) => {
@@ -292,7 +303,7 @@ test("npm archive traversal, links, checksum corruption, and command output over
   assert.deepEqual(await packages.list(), []);
 
   const spam = join(root, "spam.mjs");
-  await writeFile(spam, `process.stdout.write("x".repeat(4096));\n`);
+  await writeFile(spam, `import { writeSync } from "node:fs";\nwriteSync(1, "x".repeat(4096));\n`);
   const noisy = new LocalExtensionPackageManager(
     { user: installed },
     { maxCommandOutputBytes: 128 },
@@ -300,6 +311,28 @@ test("npm archive traversal, links, checksum corruption, and command output over
   );
   await assert.rejects(noisy.install("npm:remote-reference@1"), /output exceeded/u);
   assert.deepEqual(await noisy.list(), []);
+});
+
+test("package commands bound inherited output pipes after the parent exits", async (t) => {
+  const root = await temporary(t);
+  const hold = join(root, "hold-pipes.mjs");
+  await writeFile(hold, `
+import { spawn } from "node:child_process";
+const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], {
+  detached: true,
+  stdio: ["ignore", "inherit", "inherit"],
+});
+child.unref();
+`);
+  const packages = new LocalExtensionPackageManager(
+    { user: join(root, "installed") },
+    { sourceTimeoutMs: 10_000 },
+    { npm: { command: process.execPath, prefix: [hold] } },
+  );
+  const started = Date.now();
+  await assert.rejects(packages.install("npm:remote-reference@1"), /output did not reach EOF/u);
+  assert.ok(Date.now() - started < 3_000);
+  assert.deepEqual(await packages.list(), []);
 });
 
 async function gitCommit(repository: string, message: string): Promise<string> {
@@ -329,6 +362,7 @@ test("local Git source records revisions, updates atomically, excludes VCS data,
   const source = `git:${pathToFileURL(repository).href}#main`;
   const packages = new LocalExtensionPackageManager({ user: join(root, "installed") });
   const installed = await packages.install(source);
+  assert.equal((globalThis as Record<string, unknown>).__rigynPackageSourceActivation, "1.0.0:git-first");
   assert.equal(installed.version, "1.0.0");
   assert.equal(installed.provenance.kind, "git");
   assert.equal(installed.provenance.revision, firstRevision);
@@ -339,6 +373,7 @@ test("local Git source records revisions, updates atomically, excludes VCS data,
   await writeExtension(repository, { version: "2.0.0", word: "git-second", marker });
   const secondRevision = await gitCommit(repository, "second");
   const updated = await packages.update("remote-reference");
+  assert.equal((globalThis as Record<string, unknown>).__rigynPackageSourceActivation, "2.0.0:git-second");
   assert.equal(updated.version, "2.0.0");
   assert.equal(updated.provenance.kind, "git");
   assert.equal(updated.provenance.revision, secondRevision);
@@ -354,6 +389,7 @@ test("local Git source records revisions, updates atomically, excludes VCS data,
   await assert.rejects(access(marker), /ENOENT/u);
   await packages.remove("remote-reference");
   assert.deepEqual(await packages.list(), []);
+  delete (globalThis as Record<string, unknown>).__rigynPackageSourceActivation;
 });
 
 test("SSH Git packages use non-interactive agent authentication and preserve pinned source provenance", async (t) => {
@@ -362,6 +398,7 @@ test("SSH Git packages use non-interactive agent authentication and preserve pin
   const fakeGit = join(root, "fake-git.mjs");
   const revision = "d".repeat(40);
   await writeFile(fakeGit, `
+import { writeSync } from "node:fs";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 const [capture, ...args] = process.argv.slice(2);
@@ -383,7 +420,7 @@ if (args.includes("clone")) {
   }));
   await writeFile(join(destination, "prompts", "reference.md"), "ssh {{input}}\\n");
 }
-if (args.includes("rev-parse")) process.stdout.write(${JSON.stringify(revision)} + "\\n");
+if (args.includes("rev-parse")) writeSync(1, ${JSON.stringify(revision)} + "\\n");
 `);
   const previousAgent = process.env.SSH_AUTH_SOCK;
   process.env.SSH_AUTH_SOCK = join(root, "agent.sock");

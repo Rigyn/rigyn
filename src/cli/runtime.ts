@@ -9,8 +9,10 @@ import {
   CrossProcessFileLock,
   EncryptedFileCredentialStore,
   EnvironmentCredentialSource,
+  ExternalCommandCredentialSource,
   ExplicitCredentialSource,
   KeychainCredentialStore,
+  ManagedProviderAuthDirectory,
   PlatformKeychainAdapter,
   probePlatformKeychain,
   ProfiledRefreshingStoredCredentialSource,
@@ -26,12 +28,15 @@ import {
   type CredentialStore,
   type CredentialProfileMetadataStore,
   type AuthCredential,
+  type ExternalCommandCredentialSpec,
   type ProviderAuthBinding,
   refreshAnthropicOAuth,
   refreshGenericOAuthWithFetch,
   refreshGitHubCopilotOAuth,
   authenticatedProviderFetch,
 } from "../auth/index.js";
+import type { OAuthRegistrationConfig } from "../auth/registry.js";
+import { XAI_OAUTH_REGISTRATION, XAI_OAUTH_REGISTRATION_ID } from "../auth/xai.js";
 import {
   assertCanonicalDirectoryCreationPath,
   canonicalExistingPath,
@@ -39,15 +44,18 @@ import {
   resolveConfig,
   TrustStore,
   type HarnessConfig,
+  type JsonObject,
 } from "../config/index.js";
-import type { ProviderAdapter } from "../core/types.js";
+import type { ModelInfo, ModelProtocolFamily, ProviderAdapter } from "../core/types.js";
 import { ProviderRegistry } from "../providers/registry.js";
+import { ProviderWireInterceptorRegistry } from "../providers/wire.js";
 import { signAwsRequest } from "../providers/bedrock.js";
 import { FileModelCatalogStore } from "../providers/model-catalog-store.js";
 import { configuredModelsWithMaintainedCatalog } from "../providers/maintained-model-catalog.js";
 import {
   createProviderAdapter,
   HarnessService,
+  runtimeProviderId,
   type HarnessResourceCatalogSources,
   type HarnessRuntimeResources,
   type RuntimeProviderConfig,
@@ -60,6 +68,7 @@ import {
   discoverExtensions,
   ExtensionCatalog,
   filterExtensionResources,
+  appendRuntimeExtensions,
   loadPromptTemplates,
   loadThemes,
   loadRuntimeExtensions,
@@ -69,6 +78,7 @@ import {
   mergeProjectPackageResourceFilters,
   projectPackageResourceFilters,
   type ExtensionPromptTemplate,
+  type ExtensionRuntimeEntry,
   type ExtensionSource,
   type ExtensionTheme,
   type ProjectPackageCatalogEntry,
@@ -82,6 +92,7 @@ import { expandPath, harnessPaths, type HarnessPaths } from "./paths.js";
 import { createNetworkTransport, type NetworkTransport } from "../net/index.js";
 import { WorkspaceBoundary } from "../tools/paths.js";
 import { ExternalToolBackend, type ToolExecutionBackend } from "../tools/backend.js";
+import { updateGlobalConfig } from "./setup.js";
 
 export interface LoadedRuntime {
   paths: HarnessPaths;
@@ -146,6 +157,8 @@ interface RuntimeOptions {
   sessionDirectory?: string;
   recover?: boolean;
   managedExtensionLifecycle?: boolean;
+  /** Already-active user and invocation extensions used for project trust. */
+  preactivatedRuntimeExtensions?: RuntimeExtensionHost;
 }
 
 const EPHEMERAL_DATABASE_PATH = ":memory:";
@@ -336,6 +349,57 @@ export async function createCredentialStore(
   return new LazyEncryptedFileCredentialStore(paths, environment, false);
 }
 
+const BUILTIN_ROUTE_CATALOG_OBSERVED_AT = "2026-07-19T00:00:00.000Z";
+
+function builtinRouteModel(
+  provider: string,
+  id: string,
+  protocolFamily: ModelProtocolFamily,
+): ModelInfo {
+  const capability = (value: "supported" | "unknown") => ({
+    value,
+    source: "maintained" as const,
+    observedAt: BUILTIN_ROUTE_CATALOG_OBSERVED_AT,
+  });
+  return {
+    id,
+    provider,
+    capabilities: {
+      tools: capability("supported"),
+      reasoning: capability("unknown"),
+      images: capability("unknown"),
+    },
+    compatibility: {
+      protocolFamily: {
+        value: protocolFamily,
+        source: "maintained",
+        observedAt: BUILTIN_ROUTE_CATALOG_OBSERVED_AT,
+      },
+    },
+  };
+}
+
+function builtinRoutes(
+  provider: string,
+  adapter: string,
+  protocolFamily: ModelProtocolFamily,
+  ids: readonly string[],
+) {
+  return ids.map((model) => ({
+    model,
+    adapter,
+    protocolFamily,
+    modelInfo: builtinRouteModel(provider, model, protocolFamily),
+  }));
+}
+
+const OPENCODE_BASE_URL = "https://opencode.ai/zen";
+const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go";
+const CLOUDFLARE_ACCOUNT_PLACEHOLDER = "{CLOUDFLARE_ACCOUNT_ID}";
+const CLOUDFLARE_GATEWAY_PLACEHOLDER = "{CLOUDFLARE_GATEWAY_ID}";
+const CLOUDFLARE_WORKERS_BASE_URL = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_PLACEHOLDER}/ai/v1`;
+const CLOUDFLARE_GATEWAY_BASE_URL = `https://gateway.ai.cloudflare.com/v1/${CLOUDFLARE_ACCOUNT_PLACEHOLDER}/${CLOUDFLARE_GATEWAY_PLACEHOLDER}`;
+
 export const BUILTIN_PROVIDER_CONFIGS: Readonly<Record<string, RuntimeProviderConfig>> = Object.freeze({
   openai: { kind: "openai" },
   "openai-codex": { kind: "openai-codex" },
@@ -345,6 +409,7 @@ export const BUILTIN_PROVIDER_CONFIGS: Readonly<Record<string, RuntimeProviderCo
   mistral: { kind: "mistral" },
   openrouter: { kind: "openrouter" },
   ollama: { kind: "ollama" },
+  "llama.cpp": { kind: "llama-router", id: "llama.cpp", baseUrl: "http://127.0.0.1:8080" },
   groq: {
     kind: "openai-compatible",
     id: "groq",
@@ -370,10 +435,27 @@ export const BUILTIN_PROVIDER_CONFIGS: Readonly<Record<string, RuntimeProviderCo
     credentialProvider: "cerebras",
   },
   xai: {
-    kind: "openai-compatible",
+    kind: "routed",
     id: "xai",
-    baseUrl: "https://api.x.ai/v1",
     credentialProvider: "xai",
+    adapters: {
+      responses: {
+        kind: "openai",
+        baseUrl: "https://api.x.ai/v1",
+        credentialProvider: "xai",
+      },
+      chat: {
+        kind: "openai-compatible",
+        id: "xai-chat",
+        baseUrl: "https://api.x.ai/v1",
+        credentialProvider: "xai",
+      },
+    },
+    routes: [
+      { model: "grok-4.3", adapter: "chat", protocolFamily: "openai-chat-completions" },
+      { model: "grok-4.5", adapter: "responses", protocolFamily: "openai-responses" },
+      { model: "grok-build-0.1", adapter: "chat", protocolFamily: "openai-chat-completions" },
+    ],
   },
   fireworks: {
     kind: "openai-compatible",
@@ -408,26 +490,215 @@ export const BUILTIN_PROVIDER_CONFIGS: Readonly<Record<string, RuntimeProviderCo
     credentialProvider: "zai-coding-cn",
     profile: "zai",
   },
-  "kimi-coding": {
+  "ant-ling": {
     kind: "openai-compatible",
+    id: "ant-ling",
+    baseUrl: "https://api.ant-ling.com/v1",
+    credentialProvider: "ant-ling",
+  },
+  nvidia: {
+    kind: "openai-compatible",
+    id: "nvidia",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    credentialProvider: "nvidia",
+  },
+  xiaomi: {
+    kind: "openai-compatible",
+    id: "xiaomi",
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    credentialProvider: "xiaomi",
+    profile: "xiaomi",
+  },
+  moonshotai: {
+    kind: "openai-compatible",
+    id: "moonshotai",
+    baseUrl: "https://api.moonshot.ai/v1",
+    credentialProvider: "moonshotai",
+    profile: "moonshot",
+  },
+  "moonshotai-cn": {
+    kind: "openai-compatible",
+    id: "moonshotai-cn",
+    baseUrl: "https://api.moonshot.cn/v1",
+    credentialProvider: "moonshotai-cn",
+    profile: "moonshot",
+  },
+  "xiaomi-token-plan-cn": {
+    kind: "openai-compatible",
+    id: "xiaomi-token-plan-cn",
+    baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+    credentialProvider: "xiaomi-token-plan-cn",
+    profile: "xiaomi",
+  },
+  "xiaomi-token-plan-ams": {
+    kind: "openai-compatible",
+    id: "xiaomi-token-plan-ams",
+    baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
+    credentialProvider: "xiaomi-token-plan-ams",
+    profile: "xiaomi",
+  },
+  "xiaomi-token-plan-sgp": {
+    kind: "openai-compatible",
+    id: "xiaomi-token-plan-sgp",
+    baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1",
+    credentialProvider: "xiaomi-token-plan-sgp",
+    profile: "xiaomi",
+  },
+  opencode: {
+    kind: "routed",
+    id: "opencode",
+    credentialProvider: "opencode",
+    adapters: {
+      responses: { kind: "openai", baseUrl: `${OPENCODE_BASE_URL}/v1` },
+      messages: { kind: "anthropic", id: "opencode-messages", baseUrl: OPENCODE_BASE_URL },
+      gemini: {
+        kind: "gemini",
+        protocol: "generate-content",
+        baseUrl: `${OPENCODE_BASE_URL}/v1`,
+      },
+      chat: {
+        kind: "openai-compatible",
+        id: "opencode-chat",
+        baseUrl: `${OPENCODE_BASE_URL}/v1`,
+        profile: "opencode",
+      },
+      "chat-kimi": {
+        kind: "openai-compatible",
+        id: "opencode-chat-kimi",
+        baseUrl: `${OPENCODE_BASE_URL}/v1`,
+        profile: "moonshot",
+      },
+    },
+    routes: [
+      ...builtinRoutes("opencode", "messages", "anthropic-messages", [
+        "claude-fable-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-opus-4-5",
+        "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4",
+        "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5", "qwen3.5-plus", "qwen3.6-plus",
+      ]),
+      ...builtinRoutes("opencode", "gemini", "gemini-generate-content", [
+        "gemini-3-flash", "gemini-3.1-pro", "gemini-3.5-flash",
+      ]),
+      ...builtinRoutes("opencode", "responses", "openai-responses", [
+        "gpt-5", "gpt-5-codex", "gpt-5-nano", "gpt-5.1", "gpt-5.1-codex",
+        "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5.2", "gpt-5.2-codex",
+        "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-pro",
+        "gpt-5.5", "gpt-5.5-pro", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+      ]),
+      ...builtinRoutes("opencode", "chat-kimi", "openai-chat-completions", ["kimi-k2.6"]),
+      ...builtinRoutes("opencode", "chat", "openai-chat-completions", [
+        "big-pickle", "deepseek-v4-flash", "deepseek-v4-flash-free", "deepseek-v4-pro", "glm-5",
+        "glm-5.1", "glm-5.2", "grok-4.5", "grok-build-0.1", "hy3-free", "kimi-k2.5",
+        "kimi-k2.7-code", "mimo-v2.5-free", "minimax-m2.5", "minimax-m2.7", "minimax-m3",
+        "nemotron-3-ultra-free", "north-mini-code-free",
+      ]),
+    ],
+  },
+  "opencode-go": {
+    kind: "routed",
+    id: "opencode-go",
+    credentialProvider: "opencode-go",
+    adapters: {
+      messages: { kind: "anthropic", id: "opencode-go-messages", baseUrl: OPENCODE_GO_BASE_URL },
+      chat: {
+        kind: "openai-compatible",
+        id: "opencode-go-chat",
+        baseUrl: `${OPENCODE_GO_BASE_URL}/v1`,
+        profile: "opencode",
+      },
+      "chat-kimi": {
+        kind: "openai-compatible",
+        id: "opencode-go-chat-kimi",
+        baseUrl: `${OPENCODE_GO_BASE_URL}/v1`,
+        profile: "moonshot",
+      },
+    },
+    routes: [
+      ...builtinRoutes("opencode-go", "messages", "anthropic-messages", [
+        "minimax-m3", "qwen3.7-max", "qwen3.7-plus",
+      ]),
+      ...builtinRoutes("opencode-go", "chat-kimi", "openai-chat-completions", ["kimi-k2.6"]),
+      ...builtinRoutes("opencode-go", "chat", "openai-chat-completions", [
+        "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "grok-4.5",
+        "kimi-k2.7-code", "kimi-k3", "mimo-v2.5", "mimo-v2.5-pro", "minimax-m2.7",
+        "qwen3.6-plus",
+      ]),
+    ],
+  },
+  "cloudflare-workers-ai": {
+    kind: "routed",
+    id: "cloudflare-workers-ai",
+    credentialProvider: "cloudflare-workers-ai",
+    adapters: {
+      chat: {
+        kind: "openai-compatible",
+        id: "cloudflare-workers-ai-chat",
+        baseUrl: CLOUDFLARE_WORKERS_BASE_URL,
+      },
+    },
+    routes: builtinRoutes("cloudflare-workers-ai", "chat", "openai-chat-completions", [
+      "@cf/google/gemma-4-26b-a4b-it", "@cf/ibm-granite/granite-4.0-h-micro",
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "@cf/mistralai/mistral-small-3.1-24b-instruct", "@cf/moonshotai/kimi-k2.6",
+      "@cf/moonshotai/kimi-k2.7-code", "@cf/nvidia/nemotron-3-120b-a12b",
+      "@cf/openai/gpt-oss-120b", "@cf/openai/gpt-oss-20b", "@cf/qwen/qwen3-30b-a3b-fp8",
+      "@cf/zai-org/glm-4.7-flash", "@cf/zai-org/glm-5.2",
+    ]),
+  },
+  "cloudflare-ai-gateway": {
+    kind: "routed",
+    id: "cloudflare-ai-gateway",
+    credentialProvider: "cloudflare-ai-gateway",
+    adapters: {
+      messages: {
+        kind: "anthropic",
+        id: "cloudflare-ai-gateway-messages",
+        baseUrl: `${CLOUDFLARE_GATEWAY_BASE_URL}/anthropic`,
+      },
+      responses: { kind: "openai", baseUrl: `${CLOUDFLARE_GATEWAY_BASE_URL}/openai` },
+      chat: {
+        kind: "openai-compatible",
+        id: "cloudflare-ai-gateway-chat",
+        baseUrl: `${CLOUDFLARE_GATEWAY_BASE_URL}/compat`,
+        profile: "cloudflare-ai-gateway",
+      },
+    },
+    routes: [
+      ...builtinRoutes("cloudflare-ai-gateway", "messages", "anthropic-messages", [
+        "claude-3-5-haiku", "claude-3-haiku", "claude-3-opus", "claude-3-sonnet",
+        "claude-3.5-haiku", "claude-3.5-sonnet", "claude-fable-5", "claude-haiku-4-5",
+        "claude-opus-4", "claude-opus-4-1", "claude-opus-4-5", "claude-opus-4-6",
+        "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4", "claude-sonnet-4-5",
+        "claude-sonnet-4-6", "claude-sonnet-5",
+      ]),
+      ...builtinRoutes("cloudflare-ai-gateway", "responses", "openai-responses", [
+        "gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-mini", "gpt-5.1", "gpt-5.1-codex",
+        "gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.4", "gpt-5.5",
+        "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "o1", "o3", "o3-mini", "o3-pro", "o4-mini",
+      ]),
+      ...builtinRoutes("cloudflare-ai-gateway", "chat", "openai-chat-completions", [
+        "workers-ai/@cf/moonshotai/kimi-k2.5", "workers-ai/@cf/moonshotai/kimi-k2.6",
+        "workers-ai/@cf/nvidia/nemotron-3-120b-a12b", "workers-ai/@cf/zai-org/glm-4.7-flash",
+        "workers-ai/@cf/zai-org/glm-5.2",
+      ]),
+    ],
+  },
+  "kimi-coding": {
+    kind: "anthropic",
     id: "kimi-coding",
-    baseUrl: "https://api.kimi.com/coding/v1",
+    baseUrl: "https://api.kimi.com/coding",
     credentialProvider: "kimi-coding",
-    profile: "kimi-coding",
   },
   minimax: {
-    kind: "openai-compatible",
+    kind: "anthropic",
     id: "minimax",
-    baseUrl: "https://api.minimax.io/v1",
+    baseUrl: "https://api.minimax.io/anthropic",
     credentialProvider: "minimax",
-    profile: "minimax",
   },
   "minimax-cn": {
-    kind: "openai-compatible",
+    kind: "anthropic",
     id: "minimax-cn",
-    baseUrl: "https://api.minimaxi.com/v1",
+    baseUrl: "https://api.minimaxi.com/anthropic",
     credentialProvider: "minimax-cn",
-    profile: "minimax",
   },
 });
 
@@ -436,24 +707,31 @@ export function runtimeProviderAuthBinding(
   providerConfig: RuntimeProviderConfig,
   providerId: string,
 ): ProviderAuthBinding {
-  const credentialId = providerConfig.kind === "openai-compatible"
-    ? providerConfig.credentialProvider ?? providerId
-    : providerId;
+  const credentialId = providerConfig.credentialProvider ?? providerId;
   const remoteOllama = providerConfig.kind === "ollama" && (() => {
     const hostname = new URL(providerConfig.host ?? "http://127.0.0.1:11434").hostname;
+    return !["127.0.0.1", "localhost", "::1"].includes(hostname);
+  })();
+  const remoteLlamaRouter = providerConfig.kind === "llama-router" && (() => {
+    const hostname = new URL(providerConfig.baseUrl ?? "http://127.0.0.1:8080").hostname;
     return !["127.0.0.1", "localhost", "::1"].includes(hostname);
   })();
   return {
     providerId,
     credentialId,
-    displayName: providerConfig.kind === "anthropic"
+    displayName: providerConfig.kind === "anthropic" && providerId === "anthropic"
       ? "Anthropic (Claude Pro/Max)"
-      : providerDisplayName(providerId === "openai-compatible" ? configuredName : providerId),
+      : providerDisplayName(
+          providerConfig.kind === "openai-compatible" || providerConfig.kind === "routed"
+            ? configuredName
+            : providerId,
+        ),
     ...(providerConfig.kind === "openai-codex"
       ? {}
-      : providerConfig.kind === "vertex" || providerConfig.kind === "bedrock" || remoteOllama
+      : providerConfig.kind === "vertex" || providerConfig.kind === "bedrock" ||
+          providerConfig.kind === "gateway-messages" || remoteOllama || remoteLlamaRouter
       ? { secret: "bearer" as const }
-      : providerConfig.kind === "ollama"
+      : providerConfig.kind === "ollama" || providerConfig.kind === "llama-router"
         ? {}
         : { secret: "api_key" as const }),
     ...(providerConfig.kind === "gemini" || providerConfig.kind === "vertex"
@@ -464,11 +742,81 @@ export function runtimeProviderAuthBinding(
           ? { ambient: "aws" as const }
           : {}),
     ...(providerConfig.kind === "ollama" && !remoteOllama ? { local: true } : {}),
+    ...(providerConfig.kind === "llama-router" && !remoteLlamaRouter ? { local: true } : {}),
     ...(providerConfig.kind === "openrouter" ? { openRouterBrowser: true } : {}),
     ...(providerConfig.kind === "openai-codex" ? { openAICodex: true } : {}),
-    ...(providerConfig.kind === "anthropic" ? { anthropicOAuth: true } : {}),
+    ...(providerConfig.kind === "anthropic" && providerId === "anthropic" ? { anthropicOAuth: true } : {}),
     ...(providerConfig.kind === "github-copilot" ? { githubCopilotOAuth: true } : {}),
   };
+}
+
+function cloudflarePathSegment(value: string | undefined, label: string): string {
+  const selected = value?.trim();
+  if (
+    selected === undefined || selected === "" || selected.includes("\0") ||
+    /[\r\n]/u.test(selected) || Buffer.byteLength(selected, "utf8") > 512
+  ) {
+    throw new Error(`${label} is required and must be a single value no larger than 512 bytes`);
+  }
+  return encodeURIComponent(selected);
+}
+
+function credentialSecret(credential: AuthCredential | undefined): string | undefined {
+  if (credential === undefined || credential.kind === "ambient") return undefined;
+  return credential.kind === "api_key" ? credential.apiKey : credential.accessToken;
+}
+
+function credentialAccountId(credential: AuthCredential | undefined): string | undefined {
+  return credential === undefined || credential.kind === "ambient" ? undefined : credential.accountId;
+}
+
+export function registerCloudflareWireInterceptors(
+  wire: ProviderWireInterceptorRegistry,
+  broker: CredentialBroker,
+  environment: NodeJS.ProcessEnv,
+): void {
+  wire.register("cloudflare-workers-ai", {
+    async interceptRequest(request, signal) {
+      const placeholder = encodeURIComponent(CLOUDFLARE_ACCOUNT_PLACEHOLDER);
+      if (!request.url.includes(placeholder)) return;
+      const resolved = await broker.resolve({ provider: "cloudflare-workers-ai", signal });
+      const accountId = cloudflarePathSegment(
+        credentialAccountId(resolved?.credential) ?? environment.CLOUDFLARE_ACCOUNT_ID,
+        "CLOUDFLARE_ACCOUNT_ID",
+      );
+      return { url: request.url.replaceAll(placeholder, accountId) };
+    },
+  });
+  wire.register("cloudflare-ai-gateway", {
+    async interceptRequest(request, signal) {
+      const resolved = await broker.resolve({ provider: "cloudflare-ai-gateway", signal });
+      const secret = credentialSecret(resolved?.credential);
+      if (secret === undefined) throw new Error("Cloudflare AI Gateway credentials are unavailable");
+      const accountPlaceholder = encodeURIComponent(CLOUDFLARE_ACCOUNT_PLACEHOLDER);
+      const gatewayPlaceholder = encodeURIComponent(CLOUDFLARE_GATEWAY_PLACEHOLDER);
+      let url = request.url;
+      if (url.includes(accountPlaceholder)) {
+        url = url.replaceAll(accountPlaceholder, cloudflarePathSegment(
+          credentialAccountId(resolved?.credential) ?? environment.CLOUDFLARE_ACCOUNT_ID,
+          "CLOUDFLARE_ACCOUNT_ID",
+        ));
+      }
+      if (url.includes(gatewayPlaceholder)) {
+        url = url.replaceAll(gatewayPlaceholder, cloudflarePathSegment(
+          environment.CLOUDFLARE_GATEWAY_ID,
+          "CLOUDFLARE_GATEWAY_ID",
+        ));
+      }
+      return {
+        ...(url === request.url ? {} : { url }),
+        headers: {
+          authorization: null,
+          "x-api-key": null,
+          "cf-aig-authorization": `Bearer ${secret}`,
+        },
+      };
+    },
+  });
 }
 
 function configuredProviderConfigs(
@@ -476,6 +824,14 @@ function configuredProviderConfigs(
   environment: NodeJS.ProcessEnv,
 ): Record<string, RuntimeProviderConfig> {
   const providerConfigs = { ...BUILTIN_PROVIDER_CONFIGS, ...config.providers };
+  const llamaBaseUrl = environment.LLAMA_BASE_URL?.trim();
+  if (config.providers["llama.cpp"] === undefined && llamaBaseUrl !== undefined && llamaBaseUrl !== "") {
+    providerConfigs["llama.cpp"] = {
+      kind: "llama-router",
+      id: "llama.cpp",
+      baseUrl: llamaBaseUrl,
+    };
+  }
   if (environment.AWS_REGION !== undefined || environment.AWS_DEFAULT_REGION !== undefined) {
     providerConfigs.bedrock ??= {
       kind: "bedrock",
@@ -483,6 +839,39 @@ function configuredProviderConfigs(
     };
   }
   return providerConfigs;
+}
+
+function configuredCredentialCommands(
+  config: HarnessConfig,
+  environment: NodeJS.ProcessEnv,
+): Record<string, ExternalCommandCredentialSpec> {
+  return Object.fromEntries(Object.entries(config.credentialCommands).map(([provider, command]) => {
+    const forwarded = Object.fromEntries((command.environment ?? []).flatMap((name) => {
+      const value = environment[name];
+      return value === undefined ? [] : [[name, value]];
+    }));
+    return [provider, {
+      argv: command.argv,
+      ...(Object.keys(forwarded).length === 0 ? {} : { environment: forwarded }),
+      ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
+      ...(command.maxOutputBytes === undefined ? {} : { maxOutputBytes: command.maxOutputBytes }),
+      ...(command.cacheTtlMs === undefined ? {} : { cacheTtlMs: command.cacheTtlMs }),
+    }];
+  }));
+}
+
+function configuredOAuthRegistrations(
+  bindings: readonly ProviderAuthBinding[],
+  configured: Readonly<Record<string, OAuthRegistrationConfig>>,
+): Record<string, OAuthRegistrationConfig> {
+  const registrations = { ...configured };
+  if (bindings.some((binding) => binding.providerId === "xai" && binding.credentialId === "xai")) {
+    if (Object.hasOwn(registrations, XAI_OAUTH_REGISTRATION_ID)) {
+      throw new Error(`OAuth registration ID is reserved: ${XAI_OAUTH_REGISTRATION_ID}`);
+    }
+    registrations[XAI_OAUTH_REGISTRATION_ID] = XAI_OAUTH_REGISTRATION;
+  }
+  return registrations;
 }
 
 export async function loadAuthRuntime(options: {
@@ -510,7 +899,7 @@ export async function loadAuthRuntime(options: {
     ...(options.allowPlatformKeychain === undefined ? {} : { allowPlatformKeychain: options.allowPlatformKeychain }),
   });
   const bindings = Object.entries(configuredProviderConfigs(config, environment)).map(([configuredName, providerConfig]) => {
-    const providerId = providerConfig.kind === "openai-compatible" ? providerConfig.id ?? "openai-compatible" : providerConfig.kind;
+    const providerId = runtimeProviderId(providerConfig);
     return runtimeProviderAuthBinding(configuredName, providerConfig, providerId);
   });
   const registered = new Set(bindings.map((binding) => binding.providerId));
@@ -530,7 +919,12 @@ export async function loadAuthRuntime(options: {
     trusted,
     config,
     credentials,
-    auth: new ProviderAuthRegistry({ bindings, registrations: config.oauthRegistrations, store: credentials, environment }),
+    auth: new ProviderAuthRegistry({
+      bindings,
+      registrations: configuredOAuthRegistrations(bindings, config.oauthRegistrations),
+      store: credentials,
+      environment,
+    }),
     network,
     async close() {
       await network.close();
@@ -569,6 +963,7 @@ async function settleWithin<T>(operation: Promise<T>, timeoutMs: number, label: 
 function serviceResources(generation: RuntimeResourceGeneration): HarnessRuntimeResources {
   return {
     providers: generation.providers,
+    providerAvailable: async (provider) => (await generation.auth.state(provider)).status === "connected",
     projectTrusted: generation.trusted,
     skills: generation.skills,
     extraTools: generation.extraTools,
@@ -576,9 +971,15 @@ function serviceResources(generation: RuntimeResourceGeneration): HarnessRuntime
     runtimeExtensions: generation.runtimeExtensions,
     ...(generation.toolBackend === undefined ? {} : { toolBackend: generation.toolBackend }),
     ...(generation.config.shellPath === undefined ? {} : { shellPath: generation.config.shellPath }),
+    ...(generation.config.shellCommandPrefix === undefined ? {} : { shellCommandPrefix: generation.config.shellCommandPrefix }),
     autoCompaction: generation.config.autoCompaction,
+    compactionReserveTokens: generation.config.compaction.reserveTokens,
+    compactionKeepRecentTokens: generation.config.compaction.keepRecentTokens,
     compactionRetainRecentTurns: generation.config.compactionRetainRecentTurns,
     compactionToolResultBytes: generation.config.compactionToolResultBytes,
+    branchSummaryReserveTokens: generation.config.branchSummary.reserveTokens,
+    imageAutoResize: generation.config.images.autoResize,
+    ...(generation.config.thinkingBudgets === undefined ? {} : { thinkingBudgets: generation.config.thinkingBudgets }),
     retry: generation.config.providerRetry,
     childRuns: generation.config.childRuns,
     resourceCatalog: {
@@ -686,14 +1087,60 @@ async function loadRuntimeThemes(
   return themes;
 }
 
+/**
+ * Activates only launch-authorized extensions before project trust is known.
+ * Project configuration, packages, extensions, prompts, skills, and themes are
+ * intentionally not inspected here.
+ */
+export async function preactivateProjectTrustExtensions(
+  paths: Pick<HarnessPaths, "userExtensions" | "stateDirectory">,
+  workspaceValue: string,
+  options: Pick<RuntimeOptions, "extensions" | "extensionPaths" | "extensionRuntime">,
+  signal?: AbortSignal,
+): Promise<RuntimeExtensionHost | undefined> {
+  if (options.extensionRuntime !== true) return undefined;
+  const workspace = await canonicalExistingPath(resolve(workspaceValue));
+  const entries: ExtensionRuntimeEntry[] = [];
+  if (options.extensions === true) {
+    const source = { path: paths.userExtensions, scope: "user" as const, trusted: true, optional: true };
+    const catalog = await discoverExtensions([source]);
+    entries.push(...catalog.bundle().runtime);
+    entries.push(...await resolveExplicitRuntimeExtensions(
+      await discoverRuntimeExtensionPaths(paths.userExtensions),
+      workspace,
+      { maximum: 128, scope: "user", trusted: true },
+    ));
+  }
+  entries.push(...await resolveExplicitRuntimeExtensions(
+    options.extensionPaths ?? [],
+    workspace,
+    { scope: "invocation", trusted: true },
+  ));
+  const unique: ExtensionRuntimeEntry[] = [];
+  const sourcePaths = new Set<string>();
+  for (const entry of entries) {
+    if (sourcePaths.has(entry.sourcePath)) continue;
+    sourcePaths.add(entry.sourcePath);
+    unique.push(entry);
+  }
+  if (unique.length > 128) throw new Error("At most 128 pre-trust runtime extensions may be loaded");
+  return await loadRuntimeExtensions(unique, {
+    workspace,
+    dataRoot: join(paths.stateDirectory, "extension-data"),
+    ...(signal === undefined ? {} : { signal }),
+  });
+}
+
 async function loadResourceGeneration(
   paths: HarnessPaths,
   workspace: string,
   broker: CredentialBroker,
   credentials: CredentialStore,
+  managedAuth: ManagedProviderAuthDirectory,
   options: Pick<RuntimeOptions, "projectTrusted" | "ephemeral" | "extensions" | "extensionPaths" | "packagePaths" | "allowPackageScripts" | "extensionRuntime" | "skills" | "skillPaths" | "promptTemplates" | "promptTemplatePaths" | "themes" | "themePaths" | "sessionDirectory">,
   reason: "startup" | "reload" = "startup",
   signal?: AbortSignal,
+  preactivatedRuntimeExtensions?: RuntimeExtensionHost,
 ): Promise<RuntimeResourceGeneration> {
   signal?.throwIfAborted();
   const trust = new TrustStore(paths.trustStore);
@@ -749,12 +1196,15 @@ async function loadResourceGeneration(
   const authoringResources = bundledAuthoringResources();
   const network = createNetworkTransport(config.httpTransport);
   const providers = new ProviderRegistry([], { catalogStore: new FileModelCatalogStore(paths.modelCatalog) });
+  const providerWire = new ProviderWireInterceptorRegistry();
+  registerCloudflareWireInterceptors(providerWire, broker, process.env);
   const authBindings: ProviderAuthBinding[] = [];
   const providerConfigs = configuredProviderConfigs(config, process.env);
   for (const [configuredName, providerConfig] of Object.entries(providerConfigs)) {
     const adapter = createProviderAdapter(providerConfig, broker, {
       fetch: network.fetch,
       ...(network.openWebSocket === undefined ? {} : { webSocket: network.openWebSocket }),
+      wire: providerWire,
     });
     providers.register(adapter);
     authBindings.push(runtimeProviderAuthBinding(configuredName, providerConfig, adapter.id));
@@ -848,14 +1298,37 @@ async function loadResourceGeneration(
     runtimeSourcePaths.add(entry.sourcePath);
     runtimeEntries.push(entry);
   }
-  const runtimeExtensions = options.extensionRuntime === true
-    ? await loadRuntimeExtensions(runtimeEntries, {
+  let runtimeExtensions: RuntimeExtensionHost;
+  if (options.extensionRuntime === true) {
+    if (preactivatedRuntimeExtensions === undefined) {
+      runtimeExtensions = await loadRuntimeExtensions(runtimeEntries, {
+        workspace,
+        dataRoot: join(paths.stateDirectory, "extension-data"),
+        projectTrusted: trusted,
+        ...(signal === undefined ? {} : { signal }),
+        ...(reason === "reload" ? { activationFailure: "throw" as const } : {}),
+      });
+    } else {
+      runtimeExtensions = preactivatedRuntimeExtensions;
+      runtimeExtensions.setHostContext({ projectTrusted: trusted });
+      const activePaths = new Set(runtimeExtensions.extensions().map((entry) => entry.sourcePath));
+      const additional = runtimeEntries.filter((entry) => !activePaths.has(entry.sourcePath));
+      await appendRuntimeExtensions(runtimeExtensions, additional, {
         workspace,
         dataRoot: join(paths.stateDirectory, "extension-data"),
         ...(signal === undefined ? {} : { signal }),
         ...(reason === "reload" ? { activationFailure: "throw" as const } : {}),
-      })
-    : new RuntimeExtensionHost(workspace, { dataRoot: join(paths.stateDirectory, "extension-data") });
+      });
+    }
+  } else {
+    if (preactivatedRuntimeExtensions !== undefined) {
+      throw new Error("Preactivated extensions require extensionRuntime");
+    }
+    runtimeExtensions = new RuntimeExtensionHost(workspace, {
+      dataRoot: join(paths.stateDirectory, "extension-data"),
+      projectTrusted: trusted,
+    });
+  }
   const integratedRuntimeProviders: ProviderAdapter[] = [];
   for (const provider of runtimeExtensions.providers()) {
     if (providers.has(provider.id)) {
@@ -877,9 +1350,42 @@ async function loadResourceGeneration(
   }
   const auth = new ProviderAuthRegistry({
     bindings: authBindings,
-    registrations: config.oauthRegistrations,
+    registrations: configuredOAuthRegistrations(authBindings, config.oauthRegistrations),
     store: credentials,
   });
+  const integratedRuntimeProviderAuthCleanups = new Map<string, () => void>();
+  const registerProviderAuth = (description: RuntimeProviderAuthDescription): (() => void) => {
+    const provider = description.descriptor.provider;
+    const cleanups: Array<() => void> = [auth.registerDescriptor(description.extensionId, description.descriptor)];
+    try {
+      const binding = auth.binding(provider);
+      for (const method of description.descriptor.methods) {
+        if (method.kind !== "managed_oauth") continue;
+        cleanups.push(managedAuth.register(provider, binding.credentialId, method));
+        if (method.modifyModels !== undefined) {
+          const underlying = providers.get(provider);
+          cleanups.push(providers.overlay({
+            id: provider,
+            listModels: async (modelSignal) => {
+              const models = await underlying.listModels(modelSignal);
+              const resolved = await broker.resolve({ provider: binding.credentialId, signal: modelSignal });
+              if (resolved?.credential.kind !== "oauth") return models;
+              return await managedAuth.modifyModels(provider, models, resolved.credential, modelSignal);
+            },
+          }));
+        }
+      }
+    } catch (error) {
+      for (const cleanup of cleanups.reverse()) cleanup();
+      throw error;
+    }
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      for (const cleanup of cleanups.reverse()) cleanup();
+    };
+  };
   for (const provider of integratedRuntimeProviders) {
     runtimeExtensions.addRegistrationCleanup(() => {
       if (auth.has(provider.id)) auth.unregister(provider.id);
@@ -896,9 +1402,13 @@ async function loadResourceGeneration(
       continue;
     }
     try {
-      runtimeExtensions.addRegistrationCleanup(
-        auth.registerDescriptor(description.extensionId, description.descriptor),
-      );
+      const cleanup = registerProviderAuth(description);
+      integratedRuntimeProviderAuthCleanups.set(description.descriptor.provider, cleanup);
+      runtimeExtensions.addRegistrationCleanup(() => {
+        if (integratedRuntimeProviderAuthCleanups.get(description.descriptor.provider) !== cleanup) return;
+        integratedRuntimeProviderAuthCleanups.delete(description.descriptor.provider);
+        cleanup();
+      });
     } catch (error) {
       runtimeExtensions.addDiagnostic({
         extensionId: description.extensionId,
@@ -944,11 +1454,68 @@ async function loadResourceGeneration(
         providers.unregister(provider.id, provider, { preservePersistedCatalog: true });
       };
     },
+    overrideProvider(provider) {
+      return providers.override(provider);
+    },
+    overlayProvider(overlay) {
+      if (!providers.has(overlay.id)) throw new Error(`Provider adapter is not registered: ${overlay.id}`);
+      const cleanups: Array<() => void> = [];
+      try {
+        if (overlay.stream !== undefined || overlay.listModels !== undefined || overlay.models !== undefined) {
+          const staticModels: ModelInfo[] | undefined = overlay.models === undefined
+            ? undefined
+            : structuredClone([...overlay.models]);
+          cleanups.push(providers.overlay({
+            id: overlay.id,
+            ...(overlay.stream === undefined ? {} : { stream: overlay.stream }),
+            ...(overlay.listModels === undefined && staticModels === undefined
+              ? {}
+              : {
+                  listModels: overlay.listModels ?? (async (signal) => {
+                    signal.throwIfAborted();
+                    return structuredClone(staticModels!);
+                  }),
+                }),
+          }));
+        }
+        if (overlay.displayName !== undefined) {
+          cleanups.push(auth.overrideDisplayName(overlay.id, overlay.displayName));
+        }
+        if (overlay.baseUrl !== undefined || overlay.headers !== undefined) {
+          cleanups.push(providerWire.register(overlay.id, {
+            interceptRequest() {
+              return {
+                ...(overlay.baseUrl === undefined ? {} : { baseUrl: overlay.baseUrl }),
+                ...(overlay.headers === undefined ? {} : { headers: overlay.headers }),
+              };
+            },
+          }));
+        }
+      } catch (error) {
+        for (const cleanup of cleanups.reverse()) cleanup();
+        throw error;
+      }
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        for (const cleanup of cleanups.reverse()) cleanup();
+      };
+    },
+    registerProviderWire(provider, interceptor) {
+      return providerWire.register(provider, interceptor);
+    },
+    unregisterProvider(provider) {
+      integratedRuntimeProviderAuthCleanups.get(provider.id)?.();
+      integratedRuntimeProviderAuthCleanups.delete(provider.id);
+      if (auth.has(provider.id)) auth.unregister(provider.id);
+      providers.unregister(provider.id, provider, { preservePersistedCatalog: true });
+    },
     registerProviderAuth(description: RuntimeProviderAuthDescription) {
       if (!providers.has(description.descriptor.provider)) {
         throw new Error(`Provider auth descriptor has no registered provider: ${description.descriptor.provider}`);
       }
-      return auth.registerDescriptor(description.extensionId, description.descriptor);
+      return registerProviderAuth(description);
     },
     async fetchProvider(provider, input, init, signal) {
       const policy = auth.descriptor(provider)?.request;
@@ -966,9 +1533,21 @@ async function loadResourceGeneration(
           return new Request(request, { headers });
         }
         if (resolved?.credential.kind === "bearer" || resolved?.credential.kind === "oauth") {
-          if (policy.bearer === undefined) throw new Error(`Provider request policy does not accept bearer credentials: ${provider}`);
+          const projected = resolved.credential.kind === "oauth"
+            ? managedAuth.apiKey(provider, resolved.credential)
+            : undefined;
+          if (policy.bearer === undefined && (projected === undefined || policy.apiKey === undefined)) {
+            throw new Error(`Provider request policy does not accept bearer credentials: ${provider}`);
+          }
           const headers = new Headers(request.headers);
-          headers.set(policy.bearer.header, `${policy.bearer.prefix ?? "Bearer "}${resolved.credential.accessToken}`);
+          if (policy.bearer !== undefined) {
+            headers.set(
+              policy.bearer.header,
+              `${policy.bearer.prefix ?? "Bearer "}${projected ?? resolved.credential.accessToken}`,
+            );
+          } else {
+            headers.set(policy.apiKey!.header, `${policy.apiKey!.prefix ?? ""}${projected}`);
+          }
           return new Request(request, { headers });
         }
         if (binding.ambient === "aws") {
@@ -1045,11 +1624,13 @@ async function loadResourceGeneration(
       ...(options.promptTemplates === false ? [] : [authoringResources.promptRoot]),
       ...(options.promptTemplates === false ? [] : [paths.userPrompts]),
       ...(options.promptTemplates === false || !trusted ? [] : [join(workspace, ".rigyn", "prompts")]),
+      ...(options.promptTemplates === false ? [] : config.promptRoots.map((path) => expandPath(path, workspace))),
       ...(options.promptTemplatePaths ?? []).map((path) => expandPath(path, workspace)),
     ]);
     const looseThemes = await loadThemes([
       ...(options.themes === false ? [] : [paths.userThemes]),
       ...(options.themes === false || !trusted ? [] : [join(workspace, ".rigyn", "themes")]),
+      ...(options.themes === false ? [] : config.themeRoots.map((path) => expandPath(path, workspace))),
       ...(options.themePaths ?? []).map((path) => expandPath(path, workspace)),
     ]);
     const prompts = new Map(extensionBundle.prompts.map((prompt) => [prompt.id, prompt]));
@@ -1145,6 +1726,8 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
     const provider = options.apiKeyProvider ?? "openai";
     explicitCredentials.set(provider, { kind: "api_key", provider, apiKey: options.apiKey });
   }
+  const externalCommandCredentials = new ExternalCommandCredentialSource({});
+  const managedAuth = new ManagedProviderAuthDirectory();
   const broker = new CredentialBroker([
     ...(explicitCredentials.size === 0 ? [] : [new ExplicitCredentialSource(explicitCredentials)]),
     new ProfiledRefreshingStoredCredentialSource(credentials, {
@@ -1156,12 +1739,32 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         if (credential.provider === "github-copilot") {
           return await refreshGitHubCopilotOAuth(credential, signal, fetchImplementation);
         }
+        const managed = await managedAuth.refresh(credential, signal);
+        if (managed !== undefined) return managed;
         return await refreshGenericOAuthWithFetch(credential, signal, fetchImplementation);
       },
     }),
+    externalCommandCredentials,
     new EnvironmentCredentialSource(),
   ]);
-  let generation = await loadResourceGeneration(paths, workspace, broker, credentials, options);
+  let generation: RuntimeResourceGeneration;
+  try {
+    generation = await loadResourceGeneration(
+      paths,
+      workspace,
+      broker,
+      credentials,
+      managedAuth,
+      options,
+      "startup",
+      undefined,
+      options.preactivatedRuntimeExtensions,
+    );
+  } catch (error) {
+    await options.preactivatedRuntimeExtensions?.close().catch(() => undefined);
+    throw error;
+  }
+  externalCommandCredentials.replaceSpecs(configuredCredentialCommands(generation.config, process.env));
   activeNetwork = generation.network;
   let store: SessionStore | undefined;
   let service: HarnessService | undefined;
@@ -1176,6 +1779,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       workspace,
       ...serviceResources(generation),
       userInstructionFile: join(paths.configDirectory, "AGENTS.md"),
+      userPromptDirectory: paths.configDirectory,
       managedExtensionLifecycle: options.managedExtensionLifecycle ?? false,
     });
     await service.initialize({
@@ -1229,7 +1833,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
         if (reloadOptions.signal !== undefined) signals.push(reloadOptions.signal);
         const signal = AbortSignal.any(signals);
         signal.throwIfAborted();
-        const candidate = await loadResourceGeneration(paths, workspace, broker, credentials, options, "reload", signal);
+        const candidate = await loadResourceGeneration(paths, workspace, broker, credentials, managedAuth, options, "reload", signal);
         bindExtensionControls(candidate.runtimeExtensions);
         try {
           await reloadOptions.prepareExtensions?.(candidate.runtimeExtensions);
@@ -1263,6 +1867,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           await stableService.replaceRuntimeResources(serviceResources(candidate), {
             signal,
             commit: async () => {
+              externalCommandCredentials.replaceSpecs(configuredCredentialCommands(candidate.config, process.env));
               generation = candidate;
               activeNetwork = candidate.network;
               assignGeneration(runtime, candidate);
@@ -1366,6 +1971,123 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     }));
     host.setShutdownHandler(extensionShutdownHandler);
+    host.setNativeHostHandler({
+      async resolveCredential(provider, signal) {
+        signal?.throwIfAborted();
+        if (!runtime.auth.has(provider)) return undefined;
+        const binding = runtime.auth.binding(provider);
+        const resolved = await runtime.broker.resolve({
+          provider: binding.credentialId,
+          ...(signal === undefined ? {} : { signal }),
+        });
+        const request = runtime.auth.descriptor(provider)?.request;
+        if (resolved === undefined) {
+          if (binding.ambient === undefined) return undefined;
+          return {
+            provider,
+            source: "ambient",
+            credential: {
+              kind: "ambient",
+              mechanism: binding.ambient === "aws"
+                ? "aws_default_chain"
+                : binding.ambient === "google"
+                  ? "google_adc"
+                  : "azure_default_credential",
+              hints: {},
+            },
+            headers: {},
+          };
+        }
+        const credential = resolved.credential;
+        const headers: Record<string, string> = {};
+        if (credential.kind === "api_key" && request?.apiKey !== undefined) {
+          headers[request.apiKey.header] = `${request.apiKey.prefix ?? ""}${credential.apiKey}`;
+        } else if ((credential.kind === "bearer" || credential.kind === "oauth") && request?.bearer !== undefined) {
+          headers[request.bearer.header] = `${request.bearer.prefix ?? "Bearer "}${credential.accessToken}`;
+        }
+        return {
+          provider,
+          source: resolved.source,
+          credential: credential.kind === "api_key"
+            ? {
+                kind: "api_key",
+                apiKey: credential.apiKey,
+                ...(credential.accountId === undefined ? {} : { accountId: credential.accountId }),
+              }
+            : credential.kind === "bearer"
+              ? {
+                  kind: "bearer",
+                  accessToken: credential.accessToken,
+                  ...(credential.expiresAt === undefined ? {} : { expiresAt: credential.expiresAt }),
+                  ...(credential.accountId === undefined ? {} : { accountId: credential.accountId }),
+                  ...(credential.subject === undefined ? {} : { subject: credential.subject }),
+                }
+              : credential.kind === "oauth"
+                ? {
+                    kind: "oauth",
+                    accessToken: credential.accessToken,
+                    expiresAt: credential.expiresAt,
+                    tokenType: credential.tokenType,
+                    scopes: [...credential.scopes],
+                    ...(credential.accountId === undefined ? {} : { accountId: credential.accountId }),
+                    ...(credential.subject === undefined ? {} : { subject: credential.subject }),
+                    ...(credential.providerData === undefined ? {} : { providerData: { ...credential.providerData } }),
+                  }
+                : {
+                    kind: "ambient",
+                    mechanism: credential.mechanism,
+                    hints: { ...credential.hints },
+                  },
+          headers,
+        };
+      },
+      async getConfiguration(signal) {
+        signal?.throwIfAborted();
+        const resolved = resolveConfig({
+          globalPath: runtime.paths.globalConfig,
+          projectPath: join(runtime.workspace, ".rigyn", "config.jsonc"),
+          projectTrusted: runtime.trusted,
+        });
+        const effective = JSON.parse(JSON.stringify(parseHarnessConfig(resolved.value))) as JsonObject;
+        signal?.throwIfAborted();
+        return {
+          workspace: runtime.workspace,
+          projectTrusted: runtime.trusted,
+          globalConfigPath: runtime.paths.globalConfig,
+          projectConfigPath: join(runtime.workspace, ".rigyn", "config.jsonc"),
+          databasePath: runtime.databasePath,
+          effective,
+        };
+      },
+      async updateConfiguration(input) {
+        input.signal?.throwIfAborted();
+        if (input.scope === "project" && !runtime.trusted) {
+          throw new Error("Project configuration cannot be changed until the workspace is trusted");
+        }
+        const path = input.scope === "user"
+          ? runtime.paths.globalConfig
+          : join(runtime.workspace, ".rigyn", "config.jsonc");
+        await updateGlobalConfig(path, (existing) => {
+          const next = { ...existing, ...input.patch };
+          parseHarnessConfig(next);
+          return next;
+        });
+        input.signal?.throwIfAborted();
+        const resolved = resolveConfig({
+          globalPath: runtime.paths.globalConfig,
+          projectPath: join(runtime.workspace, ".rigyn", "config.jsonc"),
+          projectTrusted: runtime.trusted,
+        });
+        return {
+          workspace: runtime.workspace,
+          projectTrusted: runtime.trusted,
+          globalConfigPath: runtime.paths.globalConfig,
+          projectConfigPath: join(runtime.workspace, ".rigyn", "config.jsonc"),
+          databasePath: runtime.databasePath,
+          effective: JSON.parse(JSON.stringify(parseHarnessConfig(resolved.value))) as JsonObject,
+        };
+      },
+    });
   }
   bindExtensionControls(generation.runtimeExtensions);
   return runtime;

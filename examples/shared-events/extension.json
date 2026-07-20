@@ -4,7 +4,7 @@
   "name": "Shared events example",
   "version": "0.1.0",
   "description": "Two in-process extension entries communicating through bounded JSON events.",
-  "compatibility": { "hostVersion": ">=0.1.0 <0.3.0" },
+  "compatibility": { "hostVersion": ">=0.1.0 <0.4.0" },
   "contributions": {
     "runtime": [
       { "path": "runtime/receiver.mjs" },

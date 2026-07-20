@@ -7,6 +7,7 @@
   // "defaultProvider": "openai", // Default: "openai".
   // "defaultModel": "gpt-5", // Default: no fixed model; select one with /model.
   // "thinking": "off", // off | minimal | low | medium | high | xhigh | max
+  // "thinkingBudgets": { "minimal": 1024, "low": 2048, "medium": 8192, "high": 16384 }, // Token-budget provider protocols only.
   // "scopedModels": ["openai/*", "anthropic/*:high"], // Default: [].
 
   // Agent and input behavior
@@ -19,6 +20,7 @@
   // "contextTokenBudget": 200000, // Default: selected model metadata.
   // "summaryTokenBudget": 32000, // Default: derived from the context budget.
   // "autoCompaction": true,
+  // "compaction": { "reserveTokens": 16384, "keepRecentTokens": 20000 },
   // "compactionRetainRecentTurns": 2,
   // "compactionToolResultBytes": 4096,
 
@@ -36,19 +38,55 @@
   // },
 
   // Terminal and project trust
-  // "theme": "dark", // dark | light | mono | an installed custom theme
+  // "theme": "light/dark", // NAME or LIGHT/DARK; paired themes follow the terminal background.
   // "doubleEscapeAction": "tree", // tree | fork | none
+  // "quietStartup": false, // Hide the startup report; --verbose shows it for one launch.
+  // "hideThinkingBlock": false, // Show only a compact label for reasoning blocks.
+  // "showCacheMissNotices": false, // Warn after a large observable provider cache miss.
+  // "externalEditor": "code --wait", // Command used by the external-editor keybinding.
+  // "treeFilterMode": "default", // default | no-tools | user-only | labeled-only | all
+  // "editorPaddingX": 0, // Left and right composer padding, 0 through 3 cells.
+  // "outputPad": 0, // Left and right transcript padding, 0 or 1 cell.
+  // "autocompleteMaxVisible": 5, // Optional picker height, 3 through 20 rows.
+  // "showHardwareCursor": true,
+  // "terminal": {
+  //   "showImages": true,
+  //   "imageWidthCells": 80, // 1 through 500.
+  //   "clearOnShrink": false // Clear and redraw the surface after viewport shrink.
+  // },
+  // "markdown": { "codeBlockIndent": "  " }, // Zero through eight spaces.
+  // "branchSummary": { "reserveTokens": 16384, "skipPrompt": false }, // Reserve model output space and optionally skip the /tree prompt.
+  // "images": { "autoResize": true }, // Resize to 2000x2000; false preserves dimensions when byte and safety limits permit.
+  // "enableSkillCommands": true, // Discover /skill:name commands while keeping skills available to the agent.
+  // "warnings": { "anthropicExtraUsage": true }, // One-time OAuth usage-terms reminder.
   // "defaultProjectTrust": "ask", // ask | always | never; global config only
 
   // Storage, shell, and package commands
   // "databasePath": "/absolute/path/to/sessions.sqlite", // Default: Rigyn state directory.
   // "shellPath": "/bin/bash", // Default: the platform command shell.
+  // "shellCommandPrefix": "source ~/.profile", // Trusted shell source prepended to model bash and ! commands.
   // "npmCommand": ["npm"], // Executable plus a fixed argv prefix; never a shell string.
   // "gitCommand": ["git"],
+
+  // Optional provider credential helpers. Each helper is executed directly as
+  // argv with no shell and a minimal environment. Only the named parent
+  // environment variables are forwarded; the command must print one bounded
+  // JSON api_key or bearer object. Secrets never belong in this file.
+  // "credentialCommands": {
+  //   "company": {
+  //     "argv": ["/absolute/path/to/company-credential-helper"],
+  //     "environment": ["COMPANY_PROFILE", "COMPANY_REGION"],
+  //     "timeoutMs": 10000, // Maximum: 60000.
+  //     "maxOutputBytes": 16384, // Maximum: 65536.
+  //     "cacheTtlMs": 60000 // Maximum: 3600000; zero disables caching.
+  //   }
+  // },
 
   // Additional resource roots. Project roots are used only for trusted projects.
   // "skillRoots": ["~/my-rigyn-skills"],
   // "extensionRoots": ["~/my-rigyn-extensions"],
+  // "promptRoots": ["~/my-rigyn-prompts", "~/shared/prompts/*.md"],
+  // "themeRoots": ["~/my-rigyn-themes", "~/shared/themes/*.json"],
 
   // Resource filters managed by `rigyn config`. Each array contains disabled
   // resource keys for that installed package.
@@ -58,6 +96,7 @@
 
   // Bounded provider retry policy
   // "providerRetry": {
+  //   "enabled": true,
   //   "maxAttempts": 3, // 1 through 10
   //   "baseDelayMs": 500,
   //   "maxDelayMs": 30000,
@@ -125,6 +164,7 @@
   //     "beta": [],
   //     "promptCache": "5m", // off | 5m | 1h
   //     "deferredToolLoading": true, // Official-endpoint default; false disables it.
+  //     "eagerToolInputStreaming": true, // Disable only for a legacy-compatible endpoint.
   //     "thinking": {
   //       "budgets": {
   //         "minimal": 1024,
@@ -193,11 +233,59 @@
   //     "kind": "ollama",
   //     "host": "http://127.0.0.1:11434"
   //   },
+  //   "llama.cpp": {
+  //     "kind": "llama-router",
+  //     "id": "llama.cpp",
+  //     "baseUrl": "http://127.0.0.1:8080",
+  //     "timeoutMs": 15000
+  //   },
+  //   "company-gateway": {
+  //     "kind": "gateway-messages",
+  //     "gatewayUrl": "https://gateway.example.com/v1", // GET /config discovers the credential-scoped endpoint and models.
+  //     "credentialProvider": "company-gateway",
+  //     "cacheRetention": "long", // none | short | long
+  //     "toolChoice": "auto", // auto | none | required
+  //     "temperature": 0.4 // 0 through 2
+  //   },
   //   "company": {
   //     "kind": "openai-compatible",
   //     "baseUrl": "https://models.example.com/v1",
   //     "credentialProvider": "company",
-  //     "profile": "default" // default | vercel-ai-gateway | zai | kimi-coding | minimax
+  //     "profile": "default" // default | vercel-ai-gateway | zai | kimi-coding | minimax | xiaomi | moonshot | opencode | cloudflare-ai-gateway
+  //   },
+  //   "company-router": {
+  //     "kind": "routed",
+  //     "credentialProvider": "company-router",
+  //     "adapters": {
+  //       "chat": {
+  //         "kind": "openai-compatible",
+  //         "baseUrl": "https://gateway.example.com/v1/chat"
+  //       },
+  //       "messages": {
+  //         "kind": "anthropic",
+  //         "baseUrl": "https://gateway.example.com/v1/messages"
+  //       }
+  //     },
+  //     "routes": [
+  //       {
+  //         "model": "fast-code",
+  //         "upstreamModel": "vendor-fast-code",
+  //         "adapter": "chat",
+  //         "protocolFamily": "openai-chat-completions"
+  //       },
+  //       {
+  //         "model": "deep-code",
+  //         "upstreamModel": "vendor-deep-code",
+  //         "adapter": "messages",
+  //         "protocolFamily": "anthropic-messages",
+  //         "modelInfo": {
+  //           "displayName": "Deep Code",
+  //           "contextTokens": 200000,
+  //           "tools": true,
+  //           "reasoningEfforts": ["off", "low", "high"]
+  //         }
+  //       }
+  //     ]
   //   }
   // },
 
@@ -214,6 +302,27 @@
   //     "reasoning": true,
   //     "images": false,
   //     "reasoningEfforts": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  //     // Non-secret, exact-model headers. Authentication headers are rejected.
+  //     "headers": { "x-tenant": "engineering" },
+  //     // Provider values; null removes that level from selection.
+  //     "reasoningEffortMap": { "minimal": null, "low": "lite", "high": "intense" },
+  //     "requestCompatibility": {
+  //       "supportsUsageInStreaming": true,
+  //       "maxTokensField": "max_completion_tokens", // Or "max_tokens".
+  //       "supportsReasoningEffort": true,
+  //       "reasoningFormat": "chat-template", // openai, openrouter, deepseek, together, zai, qwen, qwen-chat-template, chat-template, string-thinking, or ant-ling.
+  //       "chatTemplateParameters": {
+  //         "enable_thinking": { "$var": "thinking.enabled" },
+  //         "reasoning_level": { "$var": "thinking.effort", "omitWhenOff": true }
+  //       },
+  //       "cacheControlFormat": "anthropic",
+  //       "cacheControlTtl": "1h", // 5m or 1h.
+  //       "sendSessionAffinityHeaders": true,
+  //       "sessionAffinityFormat": "openai-nosession", // openai, openai-nosession, or openrouter.
+  //       // Use one routing dialect, never both.
+  //       "openRouterRouting": { "only": ["first-party"], "allow_fallbacks": false }
+  //       // "vercelGatewayRouting": { "only": ["bedrock"], "order": ["bedrock", "anthropic"] }
+  //     },
   //     "metadataSource": "maintained", // Optional bundled-fallback provenance marker.
   //     "pricing": {
   //       "input": 1.25,

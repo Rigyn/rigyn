@@ -58,6 +58,7 @@ test("bundled authoring resources are discoverable and progressively loaded", as
   assert.match(loaded.instructions, /cancelled.*queue.*later operation/isu);
   assert.match(loaded.instructions, /omitted limits use the active host `childRuns` policy/isu);
   assert.match(loaded.instructions, /never byte-slice serialized JSON.*parseable/isu);
+  assert.match(loaded.instructions, /required `content` as a string.*required `isError` as a boolean.*JSON\.stringify/isu);
   assert.match(loaded.instructions, /complete scan.*preserve rows.*did not observe/isu);
   assert.match(loaded.instructions, /never reflect remote response bodies, headers.*credential-bearing URLs/isu);
   assert.match(loaded.instructions, /model-controlled boolean is not user approval.*context\.ui\.confirm/isu);
@@ -66,9 +67,16 @@ test("bundled authoring resources are discoverable and progressively loaded", as
   assert.match(loaded.instructions, /real provider\/model turn.*reserved tool names.*schema failures/isu);
   assert.match(loaded.instructions, /packageRoot.*rigyn list --json.*disposable installation/isu);
   assert.match(loaded.instructions, /npm:file:\/\/\/absolute\/path\/package\.tgz/u);
+  assert.match(loaded.instructions, /relative module specifier.*file that contains the import/isu);
+  assert.match(loaded.instructions, /test\/tool\.test\.mjs.*\.\.\/runtime\/index\.mjs/isu);
+  assert.match(loaded.instructions, /must not import `rigyn`, `rigyn\/extensions`.*smallest host stub/isu);
+  assert.match(loaded.instructions, /examples\/custom-tool\/test\/runtime\.test\.mjs.*dependency-free pattern/isu);
+  assert.match(loaded.instructions, /non-zero test status.*failed verification/isu);
 
   const packageDocs = await readFile(resolve(resources.documentationRoot, "packages.md"), "utf8");
   assert.match(packageDocs, /rigyn install .*npm:file:\/\/\/absolute\/path\/my-package-1\.2\.3\.tgz/u);
+  const extensionDocs = await readFile(resolve(resources.documentationRoot, "extensions.md"), "utf8");
+  assert.match(extensionDocs, /`content` must be a string.*JSON\.stringify.*`isError` must be a boolean/isu);
 
   const prompts = await loadPromptTemplates([resources.promptRoot]);
   const prompt = prompts.find((entry) => entry.id === "build-extension");

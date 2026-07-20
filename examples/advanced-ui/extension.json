@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "advanced-ui-example",
+  "name": "Advanced UI example",
+  "version": "1.0.0",
+  "description": "Permission-gated structural terminal chrome and non-consuming key observation.",
+  "permissions": {
+    "advancedUi": true
+  },
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

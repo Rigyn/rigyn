@@ -14,6 +14,6 @@ Rigyn is a pre-1.0 project. Security fixes target the latest published minor lin
 
 ## Security boundary
 
-Runtime extensions and managed packages are trusted local code. They have the invoking user's operating-system access once enabled. Project-local executable resources stay blocked until the workspace is trusted, but trust is not a process sandbox. Provider credentials must remain behind the credential store and must never be included in logs, reports, extension messages, session exports, or vulnerability reproductions.
+Runtime extensions and managed packages are trusted local code. They have the invoking user's operating-system access once enabled. Project-local executable resources stay blocked until the workspace is trusted, but trust is not a process sandbox. Ordinary provider integrations keep credential values behind the broker. A separately reviewed package may declare `credentialAccess` to receive the active access credential, but refresh tokens and store handles remain private, and no credential may be included in logs, reports, extension messages, session exports, or vulnerability reproductions. The still-higher `unsafeTerminal` permission exposes raw input and arbitrary terminal-protocol output, so it must be treated as keyboard and terminal takeover authority.
 
 For installation and environment-specific diagnostics, see [`docs/install.md`](docs/install.md).

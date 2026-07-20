@@ -108,6 +108,97 @@ test("typed RPC client correlates concurrent responses, notifications, and remot
   assert.equal(transport.client.pendingRequestCount, 0);
 });
 
+test("typed RPC client exposes a caller-known cancellable user shell handle", async (t) => {
+  const transport = fixture();
+  t.after(async () => await transport.client.close());
+
+  const shell = transport.client.runShell({
+    runId: "client-shell-run",
+    threadId: "thread-shell",
+    command: "printf hello",
+  });
+  assert.equal(shell.runId, "client-shell-run");
+  const runRequest = await transport.nextRequest();
+  assert.equal(runRequest.method, "shell.run");
+  assert.deepEqual(runRequest.params, {
+    runId: "client-shell-run",
+    threadId: "thread-shell",
+    command: "printf hello",
+  });
+
+  const cancellation = shell.cancel("stop shell");
+  const cancelRequest = await transport.nextRequest();
+  assert.equal(cancelRequest.method, "shell.cancel");
+  assert.deepEqual(cancelRequest.params, { runId: "client-shell-run", reason: "stop shell" });
+  transport.send({ jsonrpc: "2.0", id: cancelRequest.id, result: { accepted: true } });
+  assert.deepEqual(await cancellation, { accepted: true });
+
+  const result = {
+    runId: "client-shell-run",
+    threadId: "thread-shell",
+    branch: "main",
+    excludedFromContext: true,
+    result: { text: "$ printf hello\nhello\nexit 0", exitCode: 0 },
+  };
+  transport.send({ jsonrpc: "2.0", id: runRequest.id, result });
+  assert.deepEqual(await shell.result, result);
+
+  const generated = transport.client.runShell({
+    threadId: "thread-shell",
+    command: "true",
+    excludeFromContext: true,
+  });
+  assert.match(generated.runId, /^rpc_shell_[a-f0-9]{32}$/u);
+  const generatedRequest = await transport.nextRequest();
+  assert.deepEqual(generatedRequest.params, {
+    runId: generated.runId,
+    threadId: "thread-shell",
+    command: "true",
+    excludeFromContext: true,
+  });
+  transport.send({ jsonrpc: "2.0", id: generatedRequest.id, result: {
+    ...result,
+    runId: generated.runId,
+  } });
+  await generated.result;
+});
+
+test("typed RPC client session and selection conveniences map to their protocol methods", async (t) => {
+  const transport = fixture();
+  t.after(async () => await transport.client.close());
+
+  const expectRequest = async (
+    method: string,
+    params: unknown,
+    operation: Promise<unknown>,
+  ): Promise<void> => {
+    const request = await transport.nextRequest();
+    assert.equal(request.method, method);
+    assert.deepEqual(request.params, params);
+    transport.send({ jsonrpc: "2.0", id: request.id, result: null });
+    await operation;
+  };
+
+  await expectRequest("session.current", undefined, transport.client.currentSession());
+  await expectRequest("session.new", { name: "new" }, transport.client.newSession({ name: "new" }));
+  await expectRequest("session.switch", { threadId: "thread" }, transport.client.switchSession({ threadId: "thread" }));
+  await expectRequest("session.clone", { name: "copy" }, transport.client.cloneSession({ name: "copy" }));
+  await expectRequest("session.fork", { eventId: "event" }, transport.client.forkSession({ eventId: "event" }));
+  await expectRequest("thread.forkMessages", { threadId: "thread", limit: 10 }, transport.client.forkMessages({
+    threadId: "thread",
+    limit: 10,
+  }));
+  await expectRequest("thread.model.cycle", { threadId: "thread", direction: "backward" }, transport.client.cycleModel({
+    threadId: "thread",
+    direction: "backward",
+  }));
+  await expectRequest("thread.thinking.cycle", { threadId: "thread" }, transport.client.cycleThinking({ threadId: "thread" }));
+  await expectRequest("thread.autoCompaction.set", { threadId: "thread", enabled: false }, transport.client.setAutoCompaction({
+    threadId: "thread",
+    enabled: false,
+  }));
+});
+
 test("request cancellation is local, ignores its late response, and close rejects remaining requests", async () => {
   const transport = fixture();
   const controller = new AbortController();

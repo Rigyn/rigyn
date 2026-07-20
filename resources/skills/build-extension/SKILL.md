@@ -32,12 +32,22 @@ Treat every bundled example and installed documentation file as read-only refere
 | Need | Start here |
 | --- | --- |
 | Small installable package | `../../../examples/package-starter/` |
-| Model-callable tool and observation format | `../../../examples/custom-tool/` |
+| Permission-gated structural header, widget, footer, or working presentation | `../../../examples/advanced-ui/` |
+| Reviewed native UI, provider transport, credential, raw-session, or host-configuration integration | `../../../examples/trusted-native-host/` |
+| Model-callable tool, observation format, and dependency-free package test | `../../../examples/custom-tool/` |
 | Tool-call guard or tool-result transform | `../../../examples/tool-lifecycle/` |
 | Dynamic active-tool catalog or loader | `../../../examples/dynamic-tools/` |
 | Custom session compaction lifecycle | `../../../examples/custom-compaction/` |
 | Fixed MCP stdio server boundary | `../../../examples/mcp-stdio/` |
 | Parallel child delegation or agent-style tool | `../../../examples/child-coordinator/` |
+| One focused child with child-specific instructions | `../../../examples/child-specialist/` |
+| Paged namespaced extension messages or memory | `../../../examples/paged-memory/` |
+| Historical token, cache, cost, or duration summaries | `../../../examples/session-analytics/` |
+| Provider disable, replacement, or live disposal | `../../../examples/provider-lifecycle/` |
+| Unified command, prompt, and skill discovery | `../../../examples/resource-discovery/` |
+| Safe system-prompt metadata inspection | `../../../examples/prompt-inspector/` |
+| Child review plus durable completion state | `../../../examples/review-workflow/` |
+| Session search, transcript paging, or naming | `../../../examples/session-tools/` |
 | Destructive or privileged action requiring approval | `../../../examples/approval-gate/` |
 | Provider adapter and model catalog | `../../../examples/custom-provider/` |
 | Provider adapter with API key, OAuth, or ambient authentication | `../../../examples/brokered-provider/` |
@@ -57,7 +67,7 @@ Before writing files, state a compact acceptance matrix:
 
 - **User entry point:** slash command, tool call, shortcut, startup behavior, prompt, or theme selection.
 - **Visible outcome:** the information or action the user receives; for UI, list the primary empty, loading, success, and failure states.
-- **Host authority:** exact runtime API operations the extension needs.
+- **Host authority:** exact runtime API operations and manifest permissions the extension needs.
 - **State:** what survives reload or restart, its schema version, and what is intentionally ephemeral.
 - **External boundary:** filesystem, process, network, browser, credentials, or none.
 - **Verification:** deterministic test and real install/reload smoke command.
@@ -90,6 +100,8 @@ Use normalized relative paths in `extension.json`. Keep stable identifiers lower
 
 For an npm-oriented third-party package, use the documented `rigyn` resource declarations or documented conventional directories. Put runtime libraries in `dependencies`, keep build-only tooling in `devDependencies`, and make the packed artifact contain every declared file. Never assume source-only files will exist after packaging.
 
+Managed runtime code may value-import only the exact host modules `rigyn/context`, `rigyn/core`, `rigyn/extensions`, `rigyn/images`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/testing`, `rigyn/tools`, and `rigyn/tui`. Do not import the package root or invent deeper host subpaths. Keep `rigyn` as a peer and development dependency for declarations and standalone tests, not as a nested production runtime.
+
 ## Implementation quality bar
 
 ### Runtime lifecycle
@@ -106,7 +118,7 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 
 - Give each tool one clear job and a closed, narrow JSON schema.
 - Validate before side effects. Use sequential execution or resource claims when calls can conflict.
-- Return the host's top-level `status` (`success`, `warning`, or `error`), one-line `summary`, and actionable `nextActions`; keep bounded domain data in `content`. Do not bury recovery fields inside JSON content, invent additional statuses, or emit placeholder artifacts.
+- Return required `content` as a string and required `isError` as a boolean. Serialize structured domain data with `JSON.stringify(...)`; never return an object or array directly as `content`. Put the host's top-level `status` (`success`, `warning`, or `error`), one-line `summary`, and actionable `nextActions` beside those required fields. Do not bury recovery fields inside JSON content, invent additional statuses, or emit placeholder artifacts.
 - On error, provide a root-cause hint, a safe retry step, and a stop condition. Never expose credentials or unbounded raw output.
 - Bound aggregate result bytes as well as item counts; many individually valid rows can still overflow model context.
 - Bound JSON fields and items before `JSON.stringify`. Never byte-slice serialized JSON; overflow output must remain parseable and explicitly identify truncation.
@@ -121,13 +133,18 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 - Keep model context and transcript presentation separate. Do not add noisy status records to model context.
 - Mark genuinely large, rarely used tool definitions with `loading: "deferred"`. Treat it as a provider-neutral hint: verified provider families may use native tool search, and all other cases safely receive the full definition.
 - Make event handlers deterministic, bounded, abortable, and idempotent where retries or reload can repeat work.
+- In a lifecycle or input listener, use `context.session` when present for callback-bound identity, model/usage/prompt inspection, idle or pending-message checks, abort, and compaction. Do not capture a mutable active-session pointer or assume every non-session event has this surface.
+- Build streaming UI from the accumulated provider-neutral `message_start.message` and `message_update.message` snapshots. Treat `tool_call_end` as finalized canonical input, `turn_end` as the assistant-plus-tool-result boundary, and `agent_end.messagesTruncated` as authoritative before consuming its bounded run history. Do not retain native provider stream objects.
 - For branch-aware tool guards, use the `tool_call` event's host-supplied `threadId`, `runId`, and resolved `branch`. Never put session identity in a model-controlled tool schema or infer it from a mutable global pointer.
 - For branch-aware tool execution or `api.runChild`, use the tool context's host-supplied `threadId`, `runId`, and `branch`; do not add those identifiers to model-controlled input.
 - For durable read-modify-write state, use `api.session.compareAndAppendState` with the prior record's `eventId` (or `null` when absent) and a bounded conflict retry. Do not pair `readState` with a blind `appendState` for counters, memory, plans, or indexes.
 - Record each logical message from one canonical event, filter accepted roles explicitly, and avoid a mutable global "active session" pointer. RPC and embedded hosts can run or switch more than one session.
-- Use `api.runChild` for bounded agent delegation. Supply an explicit tool allowlist (`[]` for model-only work), choose fresh or stable-fork context deliberately, and default to ephemeral sessions. Omitted limits use the active host `childRuns` policy (stock defaults are 32 model turns and ten minutes); set lower `maxSteps` or `timeoutMs` only when the delegated task is intentionally narrower. Never implement delegation by launching `rigyn`, its RPC mode, or another copy of the active harness.
+- Use `api.runChild` for bounded agent delegation. Supply an explicit tool allowlist (`[]` for model-only work), choose fresh or stable-fork context deliberately, and default to ephemeral sessions. Use bounded `systemPrompt` only when the child genuinely needs a replacement role; prefer `appendSystemPrompt` for task-specific guidance so normal host instructions remain present. The host always retains the no-recursive-delegation invariant. Omitted limits use the active host `childRuns` policy (stock defaults are 32 model turns and ten minutes); set lower `maxSteps` or `timeoutMs` only when the delegated task is intentionally narrower. Never implement delegation by launching `rigyn`, its RPC mode, or another copy of the active harness.
 - For visible foreground delegation, use `runChild.onStart` for stable child identity and coalesce safe `runChild.onEvent` updates into native tool progress. Keep the tool call pending until the child settles, then return one terminal result so the parent loop continues. Do not forward every token delta or keep a second in-memory transcript.
 - For a parallel child batch, use one controller and identity slot per child, aggregate progress into the parent tool row, and await `Promise.allSettled` before returning. Implement detached background jobs only when explicitly requested; then own bounded job state, cancellation, durable completion, failure observation, and generation disposal rather than dropping a `runChild` promise.
+- Use `api.getDiscoveryView()` when an extension needs one command/prompt/skill picker. Keep `api.getCommands()` only for synchronous runtime-command discovery. Page older namespaced messages by passing the first returned `eventId` as `beforeEventId`; never scan an unbounded session history.
+- Use `api.getSessionUsage()` for restart-safe token/cache/cost totals and `api.getSystemPromptSnapshot()` only when prompt inspection is necessary. The latter is redacted but still contains project instructions, so do not copy it into diagnostics or external requests by default.
+- Keep the disposer returned by `api.registerProvider()` when a provider can be disabled before generation shutdown. Await it once; it is idempotent and ownership-scoped.
 - Treat captured transcript/session text as untrusted before persistence. Cross-workspace reads or mutations require an explicit user action and scope check, even when the model knows an object ID.
 - For a session browser or dashboard, page `api.listSessions` to choose a current-workspace `threadId`, then page `api.getTranscript`. Do not scan the session database, enumerate another workspace, or search raw event payloads.
 - Prefer the host session namespace for concurrent durable state. If an external file or database is required, validate every record, coordinate independent processes, use collision-safe atomic commits, surface write failures, and drain pending writes during shutdown and disposal.
@@ -135,12 +152,24 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 
 ### Credentials and external systems
 
-- Declare exact authenticated request origins and the required API-key, bearer, or AWS signing policy in the provider auth descriptor. Send requests only through `api.auth.fetch`. Credential bytes remain behind the host broker and must never be requested, printed, persisted, or included in extension output. Start from `examples/brokered-provider`.
+- For ordinary provider integrations, declare exact authenticated request origins and the required API-key, bearer, or AWS signing policy in the provider auth descriptor. Send requests through `api.auth.fetch`; credential bytes then remain behind the host broker. Start from `examples/brokered-provider`.
 - Never reflect remote response bodies, headers, or credential-bearing URLs into model-visible errors. Return a bounded local category and recovery step instead.
 - A model-controlled boolean is not user approval. Use native `context.ui.confirm` for trust, destructive actions, or external execution, and fail closed when interactive UI is unavailable.
 - Execute argv arrays for fixed programs; do not interpolate untrusted input into a shell command.
 - Treat installed runtime modules and their dependencies as trusted code. Document network, process, filesystem, and credential authority in the README.
 - Measure both packed output and the complete production dependency tree against Rigyn's entry-count, file-size, aggregate-byte, nesting-depth, and operation-time limits. Choose smaller dependencies or output; never ship package-local `node_modules` or relax host limits to make a package fit.
+
+### Reviewed native tier
+
+Use `api.native` only when the ordinary API cannot implement the product. The package must pass the trusted local or managed-package review and declare each exact permission it uses; a manifest declaration never makes an untrusted project executable.
+
+- `nativeUi` grants decoded input interception, complete editor replacement/wrapping, autocomplete wrapping, persistent component mounts above or below the editor, complete header/footer replacement, paste, resolved theme objects, and generation-owned application of validated SGR-only themes. It does not grant raw terminal bytes or unvalidated ANSI output.
+- `providerOverride` grants a generation-owned complete replacement or a field-level `api.native.providers.overlay` for display name, secure base URL, headers, models, catalog loading, or streaming behavior. Prefer an overlay when retaining the host adapter and authentication. `providerWire` grants request-dependent JSON/destination/header transformation and response-header observation; use a host-applied `baseUrl` patch to preserve private query values without seeing them. Credential-bearing request fields and response bodies remain hidden.
+- `credentialAccess` allows `api.native.credentials.resolve()` to return the active access credential and derived headers. Request it only when brokered `api.auth.fetch` cannot implement the integration. Never print, persist, send to extension output, or retain the result beyond the bounded operation; refresh tokens and credential-store handles are never returned.
+- `sessionRaw` grants bounded canonical event/run pages and process-local unredacted prompt snapshots. It is not a mutable store handle and does not widen workspace or branch ownership.
+- `hostConfiguration` grants effective host paths/settings and validated user or trusted-project configuration updates. Do not use it as a general file-write bypass.
+
+Every native handle is generation-owned. Propagate caller cancellation and treat `api.signal` abort as immediate revocation. Use returned provider/UI disposers only for an earlier opt-out while the generation is active; unload already revokes them, so do not call generation-bound handles from `onDispose`. Release only extension-owned raw resources there. Verification must cover an undeclared permission, an untrusted entry, caller and generation abort, failed candidate activation, successful reload, and final unload; no privileged registration or secret-bearing value may survive those boundaries. Start from `examples/trusted-native-host` and review `docs/extension-auth-threat-model.md` before requesting the tier.
 
 ### User experience
 
@@ -148,14 +177,22 @@ For an npm-oriented third-party package, use the documented `rigyn` resource dec
 - Design empty, loading, active, success, cancelled, disconnected, and error states for interactive products.
 - Make destructive or irreversible actions explicit; routine read and navigation actions should remain frictionless.
 - Prefer meaningful information hierarchy over a grid of placeholder cards. A dashboard must expose live session value and real controls, not merely prove that a web server starts.
+- Use ordinary structural UI unless persistent terminal chrome is essential. For `api.ui.advanced`, declare `"permissions": { "advancedUi": true }`, require the package to pass the trusted local or managed-package policy, and start from `examples/advanced-ui`. The tier permits bounded header/footer components, widgets above or below the editor, complete structural header/footer replacement, working frames, the collapsed-reasoning label, a generation-owned tool-expansion override, and non-consuming sanitized key observation. Component factories may resolve asynchronously; pending factories consume no rows and are discarded safely after unload. The tier never permits raw terminal bytes, ANSI, screen ownership, secret input, key consumption, or submission control. Rely on generation cleanup and keyed restoration; do not mutate host internals or reproduce the terminal loop.
+
+### Local imports and test location
+
+- Resolve every relative module specifier from the file that contains the import, never from the shell's current directory. For example, `test/tool.test.mjs` imports `runtime/index.mjs` with `../runtime/index.mjs`, not `../../runtime/index.mjs`.
+- When `rigyn` is not installed as a resolvable package dependency, a package-local test must not import `rigyn`, `rigyn/extensions`, or another `rigyn/*` subpath. Import the package's local runtime entry and activate it with the smallest host stub needed by that test. Use `examples/custom-tool/test/runtime.test.mjs` as the dependency-free pattern. Exercise the real loader only after the package is installed into a Rigyn host or when a declared development dependency makes the public host modules resolvable.
+- Before running a package test, change to the package root and confirm that the expected runtime, manifest, and test files exist there. Run the exact package-local command from that directory, such as `node --test test/*.test.mjs` or `npm test`.
+- Treat a non-zero test status, missing module, empty test discovery, or a command run from the wrong directory as a failed verification. Fix the package and rerun the exact command; never report completion from a partial or assumed command result.
 
 ## Build and verify
 
 1. Inspect repository conventions and current tests before editing.
 2. Choose a fresh output directory in the active workspace and confirm it is not a bundled example or an installed-package path.
 3. Implement the smallest end-to-end vertical slice that reaches the visible outcome.
-4. Add a deterministic focused test using the real loader/host contract. Cover malformed input and cancellation or cleanup when relevant.
-   The documented package-local test command must also pass from an ordinary user shell. Do not make it depend on `RIGYN_INSTALL_DIR` or another environment variable that exists only inside an active harness process. If `rigyn/extensions` is not installed as a resolvable development dependency, keep `npm test` dependency-free and exercise the real loader through the documented `rigyn --package` or managed-install smoke path.
+4. Add a deterministic focused test using the real loader/host contract when it is resolvable, or the documented dependency-free activation pattern before installation. Cover malformed input and cancellation or cleanup when relevant. For every tool result, assert that `content` is a string, `isError` is a boolean, and parsed JSON has the promised shape. Resolve local imports from the test file and run it from the package root.
+   The documented package-local test command must also pass from an ordinary user shell. Do not make it depend on `RIGYN_INSTALL_DIR` or another environment variable that exists only inside an active harness process. If `rigyn/extensions` is not installed as a resolvable development dependency, `npm test` must remain dependency-free: import the local runtime, use a minimal host stub, and exercise the real loader later through the documented `rigyn --package` or managed-install smoke path.
 5. Treat the clean source, exact packed archive, and exact installed copy as three separate verification surfaces. Before the source report, remove package-local `node_modules`, archives, generated state, and test credentials. Run `rigyn extensions author report PACKAGE`, the focused test, typecheck, and the repository's normal verification command; then run the author report again on the exact unpacked archive.
 6. Install the exact archive through the normal package command. For a local npm archive use `rigyn install "npm:file:///absolute/path/package.tgz"`, not an ambiguous relative source.
 7. Run extension diagnostics, exercise the documented entry point, reload it, and exercise it again.
@@ -183,6 +220,7 @@ Test the applicable cases:
 - package install from a separate directory, plus remove;
 - unavailable interactive UI in a headless host;
 - stale autocomplete/editor callbacks after reload, malformed ranges, oversized replacements, and protected application shortcuts;
+- undeclared or untrusted native permissions, stale native handles, failed-candidate rollback, caller/generation abort, and reload/unload cleanup when using `api.native`;
 - oversized or hostile browser/process input when an external boundary exists.
 - every documented CLI command dispatching once without recursive child launches.
 - child-run timeout, cancellation, output truncation, unavailable tools, ephemeral cleanup, and recursive-delegation rejection when the package delegates model work.

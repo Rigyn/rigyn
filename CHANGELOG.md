@@ -4,6 +4,36 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.3.0] - 2026-07-19
+
+### Added
+
+- Added application-stable `rigyn/sdk` and `rigyn/modes` entry points for programmatic composition, print mode, correlated RPC mode, and an exclusive owned-runtime terminal host with bounded transcript repaint, model/session controls, authentication, reload, extension UI, commands, prompts, and skills.
+- Added generation-owned extension contracts for advanced and native UI, decoded editor/input ownership, separately gated unsafe terminal access, provider replacement and wire interception, managed authentication, bounded raw-session reads, live prompt snapshots, effective configuration, child-specific instructions, provider disposal, and cursor-paged durable messages.
+- Added unified command/prompt/skill discovery, historical usage/cache/cost summaries, system-prompt snapshots, model/thinking lifecycle events, finalized response events, project-trust participation, user-message delivery, and semantic conformance coverage for every public extension API member.
+- Added generic credential-conditioned message-gateway transport, declarative model request compatibility, managed AWS and Google credential chains, xAI subscription authentication, local GGUF and router model management, normalized provider response diagnostics, and additional protocol edge coverage.
+- Added automatic light/dark theme pairs, terminal background detection, active custom-theme hot reload, cancellable retry controls, typed RPC model/thinking/session/compaction conveniences, and bounded container and fixed-SSH execution examples.
+- Expanded the packaged authoring corpus with advanced UI, child specialization, paged memory, prompt inspection, provider lifecycle, resource discovery, review workflow, session analytics/tools, trusted native host, and SDK composition examples.
+
+### Changed
+
+- Managed package installation now activation-tests the staged candidate before commit, publishes one immutable resource generation, expands the stable host-module map, and retains transactional rollback and lifecycle disposal across startup, reload, and removal.
+- Provider routing now applies explicit per-model protocol and request metadata without model-name guessing; official SDKs remain transport adapters behind Rigyn's canonical requests, normalized streams, retry policy, credential broker, and redaction boundaries.
+- The terminal interface now presents complete retained tool output, width-bounded reasoning summaries, automatic theme changes, richer editor navigation and kill-ring behavior, stable overlays, terminal images, responsive narrow layouts, and extension-owned structural presentation without raw terminal authority by default.
+- Configuration templates and effective output now document every public setting, including retry, theme pairing, provider transport, model compatibility, child-run policy, execution backends, and operator controls, without storing credentials.
+
+### Fixed
+
+- Fixed fresh owned-runtime interactive sessions failing their first prompt without a manual model choice, and stopped an initial run selection from overriding later `/model` changes.
+- Fixed reload and resume stalls across large extension sets and long session histories by keeping activation candidate-first, replay cursor-paged, transcript materialization bounded, and generation cleanup cancellable.
+- Fixed provider edge cases involving early stream closure, retry eligibility, redacted reasoning, partial tool input, refusal detail, continuation state, request compatibility, cache accounting, and response telemetry.
+- Fixed retry-delay cancellation, retry enable/disable propagation, theme watcher recovery, credential-scoped gateway catalog races, and executor process-tree cleanup on cancellation and output overflow.
+
+### Security
+
+- Kept credentials behind exact-origin authenticated fetch and permission-gated native handles; ordinary extensions receive no credential store, refresh tokens, mutable session store, provider headers, or unvalidated terminal output.
+- Hardened managed auth callbacks, cloud metadata access, external credential commands, extension provider overrides, raw session pages, process execution, and package activation with explicit bounds, generation ownership, redaction, cancellation, and rollback.
+
 ## [0.2.0] - 2026-07-18
 
 ### Added

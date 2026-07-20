@@ -4,6 +4,8 @@ Rigyn keeps the released inline workbench geometry: transcript first, a word-wra
 
 The interactive mode is selected automatically for a raw TTY. Set `RIGYN_TUI_MODE=full`, `classic`, or `accessible` to request a mode explicitly; `RIGYN_ACCESSIBLE=1` is the accessibility shortcut. Accessible mode emits no cursor-control sequences. Set `RIGYN_ASCII=1` for ASCII glyphs. The full interface stays inline by default so completed output remains in terminal scrollback; `RIGYN_ALT_SCREEN=1` opts into an alternate screen.
 
+Operator presentation settings live in `config.jsonc`: `quietStartup`, `hideThinkingBlock`, `showCacheMissNotices`, `externalEditor`, `treeFilterMode`, `editorPaddingX`, `outputPad`, `autocompleteMaxVisible`, `showHardwareCursor`, `terminal`, `markdown`, `images`, and `branchSummary`. `/reload` applies active presentation settings without restarting; `quietStartup` affects the next launch. Cache-miss notices are local, opt-in, and require provider-reported cache activity; they do not claim that every uncached request is avoidable. See [Configuration](configuration.md) for defaults and bounds.
+
 Picker help is generated from the active key map rather than fixed default keys. Run `/hotkeys` to inspect the complete current map and edit `~/.config/rigyn/keybindings.json` (or the equivalent XDG configuration path) to remap it. Command decks show the most relevant actions; `/hotkeys` remains the complete reference.
 
 ## Extension TUI
@@ -15,6 +17,22 @@ This is the supported extension surface. The internal `TuiController` and live-s
 The native transcript presents each tool inside the released horizontal separators with a narrow transparent status rail. The header carries the operation, target, lifecycle state, and decisive metadata without a background slab or duplicated call/result label. Running tools keep a small recent live tail so streaming output cannot take over the screen. After completion, Rigyn displays all canonical output retained by the tool layer by default, including complete stored reads, searches, shell output, and edit diffs; no expansion shortcut is required. Canonical output is bounded before presentation to 2,000 lines and 50 KiB. When shell output exceeds that bound, the result states what was retained and includes the full-output path when one exists. Structured live progress distinguishes stdout, stderr, partial errors, and truncation. Provider reasoning summaries wrap independently down the terminal instead of growing sideways. A registered tool renderer replaces the call or result slots it returns; missing, invalid, expired, or failed slots use the native host presentation.
 
 The focused runnable example is [`examples/custom-overlay.mjs`](../examples/custom-overlay.mjs).
+
+## Trusted advanced extension UI
+
+`api.ui.advanced` is the extension-facing tier for persistent terminal presentation. An extension must declare `"permissions": { "advancedUi": true }` in `extension.json` and must also pass the host's trusted local or managed-package policy. The declaration never enables untrusted project code by itself.
+
+- `setComponent(slot, key, factory?)` mounts or clears a keyed `header`, `footer`, legacy `widget`, explicit `widget-above` or `widget-below` component. `header-replacement` and `footer-replacement` replace the complete corresponding host region while active. A slot accepts at most 16 components; each render is limited to four rows and 16 KiB before the viewport applies its aggregate chrome budget.
+- `setWorkingIndicator({ frames, intervalMs }?)` selects 1-32 sanitized frames and a 50-2,000 ms cadence. Omitting the value clears this generation's override.
+- `setHiddenReasoningLabel(label?)` changes only the bounded label for collapsed reasoning. Reasoning content and visibility remain host-owned.
+- `getToolOutputExpanded()` reports the current completed-tool preference in an interactive TUI. `setToolOutputExpanded(value?)` applies or clears this generation's temporary override.
+- `observeKeys(observer)` receives immutable sanitized key metadata without consuming input and returns an idempotent disposer. Secret entry bypasses observers, and an observer cannot prevent host shortcuts, editing, focus, or submission.
+
+The advanced tier is structural: factories use the normal `RuntimeUiComponentFactory` and validated semantic blocks, and may resolve synchronously or asynchronously. Pending factories occupy no rows; late resolution after unload is discarded and disposed. The tier does not receive input streams, terminal bytes, ANSI authority, screen ownership, or submission control. Operations are namespaced to the owning extension generation. Global replacements are insertion-ordered and last-wins; clearing or ending the active owner restores the previous live owner, and removing the final tool-expansion override restores the exact user preference beneath it. Generation abort, failed activation, reload, UI reset, and terminal close dispose every owned mount and observer. See [`examples/advanced-ui`](../examples/advanced-ui/README.md) for a directly runnable package.
+
+`api.native.ui` is a separate trusted integration tier gated by the manifest permission `nativeUi`. It can consume or rewrite decoded key events before host keybindings, replace or wrap the complete editor implementation, wrap autocomplete, paste into the active editor, mount persistent structural components above or below the editor, replace the complete header or footer, inspect resolved theme objects, and apply one validated resolved theme for its generation. Theme codes accept SGR sequences only; terminal controls and OSC data are rejected. It still does not expose terminal byte streams or permit unvalidated ANSI output. Registrations are stack-safe and generation-owned: disposing an override reveals the nearest surviving owner, and reload or terminal teardown invalidates every retained handle. It is available only in the interactive TUI; a headless host rejects access explicitly.
+
+`api.native.terminal` is the opt-in escape hatch gated by `unsafeTerminal`. It receives raw input chunks before decoding and may consume or rewrite them; it can write arbitrary terminal-protocol strings, inspect terminal capabilities and dimensions, read the active keybinding map, and request a host redraw after out-of-band output. Raw handlers and writes are capped at 1 MiB per operation and are revoked with the extension generation, but their contents are intentionally unsanitized. This permission can observe secret input and destabilize the terminal, so prefer `api.ui`, `api.ui.advanced`, or `api.native.ui` unless raw protocol ownership is essential.
 
 ## Where UI is available
 
@@ -89,7 +107,7 @@ The kit applies the existing control stripping, semantic-role validation, graphe
 
 ## Component contract
 
-`ui.custom(factory, options, signal)` mounts one component and resolves when it closes. The factory receives a host and returns:
+`ui.custom(factory, options, signal)` mounts one component and resolves when it closes. The factory receives a host and may return the component directly or through a promise:
 
 ```js
 {
@@ -193,7 +211,7 @@ All renderer output passes through the same text, width, role, cursor, byte, and
 
 Components, overlays, shortcuts, renderers, status, widgets, headers, footers, and titles belong to one extension generation. `/reload` stages a new generation, commits it atomically, then aborts and disposes the old generation. A failed candidate leaves the old UI active.
 
-Autocomplete providers, editor middleware, working-state overrides, and theme-change listeners follow the same generation boundary. The `theme_change` lifecycle event contains `previous`, `current`, bounded `available`, and `reason` (`selection` or `catalog`). Updating the definition of the selected custom theme invalidates the live render and emits a catalog change even when its name stays the same.
+Autocomplete providers, editor middleware, working-state overrides, and theme-change listeners follow the same generation boundary. The `theme_change` lifecycle event contains `previous`, `current`, bounded `available`, and `reason` (`selection`, `catalog`, `terminal`, or `extension`). Updating the definition of the selected loose custom theme hot-reloads the live render and emits a catalog change even when its name stays the same. A setting such as `paper/ocean` selects `paper` for a light terminal and `ocean` for a dark terminal; Rigyn uses the terminal color-scheme protocol or OSC 11 background query, with `COLORFGBG` as the startup fallback.
 
 Practical rules:
 

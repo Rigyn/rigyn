@@ -245,7 +245,7 @@ test("the compatible Rigyn peer is host-satisfied while optional peer metadata s
   const capture = join(root, "npm-calls.jsonl");
   const marker = join(root, "lifecycle-ran");
   await mkdir(source);
-  await writePeerFixture(source, "1.0.0", ">=0.1.0 <0.3.0");
+  await writePeerFixture(source, "1.0.0", ">=0.1.0 <0.4.0");
   const fakeNpm = await writeFakeNpm(root);
   const manager = fakeManager(root, fakeNpm, capture, marker);
 
@@ -258,7 +258,7 @@ test("the compatible Rigyn peer is host-satisfied while optional peer metadata s
     peerDependenciesMeta: Record<string, { optional: boolean }>;
   };
   assert.deepEqual(installedManifest.peerDependencies, {
-    rigyn: ">=0.1.0 <0.3.0",
+    rigyn: ">=0.1.0 <0.4.0",
     "optional-peer": "^3.0.0",
   });
   assert.deepEqual(installedManifest.peerDependenciesMeta, { "optional-peer": { optional: true } });
@@ -274,7 +274,7 @@ test("the compatible Rigyn peer is host-satisfied while optional peer metadata s
   assert.equal((globalThis as Record<string, unknown>).__peerReferenceActivation, "fixture-dependency@1.0.0");
   await host.close();
 
-  await writePeerFixture(source, "2.0.0", ">=0.1.0 <0.3.0");
+  await writePeerFixture(source, "2.0.0", ">=0.1.0 <0.4.0");
   const updated = await manager.update("peer-reference");
   assert.equal(updated.version, "2.0.0");
   catalog = await discoverExtensions(manager.sources(true));
@@ -302,7 +302,7 @@ test("a package with only a compatible Rigyn peer installs without invoking npm"
     name: "rigyn-host-only-peer",
     version: "1.0.0",
     type: "module",
-    peerDependencies: { rigyn: ">=0.1.0 <0.3.0" },
+    peerDependencies: { rigyn: ">=0.1.0 <0.4.0" },
   }));
   await writeFile(join(source, "runtime", "index.mjs"), "export default () => {};\n");
   const manager = fakeManager(root, await writeFakeNpm(root), capture, join(root, "marker"));

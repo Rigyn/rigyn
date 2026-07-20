@@ -64,6 +64,7 @@ test("owned public runtime loads resources, runs offline, waits idle, and closes
   const run = await runtime.start({ prompt: "test", provider: provider.id, model: "model-a" });
   assert.match(run.threadId, /^thread_/u);
   const result = await run.result;
+  assert.equal(run.cancelRetry(), false);
   assert.equal(result.threadId, run.threadId);
   assert.equal(result.results.at(-1)?.finalText, "offline result");
   await runtime.waitForIdle();
@@ -105,7 +106,8 @@ test("owned public runtime loads resources, runs offline, waits idle, and closes
   const agentSettled = lifecycle.indexOf("agent_settled");
   const sessionEnd = lifecycle.indexOf("session_end");
   const shutdown = lifecycle.indexOf("session_shutdown");
-  assert.ok(sessionStart < modelSelect && modelSelect < thinkingSelect && thinkingSelect < agentStart);
+  assert.ok(sessionStart < modelSelect && modelSelect < agentStart);
+  assert.equal(thinkingSelect, -1, "off-to-off reasoning is not a selection change");
   assert.ok(agentStart < turnStart && turnStart < messageStart && messageStart < messageUpdate && messageUpdate < turnEnd);
   assert.ok(turnEnd < agentEnd && agentEnd < agentSettled && agentSettled < sessionEnd && sessionEnd < shutdown);
   assert.ok(lifecycle.includes("event"));

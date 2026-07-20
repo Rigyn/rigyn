@@ -12,6 +12,7 @@ import { interactiveCommand, interactiveCommandPalette } from "../interactive/co
 import { detectTerminalCapabilities, terminalSize } from "./capabilities.js";
 import {
   RuntimeUiComponentMount,
+  runtimeUiKeyEvent,
   sanitizeRuntimeUiBlock,
   type RuntimeEditorRendererBinding,
   type RuntimeEditorRenderView,
@@ -28,8 +29,8 @@ import {
   type RuntimeUiOverlayUnfocusOptions,
   type RuntimeUiRenderContext,
 } from "./components.js";
-import { MultilineEditor, type EditorSnapshot } from "./editor.js";
-import { editTextExternally } from "./external-editor.js";
+import { MultilineEditor, type EditorSnapshot, type TuiEditorImplementation } from "./editor.js";
+import { editTextExternally, parseEditorCommand } from "./external-editor.js";
 import { rankPickerItems } from "./fuzzy.js";
 import { buildSessionPickerRows, type SessionPickerSortMode } from "./session-picker.js";
 import {
@@ -42,6 +43,14 @@ import { KeyDecoder, type KeyEvent, type TerminalReply } from "./keys.js";
 import { Keybindings, keybindingForEvent, normalizeKeybinding, type KeybindingAction } from "./keybindings.js";
 import { renderFrame, renderTranscriptFrame, type ToolRenderSlots } from "./layout.js";
 import { TuiModel } from "./model.js";
+import type {
+  NativeUiAutocompleteWrapper,
+  NativeUiEditorWrapper,
+  NativeUiInputHandler,
+  NativeUiInputResult,
+  UnsafeTerminalInputHandler,
+  UnsafeTerminalInputResult,
+} from "./native-ui.js";
 import { LiveSurfaceRenderer } from "./surface-renderer.js";
 import {
   composeTerminalImageOutput,
@@ -49,7 +58,19 @@ import {
   terminalImageFallback,
   validateTerminalImage,
 } from "./terminal-image.js";
-import { createTheme, type Theme, type ThemeDefinition } from "./theme.js";
+import {
+  createTheme,
+  parseAutomaticThemePair,
+  resolveThemeSetting,
+  THEME_ROLES,
+  type Theme,
+  type ThemeDefinition,
+} from "./theme.js";
+import {
+  terminalColorSchemeForRgb,
+  terminalColorSchemeFromEnvironment,
+  type TerminalColorScheme,
+} from "./terminal-colors.js";
 import type {
   PickerItem,
   PickerKind,
@@ -75,12 +96,16 @@ import type {
   TuiInputImageAttachment,
   TuiLimits,
   TuiOutput,
+  TuiOperatorPreferences,
+  TuiNormalizedKeyObserver,
+  TuiPersistentComponentSlot,
   TuiSignalSource,
   TuiSettingItem,
   TuiThemeChange,
   TuiViewState,
+  TuiWorkingIndicatorOptions,
 } from "./types.js";
-import { cellWidth, sanitizeTerminalText, splitGraphemes, truncateCells } from "./unicode.js";
+import { byteTruncate, cellWidth, sanitizeTerminalText, splitGraphemes, truncateCells } from "./unicode.js";
 import { fileReferenceQuery } from "./workspace-files.js";
 
 const ENTER_SCREEN = "\u001b[?1049h\u001b[?2004h\u001b[?25h\u001b[2J\u001b[H";
@@ -94,8 +119,18 @@ const ENABLE_KITTY_KEYBOARD = "\u001b[>7u";
 const DISABLE_KITTY_KEYBOARD = "\u001b[<u";
 const ENABLE_MODIFY_OTHER_KEYS = "\u001b[>4;2m";
 const DISABLE_MODIFY_OTHER_KEYS = "\u001b[>4m";
+const QUERY_TERMINAL_BACKGROUND = "\u001b]11;?\u0007";
+const QUERY_TERMINAL_COLOR_SCHEME = "\u001b[?996n";
+const ENABLE_TERMINAL_COLOR_SCHEME = "\u001b[?2031h";
+const DISABLE_TERMINAL_COLOR_SCHEME = "\u001b[?2031l";
 const KEYBOARD_NEGOTIATION_MS = 80;
 const ACTIVITY_FRAME_MS = 120;
+const MAX_ADVANCED_UI_SLOT_COMPONENTS = 16;
+const MAX_ADVANCED_UI_SLOT_LINES = 4;
+const MAX_ADVANCED_UI_SLOT_BYTES = 16 * 1024;
+const MIN_WORKING_INDICATOR_MS = 50;
+const MAX_WORKING_INDICATOR_MS = 2_000;
+const CONTROLLER_ADVANCED_UI_KEY = "controller:default";
 
 function displayBinding(value: string, unicode: boolean): string {
   const names: Record<string, string> = {
@@ -227,13 +262,81 @@ interface AutocompleteOwner {
 
 interface PendingAutocomplete {
   controller: AbortController;
-  owner: AutocompleteOwner;
+  owner: ActiveAutocompleteOwner;
   text: string;
   cursor: number;
 }
 
+interface ActiveAutocompleteOwner {
+  provider: TuiAutocompleteProvider;
+  signal: AbortSignal;
+  version: number;
+}
+
+interface NativeAutocompleteOwner {
+  previous: TuiAutocompleteProvider;
+  provider: TuiAutocompleteProvider;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
 interface EditorMiddlewareOwner {
   middleware: TuiEditorMiddleware;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface NativeInputOwner {
+  handler: NativeUiInputHandler;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface UnsafeTerminalInputOwner {
+  handler: UnsafeTerminalInputHandler;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface NativeEditorOwner {
+  editor: TuiEditorImplementation;
+  previous: TuiEditorImplementation;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface NativeThemeOwner {
+  theme: Theme;
+  previous: Theme;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface PersistentRuntimeComponentOwner {
+  mount: RuntimeUiComponentMount<void>;
+}
+
+interface WorkingIndicatorOwner {
+  value: TuiWorkingIndicatorOptions;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface HiddenReasoningLabelOwner {
+  value: string;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface ToolOutputExpansionOwner {
+  value: boolean;
+  signal: AbortSignal;
+  onAbort(): void;
+}
+
+interface NormalizedKeyObserverOwner {
+  key: string;
+  observer: TuiNormalizedKeyObserver;
   signal: AbortSignal;
   onAbort(): void;
 }
@@ -263,6 +366,7 @@ interface Overlay {
   resolve?: (value: unknown) => void;
   reject?: (error: Error) => void;
   cleanup(): void;
+  maxVisible?: number;
   settings?: {
     onChange(item: TuiSettingItem, value: string): void | Promise<void>;
     busy: boolean;
@@ -540,6 +644,172 @@ function validatedEditorMiddlewareResult(
   return { action: "replace", text: value.text, ...(value.cursor === undefined ? {} : { cursor: value.cursor }) };
 }
 
+function persistentComponentKey(value: string): string {
+  if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9:._-]{0,127}$/u.test(value)) {
+    throw new Error("Persistent UI component keys must be 1-128 identifier characters");
+  }
+  return value;
+}
+
+const PERSISTENT_COMPONENT_SLOTS = [
+  "header",
+  "widget",
+  "widget-above",
+  "widget-below",
+  "footer",
+  "header-replacement",
+  "footer-replacement",
+] as const satisfies readonly TuiPersistentComponentSlot[];
+
+function workingIndicatorOptions(value: TuiWorkingIndicatorOptions): TuiWorkingIndicatorOptions {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Working indicator options must be an object");
+  }
+  if (!Array.isArray(value.frames) || value.frames.length < 1 || value.frames.length > 32) {
+    throw new RangeError("Working indicator frames must contain 1-32 values");
+  }
+  if (!Number.isSafeInteger(value.intervalMs)
+    || value.intervalMs < MIN_WORKING_INDICATOR_MS
+    || value.intervalMs > MAX_WORKING_INDICATOR_MS) {
+    throw new RangeError(`Working indicator interval must be ${MIN_WORKING_INDICATOR_MS}-${MAX_WORKING_INDICATOR_MS}ms`);
+  }
+  let bytes = 0;
+  const frames = value.frames.map((frame) => {
+    if (typeof frame !== "string") throw new TypeError("Working indicator frames must be strings");
+    const safe = truncateCells(sanitizeTerminalText(frame).replaceAll("\n", " "), 16).trim();
+    if (safe === "") throw new Error("Working indicator frames cannot be empty");
+    bytes += Buffer.byteLength(safe, "utf8");
+    if (bytes > 1_024) throw new RangeError("Working indicator frames exceed 1 KiB");
+    return safe;
+  });
+  return Object.freeze({ frames: Object.freeze(frames), intervalMs: value.intervalMs });
+}
+
+function hiddenReasoningLabel(value: string): string {
+  if (typeof value !== "string") throw new TypeError("Hidden reasoning label must be a string");
+  const safe = truncateCells(byteTruncate(sanitizeTerminalText(value).replaceAll("\n", " ").trim(), 64), 32);
+  if (safe === "") throw new Error("Hidden reasoning label cannot be empty");
+  return safe;
+}
+
+const EDITOR_IMPLEMENTATION_METHODS = [
+  "snapshot", "restore", "setText", "clear", "insert", "insertPaste", "backspace", "deleteForward",
+  "deleteToLineStart", "deleteToLineEnd", "deleteWordBackward", "deleteWordForward", "moveLeft", "moveRight",
+  "moveHome", "moveEnd", "moveUp", "moveDown", "movePage", "hasMultipleVisualRows", "jumpToCharacter",
+  "yank", "yankPop", "undo", "redo", "commitHistory", "historyPrevious", "historyNext",
+] as const;
+
+function validatedEditorImplementation(value: TuiEditorImplementation): TuiEditorImplementation {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    throw new TypeError("Native editor implementation must be an object");
+  }
+  const selected = value as unknown as Record<string, unknown>;
+  if (typeof selected.text !== "string" || typeof selected.empty !== "boolean"
+    || !Number.isSafeInteger(selected.cursor) || (selected.cursor as number) < 0
+    || !Number.isSafeInteger(selected.length) || (selected.length as number) < 0) {
+    throw new TypeError("Native editor implementation has invalid state accessors");
+  }
+  for (const method of EDITOR_IMPLEMENTATION_METHODS) {
+    if (typeof selected[method] !== "function") {
+      throw new TypeError(`Native editor implementation is missing ${method}()`);
+    }
+  }
+  return value;
+}
+
+function nativeKeyEvent(value: KeyEvent, maximumTextBytes: number): KeyEvent {
+  if (value === null || typeof value !== "object") throw new TypeError("Native input rewrite must contain an event object");
+  if (typeof value.key !== "string" || value.key === "" || Buffer.byteLength(value.key, "utf8") > 64
+    || sanitizeTerminalText(value.key) !== value.key || value.key.includes("\n")) {
+    throw new TypeError("Native input event key is invalid");
+  }
+  if (value.text !== undefined && (typeof value.text !== "string" || Buffer.byteLength(value.text, "utf8") > maximumTextBytes)) {
+    throw new RangeError(`Native input event text exceeds ${maximumTextBytes} bytes`);
+  }
+  for (const key of ["ctrl", "alt", "shift", "super", "hyper", "meta", "capsLock", "numLock", "keypad"] as const) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") throw new TypeError(`Native input event ${key} must be boolean`);
+  }
+  for (const key of ["alternateKey", "baseLayoutKey"] as const) {
+    if (value[key] !== undefined && (typeof value[key] !== "string" || Buffer.byteLength(value[key], "utf8") > 64)) {
+      throw new TypeError(`Native input event ${key} is invalid`);
+    }
+  }
+  if (value.eventType !== undefined && value.eventType !== "press" && value.eventType !== "repeat") {
+    throw new TypeError("Native input event type is invalid");
+  }
+  return Object.freeze({
+    key: value.key,
+    ...(value.text === undefined ? {} : { text: sanitizeTerminalText(value.text) }),
+    ...(value.ctrl === undefined ? {} : { ctrl: value.ctrl }),
+    ...(value.alt === undefined ? {} : { alt: value.alt }),
+    ...(value.shift === undefined ? {} : { shift: value.shift }),
+    ...(value.super === undefined ? {} : { super: value.super }),
+    ...(value.hyper === undefined ? {} : { hyper: value.hyper }),
+    ...(value.meta === undefined ? {} : { meta: value.meta }),
+    ...(value.capsLock === undefined ? {} : { capsLock: value.capsLock }),
+    ...(value.numLock === undefined ? {} : { numLock: value.numLock }),
+    ...(value.keypad === undefined ? {} : { keypad: value.keypad }),
+    ...(value.alternateKey === undefined ? {} : { alternateKey: sanitizeTerminalText(value.alternateKey) }),
+    ...(value.baseLayoutKey === undefined ? {} : { baseLayoutKey: sanitizeTerminalText(value.baseLayoutKey) }),
+    ...(value.eventType === undefined ? {} : { eventType: value.eventType }),
+  });
+}
+
+function frozenTheme(value: Theme): Theme {
+  return Object.freeze({
+    name: value.name,
+    ansi: value.ansi,
+    glyphs: Object.freeze({ ...value.glyphs }),
+    codes: Object.freeze({ ...value.codes }),
+  });
+}
+
+function validatedNativeTheme(value: Theme, capabilities: TerminalCapabilities): Theme {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Native theme must be an object");
+  }
+  if (!/^[a-z][a-z0-9._-]{0,62}$/u.test(value.name) || typeof value.ansi !== "boolean") {
+    throw new TypeError("Native theme name or ANSI flag is invalid");
+  }
+  if (value.glyphs === null || typeof value.glyphs !== "object" || Array.isArray(value.glyphs)) {
+    throw new TypeError("Native theme glyphs are invalid");
+  }
+  const glyphKeys = ["assistant", "user", "tool", "success", "failure", "pending", "scroll", "horizontal"] as const;
+  if (Object.keys(value.glyphs).some((key) => !glyphKeys.includes(key as typeof glyphKeys[number]))) {
+    throw new TypeError("Native theme glyphs contain unknown fields");
+  }
+  const glyphs = Object.fromEntries(glyphKeys.map((key) => {
+    const glyph = value.glyphs[key];
+    if (
+      typeof glyph !== "string" || glyph === "" || sanitizeTerminalText(glyph) !== glyph ||
+      cellWidth(glyph) < 1 || cellWidth(glyph) > 4 || Buffer.byteLength(glyph, "utf8") > 32 ||
+      (key === "horizontal" && cellWidth(glyph) !== 1)
+    ) throw new TypeError(`Native theme glyph ${key} is invalid`);
+    return [key, glyph];
+  })) as unknown as Theme["glyphs"];
+  if (value.codes === null || typeof value.codes !== "object" || Array.isArray(value.codes)) {
+    throw new TypeError("Native theme codes are invalid");
+  }
+  if (Object.keys(value.codes).some((key) => !THEME_ROLES.includes(key as typeof THEME_ROLES[number]))) {
+    throw new TypeError("Native theme codes contain unknown fields");
+  }
+  const codes = Object.fromEntries(THEME_ROLES.map((role) => {
+    const code = value.codes[role];
+    if (typeof code !== "string" || Buffer.byteLength(code, "utf8") > 128 || !/^(?:\x1b\[[0-9;]{0,48}m)*$/u.test(code)) {
+      throw new TypeError(`Native theme code ${role} is invalid`);
+    }
+    return [role, capabilities.color && value.ansi ? code : ""];
+  })) as Record<typeof THEME_ROLES[number], string>;
+  return frozenTheme({
+    name: value.name,
+    ansi: capabilities.color && value.ansi,
+    glyphs,
+    codes,
+  });
+}
+
+const EMPTY_AUTOCOMPLETE_PROVIDER: TuiAutocompleteProvider = () => null;
+
 /**
  * Owns an interactive terminal session and combines the legacy terminal-input
  * and event-renderer surfaces. Construct it with process streams for production,
@@ -553,7 +823,8 @@ export class TuiController {
   readonly mode: TerminalCapabilities["mode"];
   readonly #limits: TuiLimits;
   readonly #model: TuiModel;
-  readonly #editor: MultilineEditor;
+  readonly #baseEditor: MultilineEditor;
+  #editor: TuiEditorImplementation;
   readonly #decoder = new KeyDecoder();
   readonly #signalSource: TuiSignalSource;
   readonly #handleSignals: boolean;
@@ -589,13 +860,36 @@ export class TuiController {
   #pendingCommandCompletion: PendingCommandCompletion | undefined;
   #autocomplete: AutocompleteOwner | undefined;
   #pendingAutocomplete: PendingAutocomplete | undefined;
+  readonly #nativeAutocomplete = new Array<NativeAutocompleteOwner>();
+  #autocompleteVersion = 0;
   #editorMiddleware: EditorMiddlewareOwner | undefined;
+  readonly #nativeInputHandlers = new Array<NativeInputOwner>();
+  readonly #unsafeTerminalInputHandlers = new Array<UnsafeTerminalInputOwner>();
+  readonly #nativeEditors = new Array<NativeEditorOwner>();
+  readonly #nativeThemes = new Array<NativeThemeOwner>();
+  readonly #persistentRuntimeComponents: Record<TuiPersistentComponentSlot, Map<string, PersistentRuntimeComponentOwner>> = {
+    header: new Map(),
+    footer: new Map(),
+    widget: new Map(),
+    "widget-above": new Map(),
+    "widget-below": new Map(),
+    "header-replacement": new Map(),
+    "footer-replacement": new Map(),
+  };
+  readonly #workingIndicators = new Map<string, WorkingIndicatorOwner>();
+  readonly #hiddenReasoningLabels = new Map<string, HiddenReasoningLabelOwner>();
+  readonly #toolOutputExpansions = new Map<string, ToolOutputExpansionOwner>();
+  #toolOutputExpansionBaseline: boolean | undefined;
+  readonly #normalizedKeyObservers = new Map<string, NormalizedKeyObserverOwner>();
   #runtimeComponent: RuntimeComponentOwner | undefined;
   readonly #runtimeOverlays: RuntimeComponentOwner[] = [];
   #runtimeFocusOrder = 0;
   #draftScope = "default";
   #theme: Theme;
   #themeName: ThemeName;
+  #themeSetting: string;
+  #terminalColorScheme: TerminalColorScheme;
+  #automaticTheme: boolean;
   readonly #themeChangeListeners = new Set<(change: TuiThemeChange) => void>();
   readonly #extensionWorkingMessages = new Map<string, string>();
   readonly #extensionWorkingVisibility = new Map<string, boolean>();
@@ -635,7 +929,18 @@ export class TuiController {
   #secretAbort: AbortController | undefined;
   #transientStatusColumns = 0;
   #activityTimer: NodeJS.Timeout | undefined;
+  #activityTimerInterval = ACTIVITY_FRAME_MS;
   #doubleEscapeAction: "tree" | "fork" | "none";
+  #hideThinkingBlock = false;
+  #externalEditorCommand: string | undefined;
+  #treeFilterMode: SessionTreeFilterMode = "default";
+  #editorPaddingX = 0;
+  #outputPad: 0 | 1 = 0;
+  #autocompleteMaxVisible: number | undefined;
+  #showHardwareCursor = true;
+  #showImages = true;
+  #imageWidthCells = 80;
+  #codeBlockIndent = "";
   #lastEscapeAt = 0;
   #lastClearAt = 0;
   #suspended = false;
@@ -643,7 +948,9 @@ export class TuiController {
 
   readonly #onData = (chunk: Buffer | string) => {
     try {
-      const events = this.#decoder.push(typeof chunk === "string" ? chunk : new Uint8Array(chunk));
+      const selected = this.#applyUnsafeTerminalInputHandlers(chunk);
+      if (selected === undefined) return;
+      const events = this.#decoder.push(typeof selected === "string" ? selected : new Uint8Array(selected));
       this.#handleTerminalReplies(this.#decoder.takeReplies());
       this.#handleKeys(events);
       this.#scheduleEscape();
@@ -681,22 +988,94 @@ export class TuiController {
       synchronizedOutput: this.#environment.RIGYN_SYNC_UPDATE !== "0",
       imageProtocol: this.capabilities.imageProtocol,
     });
-    this.#themeName = options.theme ?? "dark";
+    this.#themeSetting = options.theme ?? "light/dark";
+    this.#terminalColorScheme = terminalColorSchemeFromEnvironment(this.#environment);
+    this.#automaticTheme = parseAutomaticThemePair(this.#themeSetting) !== undefined;
+    this.#themeName = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
     this.#theme = createTheme(this.#themeName, {
       color: this.capabilities.color,
       unicode: this.capabilities.unicode,
     });
     this.#model = new TuiModel(this.#limits);
-    this.#editor = new MultilineEditor({
+    this.#baseEditor = new MultilineEditor({
       maxBytes: this.#limits.maxEditorBytes,
       maxHistoryEntries: this.#limits.maxHistoryEntries,
       maxUndoEntries: this.#limits.maxUndoEntries,
     });
+    this.#editor = this.#baseEditor;
     this.#signalSource = options.signalSource ?? process;
     this.#handleSignals = options.handleSignals ?? true;
     this.#onAction = options.onAction;
     this.#doubleEscapeAction = options.doubleEscapeAction ?? "tree";
     this.#pickerSources.set("command", defaultCommands);
+    if (options.operatorPreferences !== undefined) this.setOperatorPreferences(options.operatorPreferences);
+  }
+
+  setOperatorPreferences(preferences: Partial<TuiOperatorPreferences>): void {
+    if (preferences === null || typeof preferences !== "object" || Array.isArray(preferences)) {
+      throw new TypeError("TUI operator preferences must be an object");
+    }
+    if (preferences.hideThinkingBlock !== undefined) {
+      if (typeof preferences.hideThinkingBlock !== "boolean") throw new TypeError("hideThinkingBlock must be boolean");
+      this.#hideThinkingBlock = preferences.hideThinkingBlock;
+    }
+    if (preferences.showCacheMissNotices !== undefined) {
+      this.#model.setShowCacheMissNotices(preferences.showCacheMissNotices);
+    }
+    if ("externalEditor" in preferences) {
+      if (preferences.externalEditor !== undefined) {
+        if (typeof preferences.externalEditor !== "string") throw new TypeError("externalEditor must be a string");
+        parseEditorCommand(preferences.externalEditor);
+      }
+      this.#externalEditorCommand = preferences.externalEditor;
+    }
+    if (preferences.treeFilterMode !== undefined) {
+      if (!SESSION_TREE_FILTER_MODES.includes(preferences.treeFilterMode)) throw new Error("treeFilterMode is invalid");
+      this.#treeFilterMode = preferences.treeFilterMode;
+    }
+    if (preferences.editorPaddingX !== undefined) {
+      if (!Number.isSafeInteger(preferences.editorPaddingX) || preferences.editorPaddingX < 0 || preferences.editorPaddingX > 3) {
+        throw new RangeError("editorPaddingX must be an integer from 0 through 3");
+      }
+      this.#editorPaddingX = preferences.editorPaddingX;
+    }
+    if (preferences.outputPad !== undefined) {
+      if (preferences.outputPad !== 0 && preferences.outputPad !== 1) throw new RangeError("outputPad must be 0 or 1");
+      this.#outputPad = preferences.outputPad;
+    }
+    if ("autocompleteMaxVisible" in preferences) {
+      const value = preferences.autocompleteMaxVisible;
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 3 || value > 20)) {
+        throw new RangeError("autocompleteMaxVisible must be an integer from 3 through 20");
+      }
+      this.#autocompleteMaxVisible = value;
+    }
+    if (preferences.showHardwareCursor !== undefined) {
+      if (typeof preferences.showHardwareCursor !== "boolean") throw new TypeError("showHardwareCursor must be boolean");
+      this.#showHardwareCursor = preferences.showHardwareCursor;
+    }
+    if (preferences.showImages !== undefined) {
+      if (typeof preferences.showImages !== "boolean") throw new TypeError("showImages must be boolean");
+      this.#showImages = preferences.showImages;
+    }
+    if (preferences.imageWidthCells !== undefined) {
+      if (!Number.isSafeInteger(preferences.imageWidthCells) || preferences.imageWidthCells < 1 || preferences.imageWidthCells > 500) {
+        throw new RangeError("imageWidthCells must be an integer from 1 through 500");
+      }
+      this.#imageWidthCells = preferences.imageWidthCells;
+    }
+    if (preferences.clearOnShrink !== undefined) {
+      if (typeof preferences.clearOnShrink !== "boolean") throw new TypeError("clearOnShrink must be boolean");
+      this.#surface.setClearOnShrink(preferences.clearOnShrink);
+    }
+    if (preferences.codeBlockIndent !== undefined) {
+      if (!/^ {0,8}$/u.test(preferences.codeBlockIndent)) throw new Error("codeBlockIndent must contain zero through eight spaces");
+      this.#codeBlockIndent = preferences.codeBlockIndent;
+    }
+    if (this.#started && this.mode === "full") {
+      this.#write(this.#showHardwareCursor ? SHOW_CURSOR : HIDE_CURSOR);
+      this.#scheduleRender();
+    }
   }
 
   setKeybindings(keybindings: Keybindings): void {
@@ -754,23 +1133,26 @@ export class TuiController {
   setAutocompleteProvider(provider?: TuiAutocompleteProvider, signal?: AbortSignal): void {
     const previous = this.#autocomplete;
     if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
-    this.#cancelAutocomplete(new Error("Autocomplete provider replaced"));
     this.#autocomplete = undefined;
-    if (provider === undefined) return;
-    if (signal === undefined) throw new Error("Autocomplete providers require a generation signal");
-    signal.throwIfAborted();
-    const owner: AutocompleteOwner = {
-      provider,
-      signal,
-      onAbort: () => {
-        if (this.#autocomplete !== owner) return;
-        this.#autocomplete = undefined;
-        this.#cancelAutocomplete(signal.reason instanceof Error ? signal.reason : new Error("Autocomplete provider expired"));
-      },
-    };
-    this.#autocomplete = owner;
-    signal.addEventListener("abort", owner.onAbort, { once: true });
-    if (signal.aborted) owner.onAbort();
+    if (provider !== undefined) {
+      if (signal === undefined) throw new Error("Autocomplete providers require a generation signal");
+      signal.throwIfAborted();
+      const owner: AutocompleteOwner = {
+        provider,
+        signal,
+        onAbort: () => {
+          if (this.#autocomplete !== owner) return;
+          this.#autocomplete = undefined;
+          this.#rebaseNativeAutocomplete();
+          this.#autocompleteChanged(signal.reason instanceof Error ? signal.reason : new Error("Autocomplete provider expired"));
+        },
+      };
+      this.#autocomplete = owner;
+      signal.addEventListener("abort", owner.onAbort, { once: true });
+      if (signal.aborted) owner.onAbort();
+    }
+    this.#rebaseNativeAutocomplete();
+    this.#autocompleteChanged(new Error("Autocomplete provider replaced"));
   }
 
   setEditorMiddleware(middleware?: TuiEditorMiddleware, signal?: AbortSignal): void {
@@ -788,6 +1170,415 @@ export class TuiController {
       },
     };
     this.#editorMiddleware = owner;
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+  }
+
+  /** @internal Rejects use of a retained NativeUiHost after terminal teardown. */
+  assertNativeUiAvailable(): void {
+    if (this.#closed || this.#closing) throw new Error("Native UI is unavailable after terminal teardown");
+  }
+
+  /** @internal Privileged decoded-input registration used by NativeUiHost. */
+  registerNativeInputHandler(handler: NativeUiInputHandler, signal: AbortSignal): () => void {
+    if (typeof handler !== "function") throw new TypeError("Native input handler must be a function");
+    signal.throwIfAborted();
+    let disposed = false;
+    const owner: NativeInputOwner = {
+      handler,
+      signal,
+      onAbort: () => dispose(),
+    };
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      signal.removeEventListener("abort", owner.onAbort);
+      const index = this.#nativeInputHandlers.indexOf(owner);
+      if (index >= 0) this.#nativeInputHandlers.splice(index, 1);
+    };
+    this.#nativeInputHandlers.push(owner);
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+    return dispose;
+  }
+
+  /** @internal Raw input registration reserved for the unsafe terminal host. */
+  registerUnsafeTerminalInputHandler(handler: UnsafeTerminalInputHandler, signal: AbortSignal): () => void {
+    if (typeof handler !== "function") throw new TypeError("Unsafe terminal input handler must be a function");
+    signal.throwIfAborted();
+    let disposed = false;
+    const owner: UnsafeTerminalInputOwner = {
+      handler,
+      signal,
+      onAbort: () => dispose(),
+    };
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      signal.removeEventListener("abort", owner.onAbort);
+      const index = this.#unsafeTerminalInputHandlers.indexOf(owner);
+      if (index >= 0) this.#unsafeTerminalInputHandlers.splice(index, 1);
+    };
+    this.#unsafeTerminalInputHandlers.push(owner);
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+    return dispose;
+  }
+
+  /** @internal Direct output reserved for the explicitly unsafe terminal host. */
+  writeUnsafeTerminal(data: string): void {
+    this.assertNativeUiAvailable();
+    if (typeof data !== "string" || Buffer.byteLength(data, "utf8") > 1024 * 1024) {
+      throw new TypeError("Unsafe terminal output must be a string no larger than 1 MiB");
+    }
+    this.#ensureStarted();
+    if (data === "") return;
+    this.#write(data);
+    this.#surface.resetAnchor();
+  }
+
+  /** @internal Schedules host repair after an unsafe out-of-band write. */
+  requestUnsafeTerminalRender(): void {
+    this.assertNativeUiAvailable();
+    this.#surface.resetAnchor();
+    this.#scheduleRender();
+  }
+
+  unsafeTerminalSize(): Readonly<{ columns: number; rows: number }> {
+    this.assertNativeUiAvailable();
+    return Object.freeze({ ...terminalSize(this.output, this.capabilities) });
+  }
+
+  unsafeTerminalCapabilities(): Readonly<TerminalCapabilities> {
+    this.assertNativeUiAvailable();
+    return Object.freeze({ ...this.capabilities });
+  }
+
+  unsafeTerminalKeybindings(): Keybindings {
+    this.assertNativeUiAvailable();
+    return this.#keybindings;
+  }
+
+  /** @internal Returns the active editor to a trusted NativeUiHost. */
+  getEditorImplementation(): TuiEditorImplementation {
+    return this.#editor;
+  }
+
+  /** @internal Pushes a generation-owned editor replacement. */
+  replaceNativeEditor(editor: TuiEditorImplementation, signal: AbortSignal): () => void {
+    return this.#pushNativeEditor(validatedEditorImplementation(editor), signal);
+  }
+
+  /** @internal Wraps the active editor through a retargetable predecessor. */
+  wrapNativeEditor(wrapper: NativeUiEditorWrapper, signal: AbortSignal): () => void {
+    if (typeof wrapper !== "function") throw new TypeError("Native editor wrapper must be a function");
+    signal.throwIfAborted();
+    const owner: NativeEditorOwner = {
+      editor: this.#editor,
+      previous: this.#editor,
+      signal,
+      onAbort: () => undefined,
+    };
+    const previous = new Proxy({} as TuiEditorImplementation, {
+      get: (_target, property) => {
+        const selected = owner.previous;
+        const value = Reflect.get(selected, property, selected) as unknown;
+        return typeof value === "function" ? value.bind(selected) : value;
+      },
+    });
+    owner.editor = validatedEditorImplementation(wrapper(previous));
+    return this.#installNativeEditor(owner);
+  }
+
+  /** @internal Installs a generation-owned autocomplete layer. */
+  wrapNativeAutocompleteProvider(wrapper: NativeUiAutocompleteWrapper, signal: AbortSignal): () => void {
+    if (typeof wrapper !== "function") throw new TypeError("Native autocomplete wrapper must be a function");
+    signal.throwIfAborted();
+    const owner: NativeAutocompleteOwner = {
+      previous: this.#nativeAutocomplete.at(-1)?.provider ?? this.#autocomplete?.provider ?? EMPTY_AUTOCOMPLETE_PROVIDER,
+      provider: EMPTY_AUTOCOMPLETE_PROVIDER,
+      signal,
+      onAbort: () => undefined,
+    };
+    const previous: TuiAutocompleteProvider = (text, cursor, requestSignal) =>
+      owner.previous(text, cursor, requestSignal);
+    const provider = wrapper(previous);
+    if (typeof provider !== "function") throw new TypeError("Native autocomplete wrapper must return a provider");
+    let disposed = false;
+    owner.provider = provider;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      signal.removeEventListener("abort", owner.onAbort);
+      const index = this.#nativeAutocomplete.indexOf(owner);
+      if (index < 0) return;
+      const successor = this.#nativeAutocomplete[index + 1];
+      if (successor !== undefined) successor.previous = owner.previous;
+      this.#nativeAutocomplete.splice(index, 1);
+      this.#autocompleteChanged(signal.reason instanceof Error ? signal.reason : new Error("Native autocomplete wrapper removed"));
+    };
+    this.#nativeAutocomplete.push(owner);
+    this.#autocompleteChanged(new Error("Native autocomplete wrapper installed"));
+    owner.onAbort = dispose;
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+    return dispose;
+  }
+
+  #pushNativeEditor(editor: TuiEditorImplementation, signal: AbortSignal): () => void {
+    signal.throwIfAborted();
+    const owner: NativeEditorOwner = {
+      editor,
+      previous: this.#editor,
+      signal,
+      onAbort: () => undefined,
+    };
+    return this.#installNativeEditor(owner);
+  }
+
+  #installNativeEditor(owner: NativeEditorOwner): () => void {
+    owner.signal.throwIfAborted();
+    let disposed = false;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      owner.signal.removeEventListener("abort", owner.onAbort);
+      const index = this.#nativeEditors.indexOf(owner);
+      if (index < 0) return;
+      const successor = this.#nativeEditors[index + 1];
+      if (successor !== undefined) successor.previous = owner.previous;
+      else this.#editor = owner.previous;
+      this.#nativeEditors.splice(index, 1);
+      this.#cancelAutocomplete(new Error("Native editor changed"));
+      this.#scheduleRender();
+    };
+    owner.onAbort = dispose;
+    this.#nativeEditors.push(owner);
+    this.#editor = owner.editor;
+    this.#cancelAutocomplete(new Error("Native editor changed"));
+    this.#scheduleRender();
+    owner.signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (owner.signal.aborted) owner.onAbort();
+    return dispose;
+  }
+
+  #rebaseNativeAutocomplete(): void {
+    const first = this.#nativeAutocomplete[0];
+    if (first !== undefined) first.previous = this.#autocomplete?.provider ?? EMPTY_AUTOCOMPLETE_PROVIDER;
+  }
+
+  #autocompleteChanged(reason: Error): void {
+    this.#autocompleteVersion += 1;
+    this.#cancelAutocomplete(reason);
+  }
+
+  #activeAutocompleteOwner(): ActiveAutocompleteOwner | undefined {
+    const native = this.#nativeAutocomplete.at(-1);
+    const provider = native?.provider ?? this.#autocomplete?.provider;
+    if (provider === undefined) return undefined;
+    const signals = [
+      ...(this.#autocomplete === undefined ? [] : [this.#autocomplete.signal]),
+      ...this.#nativeAutocomplete.map((owner) => owner.signal),
+    ];
+    return {
+      provider,
+      signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals),
+      version: this.#autocompleteVersion,
+    };
+  }
+
+  setPersistentComponent(
+    slot: TuiPersistentComponentSlot,
+    key: string,
+    factory?: RuntimeUiComponentFactory<void>,
+    signal?: AbortSignal,
+  ): void {
+    if (!PERSISTENT_COMPONENT_SLOTS.includes(slot)) {
+      throw new Error("Persistent UI component slot is invalid");
+    }
+    const selectedKey = persistentComponentKey(key);
+    const components = this.#persistentRuntimeComponents[slot];
+    const previous = components.get(selectedKey);
+    if (factory === undefined) {
+      previous?.mount.close();
+      return;
+    }
+    if (this.mode !== "full") throw new Error("Persistent UI components require the full TUI");
+    if (signal === undefined) throw new Error("Persistent UI components require a generation signal");
+    signal.throwIfAborted();
+    if (previous === undefined && components.size >= MAX_ADVANCED_UI_SLOT_COMPONENTS) {
+      throw new Error(`Persistent UI ${slot} slot is limited to ${MAX_ADVANCED_UI_SLOT_COMPONENTS} components`);
+    }
+    let owner: PersistentRuntimeComponentOwner | undefined;
+    const mount = RuntimeUiComponentMount.create(factory, {
+      signal,
+      requestRender: () => this.#scheduleRender(),
+      onClose: () => {
+        if (owner !== undefined && components.get(selectedKey) === owner) components.delete(selectedKey);
+        this.#scheduleRender();
+      },
+      onError: (cause) => {
+        try {
+          this.notify(`Persistent UI component failed: ${defaultSecretRedactor.redact(cause.message).slice(0, 4_096)}`, "warning");
+        } catch {}
+      },
+    });
+    owner = { mount };
+    if (mount.closed) return;
+    components.set(selectedKey, owner);
+    previous?.mount.close();
+    this.#scheduleRender();
+  }
+
+  setWorkingIndicator(value?: TuiWorkingIndicatorOptions, signal?: AbortSignal): void {
+    this.setKeyedWorkingIndicator(CONTROLLER_ADVANCED_UI_KEY, value, signal);
+  }
+
+  setKeyedWorkingIndicator(
+    key: string,
+    value?: TuiWorkingIndicatorOptions,
+    signal?: AbortSignal,
+  ): void {
+    const selectedKey = persistentComponentKey(key);
+    const selected = value === undefined ? undefined : workingIndicatorOptions(value);
+    if (selected !== undefined) {
+      if (signal === undefined) throw new Error("Working indicators require a generation signal");
+      signal.throwIfAborted();
+    }
+    const previous = this.#workingIndicators.get(selectedKey);
+    if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+    this.#workingIndicators.delete(selectedKey);
+    if (selected !== undefined && signal !== undefined) {
+      const owner: WorkingIndicatorOwner = {
+        value: selected,
+        signal,
+        onAbort: () => {
+          if (this.#workingIndicators.get(selectedKey) !== owner) return;
+          this.#workingIndicators.delete(selectedKey);
+          this.#restartActivityTimer();
+          this.#scheduleRender();
+        },
+      };
+      this.#workingIndicators.set(selectedKey, owner);
+      signal.addEventListener("abort", owner.onAbort, { once: true });
+      if (signal.aborted) owner.onAbort();
+    }
+    this.#restartActivityTimer();
+    this.#scheduleRender();
+  }
+
+  setHiddenReasoningLabel(value?: string, signal?: AbortSignal): void {
+    this.setKeyedHiddenReasoningLabel(CONTROLLER_ADVANCED_UI_KEY, value, signal);
+  }
+
+  setKeyedHiddenReasoningLabel(key: string, value?: string, signal?: AbortSignal): void {
+    const selectedKey = persistentComponentKey(key);
+    const selected = value === undefined ? undefined : hiddenReasoningLabel(value);
+    if (selected !== undefined) {
+      if (signal === undefined) throw new Error("Hidden reasoning labels require a generation signal");
+      signal.throwIfAborted();
+    }
+    const previous = this.#hiddenReasoningLabels.get(selectedKey);
+    if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+    this.#hiddenReasoningLabels.delete(selectedKey);
+    if (selected !== undefined && signal !== undefined) {
+      const owner: HiddenReasoningLabelOwner = {
+        value: selected,
+        signal,
+        onAbort: () => {
+          if (this.#hiddenReasoningLabels.get(selectedKey) !== owner) return;
+          this.#hiddenReasoningLabels.delete(selectedKey);
+          this.#scheduleRender();
+        },
+      };
+      this.#hiddenReasoningLabels.set(selectedKey, owner);
+      signal.addEventListener("abort", owner.onAbort, { once: true });
+      if (signal.aborted) owner.onAbort();
+    }
+    this.#scheduleRender();
+  }
+
+  getToolOutputExpanded(): boolean {
+    return this.#model.toolOutputExpanded;
+  }
+
+  setToolOutputExpanded(expanded?: boolean, signal?: AbortSignal): void {
+    this.setKeyedToolOutputExpanded(CONTROLLER_ADVANCED_UI_KEY, expanded, signal);
+  }
+
+  setKeyedToolOutputExpanded(key: string, expanded?: boolean, signal?: AbortSignal): void {
+    const selectedKey = persistentComponentKey(key);
+    if (expanded !== undefined) {
+      if (typeof expanded !== "boolean") throw new TypeError("Tool output expansion must be boolean");
+      if (signal === undefined) throw new Error("Tool output expansion requires a generation signal");
+      signal.throwIfAborted();
+    }
+    const previous = this.#toolOutputExpansions.get(selectedKey);
+    if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+    this.#toolOutputExpansions.delete(selectedKey);
+    if (expanded === undefined || signal === undefined) {
+      this.#applyToolOutputExpansion();
+      this.#scheduleRender();
+      return;
+    }
+    if (this.#toolOutputExpansions.size === 0 && this.#toolOutputExpansionBaseline === undefined) {
+      this.#toolOutputExpansionBaseline = this.#model.toolOutputExpanded;
+    }
+    const owner: ToolOutputExpansionOwner = {
+      value: expanded,
+      signal,
+      onAbort: () => {
+        if (this.#toolOutputExpansions.get(selectedKey) !== owner) return;
+        this.#toolOutputExpansions.delete(selectedKey);
+        this.#applyToolOutputExpansion();
+        this.#scheduleRender();
+      },
+    };
+    this.#toolOutputExpansions.set(selectedKey, owner);
+    this.#applyToolOutputExpansion();
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+    this.#scheduleRender();
+  }
+
+  #applyToolOutputExpansion(): void {
+    const active = [...this.#toolOutputExpansions.values()].at(-1);
+    if (active !== undefined) {
+      this.#model.setToolOutputExpanded(active.value);
+      return;
+    }
+    if (this.#toolOutputExpansionBaseline === undefined) return;
+    const restore = this.#toolOutputExpansionBaseline;
+    this.#toolOutputExpansionBaseline = undefined;
+    this.#model.setToolOutputExpanded(restore);
+  }
+
+  setNormalizedKeyObserver(
+    key: string,
+    observer?: TuiNormalizedKeyObserver,
+    signal?: AbortSignal,
+  ): void {
+    const selectedKey = persistentComponentKey(key);
+    const previous = this.#normalizedKeyObservers.get(selectedKey);
+    if (observer === undefined) {
+      if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+      this.#normalizedKeyObservers.delete(selectedKey);
+      return;
+    }
+    if (this.mode !== "full") throw new Error("Normalized key observers require the full TUI");
+    if (typeof observer !== "function") throw new TypeError("Normalized key observer must be a function");
+    if (signal === undefined) throw new Error("Normalized key observers require a generation signal");
+    signal.throwIfAborted();
+    const owner: NormalizedKeyObserverOwner = {
+      key: selectedKey,
+      observer,
+      signal,
+      onAbort: () => {
+        if (this.#normalizedKeyObservers.get(selectedKey) === owner) this.#normalizedKeyObservers.delete(selectedKey);
+      },
+    };
+    if (previous !== undefined) previous.signal.removeEventListener("abort", previous.onAbort);
+    this.#normalizedKeyObservers.set(selectedKey, owner);
     signal.addEventListener("abort", owner.onAbort, { once: true });
     if (signal.aborted) owner.onAbort();
   }
@@ -911,7 +1702,16 @@ export class TuiController {
     if (this.mode === "full") this.#scheduleRender();
     else {
       const entries = this.#model.entries.filter((entry) => entry.kind !== "startup");
-      const rendered = renderTranscriptFrame(entries, terminalSize(this.output, this.capabilities).columns, this.#theme);
+      const rendered = renderTranscriptFrame(entries, terminalSize(this.output, this.capabilities).columns, this.#theme, {
+        resolveImage: (image, imageLimits) => this.#terminalImages.resolve(image, {
+          protocol: this.#showImages ? this.capabilities.imageProtocol : null,
+          ...imageLimits,
+        }),
+        hideReasoningBlock: this.#hideThinkingBlock,
+        outputPad: this.#outputPad,
+        codeBlockIndent: this.#codeBlockIndent,
+        imageWidthCells: this.#imageWidthCells,
+      });
       if (rendered.text !== "") this.#write(`${rendered.text}\n`);
     }
   }
@@ -931,6 +1731,12 @@ export class TuiController {
     this.#ensureStarted();
     if (this.mode === "full") this.#scheduleRender();
     else this.#write(`\n${sanitizeTerminalText(compactText)}\n`);
+  }
+
+  clearStartup(): void {
+    this.#model.clearStartup();
+    this.#transcriptOffset = 0;
+    if (this.#started && this.mode === "full") this.#scheduleRender();
   }
 
   copyToClipboard(value: string): void {
@@ -1424,6 +2230,7 @@ export class TuiController {
     options: {
       onLabelChange?: (eventId: string, label: string | undefined) =>
         { label?: string; labelTimestamp?: string } | Promise<{ label?: string; labelTimestamp?: string }>;
+      filter?: SessionTreeFilterMode;
     } = {},
     signal?: AbortSignal,
   ): Promise<T> {
@@ -1478,7 +2285,7 @@ export class TuiController {
       overlay.tree = {
         folded: new Set(),
         activeOnly: false,
-        filter: "default",
+        filter: options.filter ?? this.#treeFilterMode,
         showLabelTimestamps: false,
         mode: "list",
         ...(options.onLabelChange === undefined ? {} : { onLabelChange: options.onLabelChange }),
@@ -1859,21 +2666,44 @@ export class TuiController {
   }
 
   setTheme(name: ThemeName): void {
-    this.#applyTheme(name, "selection");
+    const setting = String(name);
+    const pair = parseAutomaticThemePair(setting);
+    const names = pair === undefined ? [setting] : [pair.light, pair.dark];
+    for (const selected of names) {
+      createTheme(
+        selected,
+        { color: this.capabilities.color, unicode: this.capabilities.unicode },
+        this.#customThemes.get(selected),
+      );
+    }
+    this.#themeSetting = setting;
+    this.#automaticTheme = pair !== undefined;
+    this.#syncTerminalColorSchemeProtocol(true);
+    this.#applyTheme(resolveThemeSetting(setting, this.#terminalColorScheme), "selection");
+  }
+
+  selectedThemeSetting(): string {
+    return this.#themeSetting;
   }
 
   #applyTheme(name: ThemeName, reason: TuiThemeChange["reason"]): void {
     const previous = this.#themeName;
     this.#themeName = name;
-    this.#theme = createTheme(
+    const selected = createTheme(
       name,
       { color: this.capabilities.color, unicode: this.capabilities.unicode },
       this.#customThemes.get(name),
     );
+    if (this.#nativeThemes.length === 0) this.#theme = selected;
+    else this.#nativeThemes[0]!.previous = selected;
     this.#scheduleRender();
+    this.#notifyThemeChange(previous, this.#themeName, reason);
+  }
+
+  #notifyThemeChange(previous: ThemeName, current: ThemeName, reason: TuiThemeChange["reason"]): void {
     const change: TuiThemeChange = Object.freeze({
       previous,
-      current: this.#themeName,
+      current,
       available: Object.freeze(this.themeNames()),
       reason,
     });
@@ -1892,6 +2722,12 @@ export class TuiController {
     }
   }
 
+  updateCustomTheme(theme: ThemeDefinition): void {
+    if (!this.#customThemes.has(theme.name)) throw new Error(`Custom theme ${theme.name} is not loaded`);
+    this.#customThemes.set(theme.name, theme);
+    if (this.#themeName === theme.name) this.#applyTheme(theme.name, "catalog");
+  }
+
   themeNames(): string[] {
     return ["dark", "light", "mono", ...this.#customThemes.keys()].sort((left, right) => left.localeCompare(right));
   }
@@ -1899,6 +2735,7 @@ export class TuiController {
   async editExternally(operation: (text: string, signal: AbortSignal) => Promise<string> = async (text, signal) => await editTextExternally(text, {
     environment: this.#environment,
     signal,
+    ...(this.#externalEditorCommand === undefined ? {} : { command: this.#externalEditorCommand }),
   })): Promise<void> {
     this.#ensureStarted();
     if (this.#externalEditing || this.#secretAbort !== undefined || this.#overlay !== undefined) return;
@@ -1972,6 +2809,61 @@ export class TuiController {
 
   selectedThemeName(): string {
     return this.#themeName;
+  }
+
+  /** @internal Immutable current theme for a trusted NativeUiHost. */
+  currentThemeObject(): Theme {
+    return frozenTheme(this.#theme);
+  }
+
+  /** @internal Immutable resolved theme catalog for a trusted NativeUiHost. */
+  themeCatalogObjects(): readonly Theme[] {
+    return Object.freeze(this.themeNames().map((name) => frozenTheme({
+      ...createTheme(
+        name,
+        { color: this.capabilities.color, unicode: this.capabilities.unicode },
+        this.#customThemes.get(name),
+      ),
+      name,
+    })));
+  }
+
+  /** @internal Pushes a validated generation-owned resolved theme. */
+  applyNativeTheme(value: Theme, signal: AbortSignal): () => void {
+    signal.throwIfAborted();
+    const theme = validatedNativeTheme(value, this.capabilities);
+    const owner: NativeThemeOwner = {
+      theme,
+      previous: this.#theme,
+      signal,
+      onAbort: () => undefined,
+    };
+    const previousName = this.#theme.name;
+    this.#nativeThemes.push(owner);
+    this.#theme = theme;
+    this.#scheduleRender();
+    this.#notifyThemeChange(previousName, theme.name, "extension");
+    let disposed = false;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      signal.removeEventListener("abort", owner.onAbort);
+      const index = this.#nativeThemes.indexOf(owner);
+      if (index < 0) return;
+      const successor = this.#nativeThemes[index + 1];
+      if (successor !== undefined) successor.previous = owner.previous;
+      const wasActive = index === this.#nativeThemes.length - 1;
+      this.#nativeThemes.splice(index, 1);
+      if (!wasActive) return;
+      const previous = this.#theme.name;
+      this.#theme = owner.previous;
+      this.#scheduleRender();
+      this.#notifyThemeChange(previous, this.#theme.name, "extension");
+    };
+    owner.onAbort = dispose;
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (signal.aborted) owner.onAbort();
+    return dispose;
   }
 
   onThemeChange(listener: (change: TuiThemeChange) => void, signal?: AbortSignal): () => void {
@@ -2110,6 +3002,13 @@ export class TuiController {
     this.setCommandCompletionProvider();
     this.setAutocompleteProvider();
     this.setEditorMiddleware();
+    for (const slot of PERSISTENT_COMPONENT_SLOTS) {
+      for (const owner of [...this.#persistentRuntimeComponents[slot].values()]) owner.mount.close();
+      this.#persistentRuntimeComponents[slot].clear();
+    }
+    this.#clearAdvancedUiOverrides();
+    for (const owner of this.#normalizedKeyObservers.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#normalizedKeyObservers.clear();
     this.#extensionStatuses.clear();
     this.#extensionWidgets.clear();
     this.#extensionHeaders.clear();
@@ -2119,6 +3018,17 @@ export class TuiController {
     this.#model.setContext({ extensionStatus: "", widgets: [], extensionHeaders: [], extensionFooters: [] });
     this.setTitle("Rigyn");
     this.#scheduleRender();
+  }
+
+  #clearAdvancedUiOverrides(): void {
+    for (const owner of this.#workingIndicators.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#workingIndicators.clear();
+    for (const owner of this.#hiddenReasoningLabels.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#hiddenReasoningLabels.clear();
+    for (const owner of this.#toolOutputExpansions.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#toolOutputExpansions.clear();
+    this.#applyToolOutputExpansion();
+    this.#restartActivityTimer();
   }
 
   #pruneSessionEvents(): void {
@@ -2264,7 +3174,7 @@ export class TuiController {
   #editorViewport(): { width: number; rows: number } {
     const size = terminalSize(this.output, this.capabilities);
     const frameWidth = size.columns;
-    const editorWidth = Math.max(1, frameWidth - 1);
+    const editorWidth = Math.max(1, frameWidth - 1 - (this.#editorPaddingX * 2));
     const label = this.#inputMode === "follow_up" ? "follow" : this.#inputLabel;
     const prefix = label === "you" ? " " : ` ${label}> `;
     return {
@@ -2305,6 +3215,46 @@ export class TuiController {
     }
   }
 
+  #renderPersistentComponents(size: { columns: number; rows: number }): Record<TuiPersistentComponentSlot, RuntimeUiBlock[]> {
+    const blocks: Record<TuiPersistentComponentSlot, RuntimeUiBlock[]> = {
+      header: [],
+      footer: [],
+      widget: [],
+      "widget-above": [],
+      "widget-below": [],
+      "header-replacement": [],
+      "footer-replacement": [],
+    };
+    const width = Math.max(1, Math.min(500, size.columns));
+    const height = Math.max(1, Math.min(MAX_ADVANCED_UI_SLOT_LINES, size.rows));
+    for (const slot of PERSISTENT_COMPONENT_SLOTS) {
+      for (const owner of this.#persistentRuntimeComponents[slot].values()) {
+        const rendered = owner.mount.render({
+          width,
+          height,
+          focused: false,
+          expanded: this.#model.toolOutputExpanded,
+          theme: {
+            name: this.#theme.name,
+            color: this.#theme.ansi,
+            unicode: this.capabilities.unicode,
+          },
+        }, { maxLines: height, maxBytes: MAX_ADVANCED_UI_SLOT_BYTES });
+        if (rendered.ok) blocks[slot].push(rendered.block);
+        else owner.mount.close();
+      }
+    }
+    return blocks;
+  }
+
+  #activeWorkingIndicator(): WorkingIndicatorOwner | undefined {
+    return [...this.#workingIndicators.values()].at(-1);
+  }
+
+  #activeHiddenReasoningLabel(): HiddenReasoningLabelOwner | undefined {
+    return [...this.#hiddenReasoningLabels.values()].at(-1);
+  }
+
   renderNow(): void {
     if (!this.#started || this.#closed || this.#suspended || this.#secretAbort !== undefined || this.#externalEditing || this.mode !== "full") return;
     this.#renderScheduled = false;
@@ -2317,6 +3267,9 @@ export class TuiController {
       : this.#model.entries;
     const toolRenderBlocks = this.#renderToolBlocks(transcript, size.columns, size.rows);
     const sessionRenderBlocks = this.#renderSessionBlocks(transcript, size.columns, size.rows);
+    const persistentComponents = this.#renderPersistentComponents(size);
+    const workingIndicator = this.#activeWorkingIndicator();
+    const hiddenReasoning = this.#activeHiddenReasoningLabel();
     let runtimeComponent: RuntimeUiBlock | undefined;
     const runtimeOverlays: NonNullable<TuiViewState["runtimeOverlays"]>[number][] = [];
     const componentOwner = this.#runtimeComponent;
@@ -2462,6 +3415,7 @@ export class TuiController {
             query: overlay.query.text,
             selected: overlay.selected,
             items: overlay.items,
+            ...(overlay.maxVisible === undefined ? {} : { maxVisible: overlay.maxVisible }),
             ...(overlay.kind === "command" ? {} : { hints: [`${selectionNavigation} · ${selectionConfirm} select · ${selectionCancel} cancel`] }),
           }
         : overlay.session.mode === "rename"
@@ -2528,7 +3482,7 @@ export class TuiController {
         ...(workingVisible === undefined ? {} : { workingVisible }),
         ...(this.#model.context.activity === undefined
           ? {}
-          : { activityFrame: Math.floor(Date.now() / ACTIVITY_FRAME_MS) }),
+          : { activityFrame: Math.floor(Date.now() / (workingIndicator?.value.intervalMs ?? ACTIVITY_FRAME_MS)) }),
       },
       transcript,
       transcriptOffset: this.#transcriptOffset,
@@ -2556,6 +3510,22 @@ export class TuiController {
           }),
       ...(this.#model.usage === undefined ? {} : { usage: this.#model.usage }),
       ...(this.#model.notice === undefined ? {} : { notice: this.#model.notice }),
+      ...(persistentComponents.header.length === 0 ? {} : { runtimeHeaderComponents: persistentComponents.header }),
+      ...(persistentComponents.footer.length === 0 ? {} : { runtimeFooterComponents: persistentComponents.footer }),
+      ...(persistentComponents.widget.length === 0 && persistentComponents["widget-above"].length === 0
+        ? {}
+        : { runtimeWidgetComponents: [...persistentComponents.widget, ...persistentComponents["widget-above"]] }),
+      ...(persistentComponents["widget-below"].length === 0
+        ? {}
+        : { runtimeWidgetBelowComponents: persistentComponents["widget-below"] }),
+      ...(persistentComponents["header-replacement"].at(-1) === undefined
+        ? {}
+        : { runtimeHeaderReplacement: persistentComponents["header-replacement"].at(-1)! }),
+      ...(persistentComponents["footer-replacement"].at(-1) === undefined
+        ? {}
+        : { runtimeFooterReplacement: persistentComponents["footer-replacement"].at(-1)! }),
+      ...(workingIndicator === undefined ? {} : { workingIndicator: workingIndicator.value }),
+      ...(hiddenReasoning === undefined ? {} : { hiddenReasoningLabel: hiddenReasoning.value }),
       ...(overlayView === undefined ? {} : { overlay: { ...overlayView, pickerKind: overlay!.kind } }),
       ...(runtimeComponent === undefined ? {} : { runtimeComponent }),
       ...(runtimeOverlays.length === 0 ? {} : { runtimeOverlays }),
@@ -2566,13 +3536,18 @@ export class TuiController {
       ...(sessionRenderBlocks.size === 0 ? {} : { sessionRenderBlocks }),
       hyperlinks: this.capabilities.hyperlinks,
       resolveImage: (image, imageLimits) => this.#terminalImages.resolve(image, {
-        protocol: this.capabilities.imageProtocol,
+        protocol: this.#showImages ? this.capabilities.imageProtocol : null,
         ...imageLimits,
       }),
       maxImageRows: Math.max(1, Math.min(12, Math.floor(Math.max(8, size.rows) / 2))),
+      imageWidthCells: this.#imageWidthCells,
+      editorPaddingX: this.#editorPaddingX,
+      hideReasoningBlock: this.#hideThinkingBlock,
+      outputPad: this.#outputPad,
+      codeBlockIndent: this.#codeBlockIndent,
     });
     const update = this.#surface.render(frame, size);
-    if (update.output !== "") this.#write(`${HIDE_CURSOR}${update.output}${SHOW_CURSOR}`);
+    if (update.output !== "") this.#write(`${HIDE_CURSOR}${update.output}${this.#showHardwareCursor ? SHOW_CURSOR : HIDE_CURSOR}`);
   }
 
   close(): void {
@@ -2595,9 +3570,29 @@ export class TuiController {
     this.#cancelCommandCompletion(new Error("Terminal closed"));
     if (this.#autocomplete !== undefined) this.#autocomplete.signal.removeEventListener("abort", this.#autocomplete.onAbort);
     this.#autocomplete = undefined;
+    for (const owner of this.#nativeAutocomplete) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#nativeAutocomplete.length = 0;
+    this.#autocompleteVersion += 1;
     this.#cancelAutocomplete(new Error("Terminal closed"));
     if (this.#editorMiddleware !== undefined) this.#editorMiddleware.signal.removeEventListener("abort", this.#editorMiddleware.onAbort);
     this.#editorMiddleware = undefined;
+    for (const slot of PERSISTENT_COMPONENT_SLOTS) {
+      for (const owner of [...this.#persistentRuntimeComponents[slot].values()]) owner.mount.close();
+      this.#persistentRuntimeComponents[slot].clear();
+    }
+    for (const owner of this.#workingIndicators.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#workingIndicators.clear();
+    for (const owner of this.#hiddenReasoningLabels.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#hiddenReasoningLabels.clear();
+    for (const owner of this.#toolOutputExpansions.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#toolOutputExpansions.clear();
+    this.#toolOutputExpansionBaseline = undefined;
+    for (const owner of this.#normalizedKeyObservers.values()) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#normalizedKeyObservers.clear();
+    for (const owner of this.#nativeInputHandlers) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#nativeInputHandlers.length = 0;
+    for (const owner of this.#nativeThemes) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#nativeThemes.length = 0;
     this.#themeChangeListeners.clear();
     this.#runtimeComponent?.mount.close();
     this.#runtimeComponent = undefined;
@@ -2606,6 +3601,9 @@ export class TuiController {
     this.#terminalImages.clear();
     this.#secretAbort?.abort(new Error("Terminal closed"));
     this.#saveDraft(this.#draftScope);
+    for (const owner of this.#nativeEditors) owner.signal.removeEventListener("abort", owner.onAbort);
+    this.#nativeEditors.length = 0;
+    this.#editor = this.#baseEditor;
     if (this.#activityTimer !== undefined) clearInterval(this.#activityTimer);
     this.#activityTimer = undefined;
     if (this.#suspendKeepAlive !== undefined) clearInterval(this.#suspendKeepAlive);
@@ -2649,11 +3647,14 @@ export class TuiController {
   #enterTerminalSurface(): void {
     if (this.mode !== "full") return;
     this.#write(this.capabilities.alternateScreen ? ENTER_SCREEN : ENTER_INLINE);
+    if (!this.#showHardwareCursor) this.#write(HIDE_CURSOR);
     this.#beginKeyboardNegotiation();
+    this.#syncTerminalColorSchemeProtocol(true);
   }
 
   #leaveTerminalSurface(): void {
     if (this.mode !== "full") return;
+    if (this.#automaticTheme) this.#write(DISABLE_TERMINAL_COLOR_SCHEME);
     if (this.#escapeTimer !== undefined) clearTimeout(this.#escapeTimer);
     this.#escapeTimer = undefined;
     this.#decoder.flushPending();
@@ -2700,8 +3701,25 @@ export class TuiController {
         this.#keyboardNegotiationTimer = undefined;
         this.#keyboardProtocol = "modify-other-keys";
         this.#write(ENABLE_MODIFY_OTHER_KEYS);
+      } else if (reply.type === "color_scheme") {
+        this.#applyTerminalColorScheme(reply.scheme);
+      } else if (reply.type === "background_color") {
+        this.#applyTerminalColorScheme(terminalColorSchemeForRgb(reply.color));
       }
     }
+  }
+
+  #applyTerminalColorScheme(scheme: TerminalColorScheme): void {
+    this.#terminalColorScheme = scheme;
+    if (!this.#automaticTheme) return;
+    const selected = resolveThemeSetting(this.#themeSetting, scheme);
+    if (selected !== this.#themeName) this.#applyTheme(selected, "terminal");
+  }
+
+  #syncTerminalColorSchemeProtocol(query: boolean): void {
+    if (!this.#started || this.#closed || this.mode !== "full") return;
+    this.#write(this.#automaticTheme ? ENABLE_TERMINAL_COLOR_SCHEME : DISABLE_TERMINAL_COLOR_SCHEME);
+    if (this.#automaticTheme && query) this.#write(`${QUERY_TERMINAL_COLOR_SCHEME}${QUERY_TERMINAL_BACKGROUND}`);
   }
 
   #clearInlineSurface(size: { columns: number; rows: number }): void {
@@ -2721,16 +3739,22 @@ export class TuiController {
     if (entries.length === 0) return;
     const toolRenderBlocks = this.#renderToolBlocks(entries, columns, rows);
     const sessionRenderBlocks = this.#renderSessionBlocks(entries, columns, rows);
+    const hiddenReasoning = this.#activeHiddenReasoningLabel();
     const rendered = renderTranscriptFrame(entries, columns, this.#theme, {
       ...(toolRenderBlocks.size === 0 ? {} : { toolRenderBlocks }),
       ...(sessionRenderBlocks.size === 0 ? {} : { sessionRenderBlocks }),
       semanticZones: this.#semanticZones,
       hyperlinks: this.capabilities.hyperlinks,
       resolveImage: (image, imageLimits) => this.#terminalImages.resolve(image, {
-        protocol: this.capabilities.imageProtocol,
+        protocol: this.#showImages ? this.capabilities.imageProtocol : null,
         ...imageLimits,
       }),
       maxImageRows: Math.max(1, Math.min(12, Math.floor(Math.max(8, rows) / 2))),
+      ...(hiddenReasoning === undefined ? {} : { hiddenReasoningLabel: hiddenReasoning.value }),
+      hideReasoningBlock: this.#hideThinkingBlock,
+      outputPad: this.#outputPad,
+      codeBlockIndent: this.#codeBlockIndent,
+      imageWidthCells: this.#imageWidthCells,
     });
     if (rendered.text === "") return;
     this.#clearInlineSurface({ columns, rows });
@@ -2779,9 +3803,19 @@ export class TuiController {
       this.#activityTimer = undefined;
       return;
     }
-    if (this.#activityTimer !== undefined) return;
-    this.#activityTimer = setInterval(() => this.#scheduleRender(), ACTIVITY_FRAME_MS);
+    const interval = this.#activeWorkingIndicator()?.value.intervalMs ?? ACTIVITY_FRAME_MS;
+    if (this.#activityTimer !== undefined && this.#activityTimerInterval === interval) return;
+    if (this.#activityTimer !== undefined) clearInterval(this.#activityTimer);
+    this.#activityTimerInterval = interval;
+    this.#activityTimer = setInterval(() => this.#scheduleRender(), interval);
     this.#activityTimer.unref();
+  }
+
+  #restartActivityTimer(): void {
+    if (this.#activityTimer !== undefined) clearInterval(this.#activityTimer);
+    this.#activityTimer = undefined;
+    this.#activityTimerInterval = this.#activeWorkingIndicator()?.value.intervalMs ?? ACTIVITY_FRAME_MS;
+    this.#syncActivityTimer();
   }
 
   #scheduleEscape(): void {
@@ -2798,8 +3832,92 @@ export class TuiController {
     this.#escapeTimer.unref();
   }
 
+  #notifyNormalizedKeyObservers(event: KeyEvent): void {
+    if (this.#normalizedKeyObservers.size === 0) return;
+    const selected = runtimeUiKeyEvent(event);
+    for (const owner of [...this.#normalizedKeyObservers.values()]) {
+      if (owner.signal.aborted) {
+        owner.onAbort();
+        continue;
+      }
+      try {
+        owner.observer(selected);
+      } catch (cause) {
+        owner.signal.removeEventListener("abort", owner.onAbort);
+        if (this.#normalizedKeyObservers.get(owner.key) === owner) this.#normalizedKeyObservers.delete(owner.key);
+        try {
+          this.notify(`Normalized key observer failed: ${defaultSecretRedactor.redact(error(cause).message).slice(0, 4_096)}`, "warning");
+        } catch {}
+      }
+    }
+  }
+
+  #applyUnsafeTerminalInputHandlers(chunk: Buffer | string): Buffer | string | undefined {
+    if (this.#unsafeTerminalInputHandlers.length === 0) return chunk;
+    let selected = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    let rewritten = false;
+    for (const owner of [...this.#unsafeTerminalInputHandlers]) {
+      if (owner.signal.aborted) {
+        owner.onAbort();
+        continue;
+      }
+      try {
+        const decision: UnsafeTerminalInputResult | void = owner.handler(selected, owner.signal);
+        if (owner.signal.aborted || !this.#unsafeTerminalInputHandlers.includes(owner)) continue;
+        if (decision === undefined) continue;
+        if (decision === null || typeof decision !== "object" || Array.isArray(decision)) {
+          throw new TypeError("Unsafe terminal input handler returned an invalid result");
+        }
+        if (decision.consume !== undefined && typeof decision.consume !== "boolean") {
+          throw new TypeError("Unsafe terminal input consume must be boolean");
+        }
+        if (decision.data !== undefined) {
+          if (typeof decision.data !== "string" || Buffer.byteLength(decision.data, "utf8") > 1024 * 1024) {
+            throw new TypeError("Unsafe terminal input rewrite must be a string no larger than 1 MiB");
+          }
+          selected = decision.data;
+          rewritten = true;
+        }
+        if (decision.consume === true) return undefined;
+      } catch (cause) {
+        owner.onAbort();
+        try {
+          this.notify(`Unsafe terminal input handler failed: ${defaultSecretRedactor.redact(error(cause).message).slice(0, 4_096)}`, "warning");
+        } catch {}
+      }
+    }
+    return rewritten ? selected : chunk;
+  }
+
+  #applyNativeInputHandlers(event: KeyEvent): KeyEvent | undefined {
+    let selected = nativeKeyEvent(event, this.#limits.maxEditorBytes);
+    for (const owner of [...this.#nativeInputHandlers]) {
+      if (owner.signal.aborted) {
+        owner.onAbort();
+        continue;
+      }
+      try {
+        const decision: NativeUiInputResult | void = owner.handler(selected, owner.signal);
+        if (owner.signal.aborted || !this.#nativeInputHandlers.includes(owner)) continue;
+        if (decision === undefined || decision.action === "pass") continue;
+        if (decision.action === "consume") return undefined;
+        if (decision.action !== "rewrite") throw new TypeError("Native input handler returned an invalid action");
+        selected = nativeKeyEvent(decision.event, this.#limits.maxEditorBytes);
+      } catch (cause) {
+        owner.onAbort();
+        try {
+          this.notify(`Native input handler failed: ${defaultSecretRedactor.redact(error(cause).message).slice(0, 4_096)}`, "warning");
+        } catch {}
+      }
+    }
+    return selected;
+  }
+
   #handleKeys(events: readonly KeyEvent[]): void {
-    for (const event of events) {
+    for (const decoded of events) {
+      const event = this.#applyNativeInputHandlers(decoded);
+      if (event === undefined) continue;
+      this.#notifyNormalizedKeyObservers(event);
       this.#cancelCommandCompletion(new Error("Terminal input changed"));
       this.#cancelAutocomplete(new Error("Terminal input changed"));
       let owner = this.#focusedRuntimeOwner();
@@ -3783,7 +4901,7 @@ export class TuiController {
   }
 
   #requestAutocomplete(): boolean {
-    const owner = this.#autocomplete;
+    const owner = this.#activeAutocompleteOwner();
     if (owner === undefined || owner.signal.aborted) return false;
     const controller = new AbortController();
     const pending: PendingAutocomplete = {
@@ -3804,7 +4922,7 @@ export class TuiController {
     };
     void Promise.resolve().then(async () => await owner.provider(pending.text, pending.cursor, signal)).then((raw) => {
       signal.throwIfAborted();
-      if (this.#pendingAutocomplete !== pending || this.#autocomplete !== owner
+      if (this.#pendingAutocomplete !== pending || this.#autocompleteVersion !== owner.version
         || this.#editor.text !== pending.text || this.#editor.cursor !== pending.cursor) return;
       this.#pendingAutocomplete = undefined;
       const completions = validatedAutocompleteCompletions(raw, pending.text);
@@ -3829,6 +4947,10 @@ export class TuiController {
         cleanup: () => signal.removeEventListener("abort", abort),
       });
       opened = this.#overlay;
+      if (opened !== undefined) {
+        if (this.#autocompleteMaxVisible === undefined) delete opened.maxVisible;
+        else opened.maxVisible = this.#autocompleteMaxVisible;
+      }
       if (signal.aborted) abort();
     }).catch((cause) => {
       if (this.#pendingAutocomplete === pending) this.#pendingAutocomplete = undefined;
@@ -3890,6 +5012,10 @@ export class TuiController {
         cleanup: () => signal.removeEventListener("abort", abort),
       });
       opened = this.#overlay;
+      if (opened !== undefined) {
+        if (this.#autocompleteMaxVisible === undefined) delete opened.maxVisible;
+        else opened.maxVisible = this.#autocompleteMaxVisible;
+      }
       if (signal.aborted) abort();
     }).catch((cause) => {
       if (this.#pendingCommandCompletion === pending) this.#pendingCommandCompletion = undefined;

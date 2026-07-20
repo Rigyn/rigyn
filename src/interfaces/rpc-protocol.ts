@@ -10,6 +10,8 @@ import type { EventEnvelope } from "../core/events.js";
 import type { ImageBlock, ModelInfo } from "../core/types.js";
 import type {
   RuntimeCommandDescription,
+  RuntimeModelSelection,
+  RuntimeUserShellResult,
 } from "../extensions/runtime.js";
 import type { InteractiveActivePolicy } from "../interactive/commands.js";
 import type {
@@ -185,6 +187,69 @@ export interface RpcEventSubscriptionResult {
   blocked?: RpcOversizedEvent;
 }
 
+export interface RpcUserShellRunParams {
+  runId: string;
+  threadId: string;
+  branch?: string;
+  command: string;
+  cwd?: string;
+  excludeFromContext?: boolean;
+  timeoutMs?: number;
+}
+
+export interface RpcUserShellRunResult {
+  runId: string;
+  threadId: string;
+  branch: string;
+  excludedFromContext: boolean;
+  result: RuntimeUserShellResult;
+}
+
+export interface RpcCurrentSession {
+  thread: ThreadRecord;
+  branch: string;
+}
+
+export interface RpcSessionCopyResult extends RpcCurrentSession {
+  sourceThreadId: string;
+  sourceBranch: string;
+  sourceEventId?: string;
+  events: number;
+  artifacts: number;
+}
+
+export interface RpcSessionForkResult extends RpcSessionCopyResult {
+  selectedText: string;
+}
+
+export interface RpcModelCycleResult {
+  selection: RuntimeModelSelection;
+  model: ModelInfo;
+  availableModels: number;
+  changed: boolean;
+  wrapped: boolean;
+}
+
+export interface RpcThinkingCycleResult {
+  selection: RuntimeModelSelection;
+  levels: string[];
+  changed: boolean;
+  wrapped: boolean;
+}
+
+export interface RpcForkMessageCandidate {
+  eventId: string;
+  sequence: number;
+  text: string;
+  truncated: boolean;
+}
+
+export interface RpcForkMessagePage {
+  messages: RpcForkMessageCandidate[];
+  nextCursor: number;
+  hasMore: boolean;
+}
+
 export interface RpcMethodMap {
   initialize: { params: undefined; result: RpcInitializeResult };
   health: { params: undefined; result: RpcHealthResult };
@@ -207,6 +272,10 @@ export interface RpcMethodMap {
     params: { threadId: string; fromBranch?: string; atEventId?: string; newBranch: string };
     result: BranchRecord | { cancelled: true };
   };
+  "thread.forkMessages": {
+    params: { threadId: string; branch?: string; afterSequence?: number; limit?: number };
+    result: RpcForkMessagePage;
+  };
   "thread.name": { params: { threadId: string; name: string }; result: ThreadRecord };
   "thread.delete": { params: { threadId: string }; result: { deleted: true } };
   "thread.export": {
@@ -214,6 +283,38 @@ export interface RpcMethodMap {
     result: RpcThreadExportResult;
   };
   "thread.compact": { params: RpcThreadCompactParams; result: AgentRunResult };
+  "thread.model.set": {
+    params: {
+      threadId: string;
+      branch?: string;
+      reference: string;
+      provider?: string;
+      reasoningEffort?: string;
+      refresh?: boolean;
+    };
+    result: RuntimeModelSelection;
+  };
+  "thread.model.cycle": {
+    params: { threadId: string; branch?: string; direction?: "forward" | "backward"; refresh?: boolean };
+    result: RpcModelCycleResult | null;
+  };
+  "thread.thinking.set": {
+    params: { threadId: string; branch?: string; reasoningEffort: string };
+    result: RuntimeModelSelection;
+  };
+  "thread.thinking.cycle": {
+    params: { threadId: string; branch?: string };
+    result: RpcThinkingCycleResult | null;
+  };
+  "thread.autoCompaction.set": {
+    params: { threadId: string; branch?: string; enabled: boolean };
+    result: { threadId: string; branch: string; enabled: boolean };
+  };
+  "session.current": { params: undefined; result: RpcCurrentSession | null };
+  "session.new": { params: { name?: string; parentCurrent?: boolean } | undefined; result: RpcCurrentSession };
+  "session.switch": { params: { threadId: string; branch?: string }; result: RpcCurrentSession };
+  "session.clone": { params: { name?: string } | undefined; result: RpcSessionCopyResult };
+  "session.fork": { params: { eventId: string; name?: string }; result: RpcSessionForkResult };
   "events.subscribe": {
     params: { threadId: string; branch?: string; afterSequence?: number; limit?: number };
     result: RpcEventSubscriptionResult;
@@ -222,6 +323,7 @@ export interface RpcMethodMap {
   "run.start": { params: RpcRunStartParams; result: { threadId: string; handled?: true } };
   "run.wait": { params: { threadId: string }; result: HarnessRun | AgentRunResult };
   "run.cancel": { params: { threadId: string; reason?: string }; result: { accepted: true } };
+  "run.retry.cancel": { params: { threadId: string }; result: { accepted: boolean } };
   "run.steer": { params: RpcQueuedInputParams; result: { accepted: boolean; handled?: true } };
   "run.followUp": { params: RpcQueuedInputParams; result: { accepted: boolean; handled?: true } };
   "run.queue": {
@@ -239,6 +341,10 @@ export interface RpcMethodMap {
     params: { threadId: string; steeringMode?: QueueMode; followUpMode?: QueueMode };
     result: { steeringMode: QueueMode; followUpMode: QueueMode };
   };
+  "retry.get": { params: undefined; result: { enabled: boolean } };
+  "retry.set": { params: { enabled: boolean }; result: { enabled: boolean } };
+  "shell.run": { params: RpcUserShellRunParams; result: RpcUserShellRunResult };
+  "shell.cancel": { params: { runId: string; reason?: string }; result: { accepted: true } };
   "models.list": { params: { provider?: string; refresh?: boolean } | undefined; result: ModelInfo[] };
   "models.status": { params: { provider?: string } | undefined; result: ModelCatalogStatus[] };
   "models.refresh": {
@@ -337,15 +443,27 @@ export const RPC_METHOD_REFERENCE = Object.freeze({
   "thread.stats": { params: "threadId, branch?", result: "RpcThreadStatistics", summary: "Read message, run, usage, and context statistics." },
   "thread.lastAssistantText": { params: "threadId, branch?", result: "{ text }", summary: "Read bounded text from the latest assistant message." },
   "thread.fork": { params: "threadId, newBranch, fromBranch?, atEventId?", result: "BranchRecord or cancelled", summary: "Fork a branch at a durable event." },
+  "thread.forkMessages": { params: "threadId, branch?, afterSequence?, limit?", result: "RpcForkMessagePage", summary: "Read a bounded cursor page of user-message fork candidates." },
   "thread.name": { params: "threadId, name", result: "ThreadRecord", summary: "Set a thread name." },
   "thread.delete": { params: "threadId", result: "{ deleted }", summary: "Delete a workspace thread." },
   "thread.export": { params: "threadId, format?, branch?", result: "RpcThreadExportResult", summary: "Export bounded JSONL, Markdown, or HTML." },
   "thread.compact": { params: "threadId, provider, model, branch?, budgets?", result: "AgentRunResult", summary: "Run manual context compaction." },
+  "thread.model.set": { params: "threadId, reference, branch?, provider?, reasoningEffort?, refresh?", result: "RuntimeModelSelection", summary: "Persist an idle thread model selection without starting a run." },
+  "thread.model.cycle": { params: "threadId, branch?, direction?, refresh?", result: "RpcModelCycleResult or null", summary: "Cycle an idle thread through its configured model scope." },
+  "thread.thinking.set": { params: "threadId, reasoningEffort, branch?", result: "RuntimeModelSelection", summary: "Persist an idle thread thinking level without starting a run." },
+  "thread.thinking.cycle": { params: "threadId, branch?", result: "RpcThinkingCycleResult or null", summary: "Cycle an idle thread through levels supported by its selected model." },
+  "thread.autoCompaction.set": { params: "threadId, branch?, enabled", result: "{ threadId, branch, enabled }", summary: "Set the automatic-compaction policy for subsequent RPC runs on a thread branch." },
+  "session.current": { params: "none", result: "RpcCurrentSession or null", summary: "Read this client's current-session pointer." },
+  "session.new": { params: "name?, parentCurrent?", result: "RpcCurrentSession", summary: "Create and select a new current session for this client." },
+  "session.switch": { params: "threadId, branch?", result: "RpcCurrentSession", summary: "Select a workspace session as this client's current session." },
+  "session.clone": { params: "name?", result: "RpcSessionCopyResult", summary: "Clone and select the complete current session path." },
+  "session.fork": { params: "eventId, name?", result: "RpcSessionForkResult", summary: "Fork before a current-path user message and select the new session." },
   "events.subscribe": { params: "threadId, branch?, afterSequence?, limit?", result: "RpcEventSubscriptionResult", summary: "Start bounded-batch replayable durable-event delivery." },
   "events.unsubscribe": { params: "subscriptionId", result: "{ unsubscribed }", summary: "Stop an event subscription." },
   "run.start": { params: "RpcRunStartParams", result: "{ threadId, handled? }", summary: "Start a caller-owned agent run." },
   "run.wait": { params: "threadId", result: "HarnessRun or AgentRunResult", summary: "Wait for a caller-owned run or compaction." },
   "run.cancel": { params: "threadId, reason?", result: "{ accepted }", summary: "Cancel a caller-owned run." },
+  "run.retry.cancel": { params: "threadId", result: "{ accepted }", summary: "Cancel only a caller-owned scheduled retry delay." },
   "run.steer": { params: "threadId, message, images?", result: "{ accepted, handled? }", summary: "Queue steering input for an active run." },
   "run.followUp": { params: "threadId, message, images?", result: "{ accepted, handled? }", summary: "Queue follow-up input for an active run." },
   "run.queue": { params: "threadId, branch?, offset?, limit?", result: "RpcQueueResult", summary: "Inspect bounded durable queued input." },
@@ -354,6 +472,10 @@ export const RPC_METHOD_REFERENCE = Object.freeze({
   "run.dequeue.release": { params: "leaseId", result: "{ accepted }", summary: "Release a queue lease without removing it." },
   "run.queueModes.get": { params: "threadId", result: "queue modes", summary: "Read active run queue modes." },
   "run.queueModes.set": { params: "threadId, steeringMode?, followUpMode?", result: "queue modes", summary: "Change active run queue modes." },
+  "retry.get": { params: "none", result: "{ enabled }", summary: "Read the process-local automatic retry toggle." },
+  "retry.set": { params: "enabled", result: "{ enabled }", summary: "Change the process-local automatic retry toggle." },
+  "shell.run": { params: "runId, threadId, command, branch?, cwd?, excludeFromContext?, timeoutMs?", result: "RpcUserShellRunResult", summary: "Run a bounded caller-owned user shell command." },
+  "shell.cancel": { params: "runId, reason?", result: "{ accepted }", summary: "Cancel a caller-owned user shell command." },
   "models.list": { params: "provider?, refresh?", result: "ModelInfo[]", summary: "List configured or discovered models." },
   "models.status": { params: "provider?", result: "ModelCatalogStatus[]", summary: "Inspect durable model-catalog status." },
   "models.refresh": { params: "provider?", result: "ModelCatalogRefreshResult or []", summary: "Refresh one or all model catalogs." },

@@ -64,7 +64,8 @@ test("embedding, typed RPC, and runtime extensions receive the same canonical ca
       name: "catalog-projection",
       async execute(context) {
         const catalog = await api.getResourceCatalog(context.signal);
-        return { prompt: JSON.stringify(catalog) };
+        const discovery = await api.getDiscoveryView(context.signal);
+        return { prompt: JSON.stringify({ catalog, discovery }) };
       }
     });
   }\n`;
@@ -108,7 +109,18 @@ test("embedding, typed RPC, and runtime extensions receive the same canonical ca
     extraTools: runtimeExtensions.tools(),
     resourceCatalog: { extensions },
   });
-  await service.initialize();
+  await service.initialize({ skills: [{
+    name: "catalog-skill",
+    description: "Catalog skill metadata",
+    scope: "workspace",
+    trusted: true,
+    rootPath: root,
+    directory: root,
+    manifestPath: join(root, "SKILL.md"),
+    metadataTruncated: false,
+    metadata: {},
+    disableModelInvocation: false,
+  }] });
   const runtime = {
     workspace: root,
     store,
@@ -135,12 +147,23 @@ test("embedding, typed RPC, and runtime extensions receive the same canonical ca
     ui: commandUi(),
   });
   assert.equal(extension.handled, true);
-  const extensionCatalog = JSON.parse(extension.prompt ?? "null") as HarnessResourceCatalog;
+  const extensionProjection = JSON.parse(extension.prompt ?? "null") as {
+    catalog: HarnessResourceCatalog;
+    discovery: { resources: Array<{ kind: string; source?: string; name: string }> };
+  };
   assert.deepEqual(rpc, embedded);
-  assert.deepEqual(extensionCatalog, embedded);
+  assert.deepEqual(extensionProjection.catalog, embedded);
   assert.equal(embedded.providers[0]?.models[0]?.id, "catalog-model");
   assert.equal(embedded.commands.runtimeExtensions[0]?.name, "catalog-projection");
   assert.equal(embedded.prompts[0]?.id, "catalog-prompt");
+  assert.ok(extensionProjection.discovery.resources.some((entry) =>
+    entry.kind === "command" && entry.source === "builtin" && entry.name === "model"));
+  assert.ok(extensionProjection.discovery.resources.some((entry) =>
+    entry.kind === "command" && entry.source === "runtime_extension" && entry.name === "catalog-projection"));
+  assert.ok(extensionProjection.discovery.resources.some((entry) =>
+    entry.kind === "prompt" && entry.name === "catalog-prompt"));
+  assert.ok(extensionProjection.discovery.resources.some((entry) =>
+    entry.kind === "skill" && entry.name === "catalog-skill"));
   assert.doesNotMatch(JSON.stringify(embedded), /private prompt contents|private-prompt\.md|catalog-extension\.mjs/u);
 });
 

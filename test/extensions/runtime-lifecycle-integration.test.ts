@@ -29,8 +29,38 @@ const lifecycleExtension = `export default (api) => {
     "session_start", "session_end", "session_shutdown", "agent_start", "agent_end", "agent_settled",
     "turn_start", "turn_end", "message_start", "message_update", "message_end",
     "tool_execution_start", "tool_execution_update", "tool_execution_end", "model_select",
-    "thinking_level_select", "user_shell", "event"
+    "thinking_level_select", "user_shell", "input", "event"
   ]) api.on(name, (event) => { record(name, event); });
+  api.on("input", async (_event, context) => {
+    if (!context.session) throw new Error("input session context is unavailable");
+    const [snapshot, model, usage, prompt, idle, pending] = await Promise.all([
+      context.session.get(),
+      context.session.getModel(),
+      context.session.getUsage(),
+      context.session.getSystemPrompt(),
+      context.session.isIdle(),
+      context.session.hasPendingMessages()
+    ]);
+    globalThis.__runtimeInputSessionContext = {
+      threadId: context.session.threadId,
+      branch: context.session.branch,
+      runId: context.session.runId ?? null,
+      step: context.session.step ?? null,
+      snapshotThreadId: snapshot.threadId,
+      snapshotBranch: snapshot.branch,
+      active: snapshot.active,
+      model,
+      usageThreadId: usage.threadId,
+      runCount: usage.runCount,
+      responseCount: usage.responseCount,
+      promptThreadId: prompt?.threadId,
+      promptBytes: prompt?.bytes,
+      idle,
+      pending,
+      canAbort: typeof context.session.abort === "function",
+      canCompact: typeof context.session.compact === "function"
+    };
+  });
   api.on("message_update", () => { throw new Error("lifecycle observer failed"); });
   api.registerTool({
     name: "lifecycle_echo",
@@ -112,6 +142,12 @@ test("typed runtime lifecycle events follow durable agent, message, and tool bou
       hidden: false,
       result: { text: "fixture", exitCode: 0 },
     });
+    assert.deepEqual(await host.reduceInput({
+      threadId: run.threadId,
+      branch: "main",
+      text: "inspect session context",
+      source: "tui",
+    }), { action: "continue" });
     await service.close();
     await host.close();
 
@@ -122,6 +158,12 @@ test("typed runtime lifecycle events follow durable agent, message, and tool bou
     const agentStart = indexOf(events, "agent_start");
     const firstTurnStart = indexOf(events, "turn_start", (event) => event.step === 1);
     const firstMessageStart = indexOf(events, "message_start", (event) => event.step === 1);
+    const toolCallStartUpdate = indexOf(events, "message_update", (event) =>
+      event.step === 1 && event.kind === "tool_call_start");
+    const toolCallDeltaUpdate = indexOf(events, "message_update", (event) =>
+      event.step === 1 && event.kind === "tool_call_delta");
+    const toolCallEndUpdate = indexOf(events, "message_update", (event) =>
+      event.step === 1 && event.kind === "tool_call_end");
     const firstAssistantEnd = indexOf(events, "message_end", (event) => event.message?.role === "assistant");
     const firstTurnEnd = indexOf(events, "turn_end", (event) => event.step === 1);
     const toolStart = indexOf(events, "tool_execution_start");
@@ -139,24 +181,80 @@ test("typed runtime lifecycle events follow durable agent, message, and tool bou
 
     for (const index of [
       sessionStart, modelSelect, thinkingSelect, agentStart, firstTurnStart, firstMessageStart,
+      toolCallStartUpdate, toolCallDeltaUpdate, toolCallEndUpdate,
       firstAssistantEnd, firstTurnEnd, toolStart, toolUpdate, toolProgress, toolEnd, secondTurnStart,
       textUpdate, secondTurnEnd, agentEnd, agentSettled, userShell, sessionEnd, shutdown,
     ]) assert.notEqual(index, -1);
     assert.ok(sessionStart < modelSelect && modelSelect < thinkingSelect && thinkingSelect < agentStart);
     assert.ok(agentStart < firstTurnStart && firstTurnStart < firstMessageStart);
-    assert.ok(firstMessageStart < firstAssistantEnd && firstAssistantEnd < firstTurnEnd);
-    assert.ok(firstTurnEnd < toolStart && toolStart < toolUpdate && toolUpdate < toolProgress && toolProgress < toolEnd);
-    assert.ok(toolEnd < secondTurnStart && secondTurnStart < textUpdate && textUpdate < secondTurnEnd);
+    assert.ok(firstMessageStart < toolCallStartUpdate && toolCallStartUpdate < toolCallDeltaUpdate);
+    assert.ok(toolCallDeltaUpdate < firstAssistantEnd && firstAssistantEnd < toolCallEndUpdate);
+    assert.ok(toolCallEndUpdate < toolStart && toolStart < toolUpdate && toolUpdate < toolProgress && toolProgress < toolEnd);
+    assert.ok(toolEnd < firstTurnEnd && firstTurnEnd < secondTurnStart && secondTurnStart < textUpdate && textUpdate < secondTurnEnd);
     assert.ok(secondTurnEnd < agentEnd && agentEnd < agentSettled);
     assert.ok(agentSettled < sessionEnd && sessionEnd < shutdown);
 
     assert.deepEqual(events[modelSelect]!.event, {
       threadId: run.threadId,
+      branch: "main",
       provider: provider.id,
       model: "lifecycle-model",
       source: "run",
     });
-    assert.equal(events[thinkingSelect]!.event.level, "high");
+    assert.deepEqual(events[thinkingSelect]!.event, {
+      threadId: run.threadId,
+      branch: "main",
+      level: "high",
+      previousLevel: "off",
+      source: "run",
+    });
+    assert.deepEqual(events[firstMessageStart]!.event.message, {
+      role: "assistant",
+      provider: provider.id,
+      model: "lifecycle-model",
+      text: [],
+      reasoning: [],
+      toolCalls: [],
+    });
+    assert.deepEqual(events[toolCallStartUpdate]!.event, {
+      threadId: run.threadId,
+      runId: events[toolCallStartUpdate]!.event.runId,
+      branch: "main",
+      step: 1,
+      kind: "tool_call_start",
+      index: 0,
+      id: "lifecycle-call",
+      name: "lifecycle_echo",
+      message: {
+        role: "assistant",
+        provider: provider.id,
+        model: "lifecycle-model",
+        text: [],
+        reasoning: [],
+        toolCalls: [{
+          index: 0,
+          id: "lifecycle-call",
+          name: "lifecycle_echo",
+          rawArguments: "",
+          complete: false,
+        }],
+      },
+    });
+    assert.equal(events[toolCallDeltaUpdate]!.event.jsonFragment.includes("value"), true);
+    assert.equal(events[toolCallDeltaUpdate]!.event.message.toolCalls[0].rawArguments.includes("value"), true);
+    assert.deepEqual(events[toolCallEndUpdate]!.event.arguments, { value: "tool output" });
+    assert.equal(events[toolCallEndUpdate]!.event.message.toolCalls[0].complete, true);
+    assert.deepEqual(events[firstTurnEnd]!.event.message.content, [{
+      type: "tool_call",
+      callId: "lifecycle-call",
+      name: "lifecycle_echo",
+      arguments: { value: "tool output" },
+      rawArguments: "{\"value\":\"tool output\"}",
+    }]);
+    assert.equal(events[firstTurnEnd]!.event.toolResults.length, 1);
+    assert.equal(events[firstTurnEnd]!.event.toolResults[0].content, "tool output");
+    assert.equal(events[secondTurnEnd]!.event.message.content[0].text, "finished");
+    assert.deepEqual(events[secondTurnEnd]!.event.toolResults, []);
     assert.equal(events[toolStart]!.event.invocation.input.value, "tool output");
     assert.equal(events[toolUpdate]!.event.phase, "running");
     assert.deepEqual(events[toolProgress]!.event.progress, {
@@ -169,6 +267,29 @@ test("typed runtime lifecycle events follow durable agent, message, and tool bou
     assert.equal(events[toolProgress]!.event.sequence, 0);
     assert.equal(events[toolEnd]!.event.outcome.status, "completed");
     assert.equal(events[agentEnd]!.event.outcome.status, "completed");
+    assert.equal(events[agentEnd]!.event.messagesTruncated, false);
+    assert.equal(events[agentEnd]!.event.messages.at(-1).content[0].text, "finished");
+    assert.deepEqual(events[agentSettled]!.event.messages, events[agentEnd]!.event.messages);
+    assert.deepEqual((globalThis as Record<string, unknown>).__runtimeInputSessionContext, {
+      threadId: run.threadId,
+      branch: "main",
+      runId: null,
+      step: null,
+      snapshotThreadId: run.threadId,
+      snapshotBranch: "main",
+      active: false,
+      model: { provider: provider.id, model: "lifecycle-model", reasoningEffort: "high" },
+      usageThreadId: run.threadId,
+      runCount: 1,
+      responseCount: 2,
+      promptThreadId: run.threadId,
+      promptBytes: (globalThis as Record<string, any>).__runtimeInputSessionContext.promptBytes,
+      idle: true,
+      pending: false,
+      canAbort: true,
+      canCompact: true,
+    });
+    assert.ok(((globalThis as Record<string, any>).__runtimeInputSessionContext.promptBytes as number) > 0);
     assert.equal(events[shutdown]!.event.reason, "host_close");
     assert.equal(host.diagnostics().some((entry) => entry.message.includes("lifecycle observer failed")), true);
   } finally {
@@ -176,6 +297,7 @@ test("typed runtime lifecycle events follow durable agent, message, and tool bou
     await host.close();
     store.close();
     delete (globalThis as Record<string, unknown>).__runtimeLifecycleEvents;
+    delete (globalThis as Record<string, unknown>).__runtimeInputSessionContext;
   }
 });
 

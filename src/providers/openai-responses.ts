@@ -34,6 +34,7 @@ import {
   type FetchLike,
   jsonValueOrString,
   normalizeError,
+  PrematureStreamEndError,
   ProtocolError,
   ProviderStreamError,
   requestIdFromHeaders,
@@ -189,6 +190,18 @@ export class ResponsesAdapter implements ProviderAdapter {
       let nextReasoningPart = 0;
       let sawToolCall = false;
       let sawRefusal = false;
+      const startResponse = (): AdapterEvent | undefined => {
+        if (started) return undefined;
+        started = true;
+        const start: AdapterEvent = {
+          type: "response_start",
+          model: responseModel,
+          ...(diagnostics === undefined ? {} : { diagnostics }),
+        };
+        if (responseId !== undefined) start.responseId = responseId;
+        if (requestId !== undefined) start.requestId = requestId;
+        return start;
+      };
 
       for await (const wire of wireEvents) {
         requestId ??= wire.requestId;
@@ -208,18 +221,6 @@ export class ResponsesAdapter implements ProviderAdapter {
         responseId = asString(responseObject?.id) ?? responseId;
         responseModel = asString(responseObject?.model) ?? responseModel;
 
-        if (!started && type !== "error") {
-          started = true;
-          const start: AdapterEvent = {
-            type: "response_start",
-            model: responseModel,
-            ...(diagnostics === undefined ? {} : { diagnostics }),
-          };
-          if (responseId !== undefined) start.responseId = responseId;
-          if (requestId !== undefined) start.requestId = requestId;
-          yield start;
-        }
-
         if (type === "response.created" || type === "response.in_progress" || type === "response.queued") {
           continue;
         }
@@ -228,6 +229,8 @@ export class ResponsesAdapter implements ProviderAdapter {
           const text = asString(event.delta) ?? "";
           if (text !== "") {
             partial = true;
+            const start = startResponse();
+            if (start !== undefined) yield start;
             yield { type: "text_delta", part: asNumber(event.content_index) ?? 0, text };
           }
           continue;
@@ -238,6 +241,8 @@ export class ResponsesAdapter implements ProviderAdapter {
           if (text !== "") {
             sawRefusal = true;
             partial = true;
+            const start = startResponse();
+            if (start !== undefined) yield start;
             yield { type: "text_delta", part: asNumber(event.content_index) ?? 0, text };
           }
           continue;
@@ -247,6 +252,8 @@ export class ResponsesAdapter implements ProviderAdapter {
           const text = asString(event.delta) ?? "";
           if (text !== "") {
             partial = true;
+            const start = startResponse();
+            if (start !== undefined) yield start;
             const visibility = type.includes("summary") ? "summary" : "provider_trace";
             const index = asNumber(event.summary_index) ?? asNumber(event.content_index) ?? 0;
             const itemId = asString(event.item_id);
@@ -293,6 +300,8 @@ export class ResponsesAdapter implements ProviderAdapter {
               if (name !== undefined) tool.name = name;
               tools.set(key, tool);
               partial = true;
+              const responseStart = startResponse();
+              if (responseStart !== undefined) yield responseStart;
               const start: AdapterEvent = { type: "tool_call_start", index };
               if (tool.id !== undefined) start.id = tool.id;
               if (tool.name !== undefined) start.name = tool.name;
@@ -314,6 +323,8 @@ export class ResponsesAdapter implements ProviderAdapter {
           const tool = found.tool;
           if (found.created) {
             partial = true;
+            const responseStart = startResponse();
+            if (responseStart !== undefined) yield responseStart;
             const start: AdapterEvent = { type: "tool_call_start", index: tool.index };
             yield start;
           }
@@ -329,6 +340,8 @@ export class ResponsesAdapter implements ProviderAdapter {
           const tool = found.tool;
           if (found.created) {
             partial = true;
+            const responseStart = startResponse();
+            if (responseStart !== undefined) yield responseStart;
             const start: AdapterEvent = { type: "tool_call_start", index: tool.index };
             yield start;
           }
@@ -338,17 +351,8 @@ export class ResponsesAdapter implements ProviderAdapter {
         }
 
         if (type === "response.completed" || type === "response.incomplete") {
-          if (!started) {
-            started = true;
-            const start: AdapterEvent = {
-              type: "response_start",
-              model: responseModel,
-              ...(diagnostics === undefined ? {} : { diagnostics }),
-            };
-            if (responseId !== undefined) start.responseId = responseId;
-            if (requestId !== undefined) start.requestId = requestId;
-            yield start;
-          }
+          const start = startResponse();
+          if (start !== undefined) yield start;
           for (const tool of tools.values()) {
             if (!tool.ended) yield finishTool(tool);
           }
@@ -390,7 +394,7 @@ export class ResponsesAdapter implements ProviderAdapter {
         yield { type: "unknown_provider_event", provider: this.id, raw: jsonValueOrString(event) };
       }
 
-      if (!terminal) throw new ProtocolError("Responses stream ended before a terminal event");
+      if (!terminal) throw new PrematureStreamEndError("Responses stream ended before a terminal event");
     } catch (error) {
       if (!terminal) {
         terminal = true;

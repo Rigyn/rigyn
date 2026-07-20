@@ -124,6 +124,20 @@ test("bash uses seconds for timeout, runs at the session cwd, and returns unlabe
   assert.doesNotMatch(result.content, /stdout:|stderr:|Command exited/u);
 });
 
+test("bash prepends the configured shell source in the existing invocation", async (t) => {
+  let received: CommandSpec | undefined;
+  const runner: ProcessRunner = {
+    async run(spec): Promise<CommandResult> {
+      received = spec;
+      return { exitCode: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutBytes: 0, stderrBytes: 0, timedOut: false, cancelled: false, durationMs: 1 };
+    },
+  };
+  const workspace = await fixture({ runner });
+  t.after(async () => await workspace.close());
+  await new ShellTool("bash", { commandPrefix: "source ~/.profile" }).execute({ command: "printf ready" }, workspace.context);
+  assert.match(received?.argv.at(-1) ?? "", /source ~\/\.profile\nprintf ready/u);
+});
+
 test("bash defaults omitted timeouts to ten minutes", async (t) => {
   let received: CommandSpec | undefined;
   const runner: ProcessRunner = {

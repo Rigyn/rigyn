@@ -14,6 +14,7 @@ import { AnthropicAdapter } from "../../src/providers/anthropic.js";
 import { BedrockAdapter } from "../../src/providers/bedrock.js";
 import { GeminiInteractionsAdapter } from "../../src/providers/gemini-interactions.js";
 import { GeminiAdapter, VertexAdapter } from "../../src/providers/gemini.js";
+import { GatewayMessagesAdapter } from "../../src/providers/gateway-messages.js";
 import { MistralConversationsAdapter } from "../../src/providers/mistral-conversations.js";
 import { MistralAdapter, OpenAICompatibleAdapter, OpenRouterAdapter } from "../../src/providers/openai-compatible.js";
 import { AzureOpenAIResponsesAdapter, OpenAIResponsesAdapter } from "../../src/providers/openai-responses.js";
@@ -28,6 +29,7 @@ interface WireFixture {
   chunks(): Uint8Array[];
   contentType: string;
   state(): ProviderState;
+  prepare?(request: Request): Response | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -268,6 +270,47 @@ function ollamaChunks(): Uint8Array[] {
   ];
 }
 
+function gatewayChunks(): Uint8Array[] {
+  const usage = {
+    input: 200,
+    output: 100,
+    cacheRead: 700,
+    cacheWrite: 100,
+    totalTokens: 1_100,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  return [
+    sse({ type: "start" }),
+    sse({ type: "text_start", contentIndex: 0 }),
+    sse({ type: "text_delta", contentIndex: 0, delta: "ok" }),
+    sse({ type: "text_end", contentIndex: 0, content: "ok", contentSignature: "text-signature" }),
+    sse({ type: "toolcall_start", contentIndex: 1, id: "contract-call", toolName: "lookup" }),
+    sse({ type: "toolcall_delta", contentIndex: 1, delta: '{"value":1}' }),
+    sse({
+      type: "toolcall_end",
+      contentIndex: 1,
+      toolCall: { type: "toolCall", id: "contract-call", name: "lookup", arguments: { value: 1 } },
+    }),
+    sse({ type: "done", reason: "toolUse", usage, responseId: "gateway-contract" }),
+  ];
+}
+
+function gatewayConfig(request: Request): Response | undefined {
+  if (!request.url.endsWith("/config")) return undefined;
+  return new Response(JSON.stringify({
+    baseUrl: "https://messages.example/v1",
+    models: [{
+      id: "test-model",
+      name: "Test Model",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    }],
+  }), { headers: { "content-type": "application/json" } });
+}
+
 function bedrockChunks(): Uint8Array[] {
   return [
     awsFrame({ ":message-type": "event", ":event-type": "messageStart" }, { role: "assistant" }),
@@ -441,6 +484,23 @@ const fixtures: WireFixture[] = [
       assistantMessage: { role: "assistant", content: "state-sentinel" },
     }),
   },
+  {
+    name: "Gateway Messages",
+    provider: "gateway-contract",
+    create: (fetch) => new GatewayMessagesAdapter({
+      id: "gateway-contract",
+      gatewayUrl: "https://gateway.example/v1",
+      accessToken: "offline",
+      fetch,
+    }),
+    chunks: gatewayChunks,
+    contentType: "text/event-stream",
+    state: () => ({
+      kind: "gateway_messages",
+      assistantContent: [{ type: "text", text: "state-sentinel", textSignature: "state-signature" }],
+    }),
+    prepare: gatewayConfig,
+  },
 ];
 
 function responsesState(): ProviderState {
@@ -474,6 +534,8 @@ test("offline native-provider request and stream contract matrix", async (t) => 
     await t.test(fixture.name, async () => {
       let posted: unknown;
       const adapter = fixture.create(fakeFetch(async (incoming) => {
+        const prepared = fixture.prepare?.(incoming);
+        if (prepared !== undefined) return prepared;
         posted = await incoming.json();
         return successResponse(fixture);
       }));
@@ -509,11 +571,11 @@ test("offline native-provider request and stream contract matrix", async (t) => 
 test("every native HTTP stream preserves diagnostics when it ends before response_start", async (t) => {
   for (const fixture of fixtures) {
     await t.test(fixture.name, async () => {
-      const adapter = fixture.create(fakeFetch(() => streamResponse([], {
-        "content-type": fixture.contentType,
-        "x-request-id": "empty-stream-request",
-        authorization: "Bearer response-secret",
-      })));
+      const adapter = fixture.create(fakeFetch((incoming) => fixture.prepare?.(incoming) ?? streamResponse([], {
+          "content-type": fixture.contentType,
+          "x-request-id": "empty-stream-request",
+          authorization: "Bearer response-secret",
+        })));
       const events = await collect(adapter.stream(request(fixture.provider), new AbortController().signal));
 
       assert.equal(events.some((event) => event.type === "response_start"), false);
@@ -537,7 +599,9 @@ test("every native provider rejects an entirely empty conversation before transp
   for (const fixture of fixtures) {
     await t.test(fixture.name, async () => {
       let transported = false;
-      const adapter = fixture.create(fakeFetch(() => {
+      const adapter = fixture.create(fakeFetch((incoming) => {
+        const prepared = fixture.prepare?.(incoming);
+        if (prepared !== undefined) return prepared;
         transported = true;
         return successResponse(fixture);
       }));
@@ -579,6 +643,8 @@ test("every native provider cancels at each stream phase and accepts a successfu
         await providerTest.test(phase.name, async () => {
           let attempt = 0;
           const adapter = fixture.create(fakeFetch((incoming) => {
+            const prepared = fixture.prepare?.(incoming);
+            if (prepared !== undefined) return prepared;
             attempt += 1;
             if (incoming.signal.aborted) throw abortError();
             return attempt === 1
@@ -612,6 +678,8 @@ test("same-provider state replaces an empty assistant marker without losing reas
     await t.test(fixture.name, async () => {
       let posted: unknown;
       const adapter = fixture.create(fakeFetch(async (incoming) => {
+        const prepared = fixture.prepare?.(incoming);
+        if (prepared !== undefined) return prepared;
         posted = await incoming.json();
         return successResponse(fixture);
       }));
@@ -644,13 +712,13 @@ test("same-provider state replaces an empty assistant marker without losing reas
 test("every native provider bounds malformed HTTP error bodies", async (t) => {
   for (const fixture of fixtures) {
     await t.test(fixture.name, async () => {
-      const adapter = fixture.create(fakeFetch(() => new Response(
-        `malformed gateway body {"reason":"${"x".repeat(96 * 1024)}`,
-        {
-          status: 502,
-          headers: { "content-type": "application/json", "x-request-id": "contract-request" },
-        },
-      )));
+      const adapter = fixture.create(fakeFetch((incoming) => fixture.prepare?.(incoming) ?? new Response(
+          `malformed gateway body {"reason":"${"x".repeat(96 * 1024)}`,
+          {
+            status: 502,
+            headers: { "content-type": "application/json", "x-request-id": "contract-request" },
+          },
+        )));
       const events = await collect(adapter.stream(request(fixture.provider), new AbortController().signal));
       assert.equal(terminalCount(events), 1);
       const terminal = events.at(-1);

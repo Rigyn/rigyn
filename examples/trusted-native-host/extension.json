@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "trusted-native-host-example",
+  "name": "Trusted native host example",
+  "version": "1.0.0",
+  "description": "Explicit, command-driven examples for privileged UI, session, credential, provider, and host-configuration access.",
+  "permissions": {
+    "nativeUi": true,
+    "providerOverride": true,
+    "providerWire": true,
+    "credentialAccess": true,
+    "sessionRaw": true,
+    "hostConfiguration": true
+  },
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

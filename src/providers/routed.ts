@@ -24,6 +24,7 @@ const PROTOCOL_FAMILIES = new Set<ModelProtocolFamily>([
   "bedrock-converse",
   "mistral-conversations",
   "ollama-chat",
+  "gateway-messages",
 ]);
 
 export interface RoutedProviderRoute {
@@ -35,6 +36,11 @@ export interface RoutedProviderRoute {
   adapter: ProviderAdapter;
   /** Exact model ID sent to the delegate. Defaults to `model`. */
   upstreamModel?: string;
+  /**
+   * Optional validated catalog metadata for endpoints without model discovery.
+   * `id` and `provider` are rewritten to the public route identity.
+   */
+  modelInfo?: ModelInfo;
 }
 
 export interface RoutedProviderAdapterDefinition {
@@ -52,6 +58,7 @@ interface NormalizedRoute {
   upstreamModel: string;
   protocolFamily: ModelProtocolFamily;
   adapter: ProviderAdapter;
+  modelInfo?: ModelInfo;
   stateScope: string;
 }
 
@@ -114,6 +121,7 @@ function normalizeRoutes(definition: RoutedProviderAdapterDefinition): Map<strin
       ),
       protocolFamily: route.protocolFamily,
       adapter: route.adapter,
+      ...(route.modelInfo === undefined ? {} : { modelInfo: structuredClone(route.modelInfo) }),
       stateScope: randomUUID(),
     });
   }
@@ -138,6 +146,8 @@ function stateMatchesProtocol(state: ProviderState, protocol: ModelProtocolFamil
       return state.kind === "mistral_conversations";
     case "ollama-chat":
       return state.kind === "ollama_chat";
+    case "gateway-messages":
+      return state.kind === "gateway_messages";
   }
 }
 
@@ -264,14 +274,16 @@ export function defineRoutedProviderAdapter(definition: RoutedProviderAdapterDef
     async listModels(signal) {
       signal.throwIfAborted();
       const catalogs = new Map<ProviderAdapter, Map<string, ModelInfo>>();
-      await Promise.all(delegates.map(async (adapter) => {
+      const discoverableDelegates = delegates.filter((delegate) =>
+        [...routes.values()].some((route) => route.adapter === delegate && route.modelInfo === undefined));
+      await Promise.all(discoverableDelegates.map(async (adapter) => {
         const models = await adapter.listModels(signal);
         signal.throwIfAborted();
         catalogs.set(adapter, new Map(models.map((model) => [model.id, model])));
       }));
       const observedAt = new Date().toISOString();
       const models = [...routes.values()].map((route) => {
-        const model = catalogs.get(route.adapter)?.get(route.upstreamModel);
+        const model = route.modelInfo ?? catalogs.get(route.adapter)?.get(route.upstreamModel);
         if (model === undefined) {
           throw new Error(
             `Routed provider ${id} delegate ${route.adapter.id} did not advertise model ${route.upstreamModel}`,

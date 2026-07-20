@@ -158,7 +158,7 @@ test("PTY login refreshes a configured device credential, selects a model, logs 
   child.stderr.on("data", (chunk: Buffer) => { rendered += chunk.toString("utf8"); });
   const read = () => rendered;
 
-  await waitForOutput(read, "Rigyn v0.2.0 · Ready");
+  await waitForOutput(read, "Rigyn v0.3.0 · Ready");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
   assert.doesNotMatch(read(), /Model catalogs:/u);
   child.stdin.write("/login\r");

@@ -42,6 +42,10 @@ The configured owner loads the same configuration, brokered credentials, provide
 
 The older root `createHarnessRuntime()` API remains supported for advanced hosts that genuinely need direct service, store, provider-registry, or auth-registry access. Prefer the narrower owner for applications because it has a smaller authority and compatibility surface.
 
+An advanced host that has already created a `HarnessRuntime` can transfer its lifecycle ownership into the narrow facade with `createEmbeddingHarnessFromRuntime(runtime)`. The returned owner closes that runtime; do not close or reuse it independently afterward.
+
+The ready-made adapters in [`rigyn/modes`](modes.md) can borrow this owner for text/JSON output or a core interactive terminal loop. They do not construct or close another runtime.
+
 ## Deterministic in-memory preset
 
 `createInMemoryHarness()` is intended for unit tests and small provider-neutral integrations:
@@ -85,7 +89,7 @@ Both owners follow the same bounded lifecycle:
 
 Configured session handles are owned by their `EmbeddingHarness`. Closing the owner invalidates every handle and subscription, cancels service work, and waits for already-started session operations to settle. Reopen the durable session through a new owner after restart; do not retain a handle across owner lifetimes.
 
-The in-memory preset also combines every run signal with a 30-second default hard deadline and the owner close signal. Set `timeoutMs` at creation to another value from 1 ms through 10 minutes. Calling a run handle's `cancel()` affects only that thread. Calling `close()` affects every run owned by that harness.
+The in-memory preset also combines every run signal with a 30-second default hard deadline and the owner close signal. Set `timeoutMs` at creation to another value from 1 ms through 10 minutes. Calling a run handle's `cancel()` affects only that thread. `cancelRetry()` returns `true` only when it cancels that run's scheduled retry delay and never aborts the whole run. Calling `close()` affects every run owned by that harness.
 
 The three focused runnable examples are:
 
@@ -97,4 +101,4 @@ The three focused runnable examples are:
 
 Every embedding entry point targets Node.js 24.15+ or 26+. There is intentionally no browser bundle: an embedded harness can own filesystem, process, provider, and credential authority even when the narrow facade does not reveal those objects. Browser clients should use the typed RPC host so that authority remains in a trusted local Node.js process. A browser-safe protocol/types package should be added only when a real client requires one.
 
-Extensions loaded by the configured owner execute in the same trusted Node.js process. Package trust, credential brokering, workspace boundaries, and external execution backends still apply, but extensions are not a JavaScript sandbox. Embedding provides no interactive extension UI; use the typed RPC host when an external client needs negotiated dialogs or extension-command dispatch.
+Extensions loaded by the configured owner execute in the same trusted Node.js process. Package trust, credential brokering, workspace boundaries, and external execution backends still apply, but extensions are not a JavaScript sandbox. The borrowed interactive mode renders normal run events but does not recreate the CLI's extension-dialog host; use typed RPC when an external client needs negotiated dialogs or extension-command dispatch.

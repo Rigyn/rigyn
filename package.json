@@ -1,6 +1,6 @@
 {
   "name": "rigyn",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
   "license": "MIT",
@@ -62,6 +62,10 @@
       "types": "./dist/interfaces/index.d.ts",
       "import": "./dist/interfaces/index.js"
     },
+    "./modes": {
+      "types": "./dist/modes/index.d.ts",
+      "import": "./dist/modes/index.js"
+    },
     "./net": {
       "types": "./dist/net/index.d.ts",
       "import": "./dist/net/index.js"
@@ -81,6 +85,10 @@
     "./service": {
       "types": "./dist/service/index.d.ts",
       "import": "./dist/service/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
     },
     "./storage": {
       "types": "./dist/storage/index.d.ts",
@@ -152,8 +160,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.112.3",
+    "@aws-sdk/credential-providers": "3.1090.0",
     "@vscode/ripgrep": "1.18.0",
     "bmp-js": "0.1.0",
+    "google-auth-library": "10.9.0",
     "ignore": "7.0.6",
     "jsonc-parser": "3.3.1",
     "minimatch": "10.2.5",

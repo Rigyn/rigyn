@@ -59,6 +59,9 @@ Tools and resources:
   -ns, --no-skills          Disable automatic skill discovery
       --prompt-template PATH  Load a prompt template file or directory; repeatable
   -np, --no-prompt-templates  Disable automatic prompt discovery
+      --system-prompt TEXT    Replace the built-in system prompt for this invocation
+      --append-system-prompt TEXT
+                              Append text to the active system prompt
       --theme PATH          Load a theme file or directory; repeatable
       --no-themes           Disable automatic theme discovery
   -nc, --no-context-files   Disable project instruction-file discovery
@@ -71,8 +74,8 @@ Other:
       --redact              With --export, write a review-required HTML/Markdown share copy
   -a, --approve             Trust project-local resources for this invocation
   -na, --no-approve         Ignore project-local resources for this invocation
-      --offline             Skip startup network refreshes
-      --verbose             Show expanded startup details
+      --offline             Skip startup network refreshes (or set RIGYN_OFFLINE=1)
+      --verbose             Show expanded startup details, overriding quietStartup
   -h, --help                Show this help
   -v, --version             Show version
 

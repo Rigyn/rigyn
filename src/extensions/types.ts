@@ -83,6 +83,17 @@ export interface ExtensionRuntimeEntry {
   resourceRoot?: string;
   scope?: ExtensionScope;
   trusted?: boolean;
+  /** Explicit high-trust presentation capabilities declared by a manifest. */
+  permissions?: {
+    advancedUi?: boolean;
+    nativeUi?: boolean;
+    unsafeTerminal?: boolean;
+    providerOverride?: boolean;
+    providerWire?: boolean;
+    credentialAccess?: boolean;
+    sessionRaw?: boolean;
+    hostConfiguration?: boolean;
+  };
 }
 
 export interface ExtensionBundle {

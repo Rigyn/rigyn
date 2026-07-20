@@ -85,6 +85,30 @@ test("conventional extensions, skills, prompts, and themes directories need only
   assert.deepEqual(catalog.bundle().themes.map((entry) => entry.name), ["forest"]);
 });
 
+test("convention discovery honors hierarchical ignore files and excludes hidden resources", async (t) => {
+  const { source, installed } = await fixture(t);
+  await mkdir(join(source, "extensions", "nested"), { recursive: true });
+  await mkdir(join(source, "prompts"), { recursive: true });
+  await writeFile(join(source, ".gitignore"), "extensions/*.mjs\n!extensions/kept.mjs\n");
+  await writeFile(join(source, "extensions", "nested", ".ignore"), "index.mjs\n");
+  await writeFile(join(source, "prompts", ".fdignore"), "private.md\n");
+  await writeFile(join(source, "extensions", "kept.mjs"), "export default function activate() {}\n");
+  await writeFile(join(source, "extensions", "ignored.mjs"), "throw new Error('ignored runtime loaded');\n");
+  await writeFile(join(source, "extensions", ".hidden.mjs"), "throw new Error('hidden runtime loaded');\n");
+  await writeFile(join(source, "extensions", "nested", "index.mjs"), "throw new Error('nested ignored runtime loaded');\n");
+  await writeFile(join(source, "prompts", "public.md"), "Public $ARGUMENTS\n");
+  await writeFile(join(source, "prompts", "private.md"), "Private $ARGUMENTS\n");
+  await writeFile(join(source, "prompts", ".hidden.md"), "Hidden $ARGUMENTS\n");
+  await writeFile(join(source, "package.json"), JSON.stringify({ name: "ignored-resource-kit", version: "0.1.0" }));
+
+  const result = await new LocalExtensionPackageManager({ user: installed }).install(source);
+  const generated = JSON.parse(await readFile(join(result.packageRoot, "extension.json"), "utf8")) as {
+    contributions: { runtime: Array<{ path: string }>; prompts: Array<{ path: string }> };
+  };
+  assert.deepEqual(generated.contributions.runtime.map((entry) => entry.path), ["extensions/kept.mjs"]);
+  assert.deepEqual(generated.contributions.prompts.map((entry) => entry.path), ["prompts/public.md"]);
+});
+
 test("convention packages expose direct root Markdown skills through the active catalog", async (t) => {
   const { source, installed } = await fixture(t);
   await mkdir(join(source, "skills"), { recursive: true });

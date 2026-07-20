@@ -12,6 +12,8 @@
     "consumer.mts",
     "embedding-consumer.mts",
     "layer-consumer.mts",
+    "modes-consumer.mts",
+    "sdk-consumer.mts",
     "testing-consumer.mts"
   ],
   "exclude": []

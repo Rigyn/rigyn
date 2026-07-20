@@ -361,6 +361,11 @@ test("one-shot run expands installed prompts, commands, and skills inside the ha
     assert.match(skill.stdout, /Offline provider: <skill name="one-shot-skill"/u);
     assert.match(skill.stdout, /Follow the one-shot skill instructions\./u);
     assert.match(skill.stdout, /apply now/u);
+
+    await writeFile(join(configHome, "rigyn", "config.jsonc"), JSON.stringify({ enableSkillCommands: false }));
+    const literalSkill = await runCli(["run", "/skill:one-shot-skill apply now", ...common], { ...process.env });
+    assert.equal(literalSkill.code, 0, literalSkill.stderr);
+    assert.equal(literalSkill.stdout, "Offline provider: /skill:one-shot-skill apply now\n");
   });
 });
 
@@ -483,7 +488,7 @@ export default function activate(api: any) {
       name: "temporary-package",
       version: "1.0.0",
       rigyn: {
-        hostVersion: ">=0.1.0 <0.3.0",
+        hostVersion: ">=0.1.0 <0.4.0",
         extensions: ["extensions"],
         prompts: ["prompts"],
         skills: ["skills"],

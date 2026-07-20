@@ -18,7 +18,7 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
     promptsAndCommands: ["/explain", "/inspect"],
     themes: ["paper"],
   });
-  assert.match(report, /^Rigyn v0\.2\.0 · Ready$/mu);
+  assert.match(report, /^Rigyn v0\.3\.0 · Ready$/mu);
   assert.match(report, /^Model: Ctrl\+K picker · Alt\+N next/mu);
   assert.match(report, /^Control: Ctrl\+X cancel/mu);
   assert.match(report, /^Commands: \/ opens the palette · \/login connects a provider/mu);

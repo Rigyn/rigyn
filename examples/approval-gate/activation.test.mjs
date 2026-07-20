@@ -38,7 +38,7 @@ test("approval gate preserves a declined action and executes an approved action"
   const { root, path, tool } = await fixture(t);
   const declined = await tool.execute({}, context(root, {
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: { async confirm() { return false; } },
   }));
   assert.equal(declined.status, "warning");
@@ -46,7 +46,7 @@ test("approval gate preserves a declined action and executes an approved action"
 
   const accepted = await tool.execute({}, context(root, {
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: { async confirm() { return true; } },
   }));
   assert.equal(accepted.status, "success");
@@ -59,7 +59,7 @@ test("approval gate preserves the marker when cancellation arrives after confirm
   await assert.rejects(tool.execute({}, context(root, {
     signal: controller.signal,
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: {
       async confirm() {
         controller.abort(new Error("cancel approved action"));
@@ -76,7 +76,7 @@ test("approval gate rejects a replaced or removed approved snapshot", async (t) 
   await writeFile(replacement, "example");
   const stale = await replaced.tool.execute({}, context(replaced.root, {
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: {
       async confirm() {
         await unlink(replaced.path);
@@ -92,7 +92,7 @@ test("approval gate rejects a replaced or removed approved snapshot", async (t) 
   const removed = await fixture(t);
   const missing = await removed.tool.execute({}, context(removed.root, {
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
     ui: {
       async confirm() {
         await unlink(removed.path);

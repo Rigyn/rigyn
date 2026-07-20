@@ -360,6 +360,16 @@ test("branch summary input uses non-secret image markers while canonical branch 
     },
   });
   const preparation = prepareAbandonedBranch(store.listEvents(thread.threadId), [], null);
+  assert.deepEqual(
+    preparation.entriesToSummarize.map((entry) => entry.eventId),
+    preparation.messages.map((entry) => entry.eventId),
+  );
+  const offeredMessage = preparation.entriesToSummarize[0]?.event;
+  assert.equal(offeredMessage?.type, "message_appended");
+  if (offeredMessage?.type === "message_appended") {
+    const images = offeredMessage.message.content.filter((block) => block.type === "image");
+    assert.equal(images.every((image) => image.data === undefined && image.url === undefined), true);
+  }
   const provider = new SummaryProvider("visual conclusion retained");
   const generated = await generateBranchSummary(preparation, {
     provider,
@@ -371,6 +381,84 @@ test("branch summary input uses non-secret image markers while canonical branch 
   assert.doesNotMatch(wire, /iVBORw0KGgoAAAANSUhEUg|branch-summary-source/u);
   assert.match(wire, /image omitted/u);
   assert.match(JSON.stringify(store.listEvents(thread.threadId)), /iVBORw0KGgoAAAANSUhEUg|branch-summary-source/u);
+  store.close();
+});
+
+test("branch summary bounds never expose or summarize only one side of a tool pair", () => {
+  const store = new SessionStore(":memory:");
+  store.createThread({ threadId: "tool-boundary" });
+  const root = appendMessage(store, "tool-boundary", "main", "tool-root", "user", "root");
+  store.appendEvent({
+    threadId: "tool-boundary",
+    branch: "main",
+    eventId: "event-tool-call",
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-tool-call",
+        role: "assistant",
+        content: [{
+          type: "tool_call",
+          callId: "bounded-call",
+          name: "read",
+          arguments: { path: "large.txt" },
+          rawArguments: "x".repeat(12 * 1024),
+        }],
+        createdAt: "2026-07-10T00:00:01.000Z",
+      },
+    },
+  });
+  store.appendEvent({
+    threadId: "tool-boundary",
+    branch: "main",
+    eventId: "event-tool-result",
+    event: {
+      type: "message_appended",
+      message: {
+        id: "message-tool-result",
+        role: "tool",
+        content: [{
+          type: "tool_result",
+          callId: "bounded-call",
+          name: "read",
+          content: "r".repeat(12 * 1024),
+          isError: false,
+        }],
+        createdAt: "2026-07-10T00:00:02.000Z",
+      },
+    },
+  });
+  for (let index = 0; index < 5; index += 1) {
+    appendMessage(store, "tool-boundary", "main", `recent-${index}`, "user", `recent ${"n".repeat(12_000)}`);
+  }
+
+  const preparation = prepareAbandonedBranch(
+    store.listEvents("tool-boundary", "main"),
+    store.listEvents("tool-boundary", "main"),
+    root.eventId,
+  );
+  const selected = new Set(preparation.messages.map((entry) => entry.eventId));
+  assert.equal(selected.has("event-tool-call"), selected.has("event-tool-result"));
+  assert.equal(selected.has("event-tool-call"), false);
+  assert.ok(preparation.omittedMessageCount >= 2);
+  assert.ok(preparation.contextBytes <= BRANCH_SUMMARY_LIMITS.maxContextBytes);
+  assert.ok(preparation.contextTokens <= BRANCH_SUMMARY_LIMITS.maxContextTokens);
+  assert.deepEqual(
+    preparation.entriesToSummarize.map((entry) => entry.eventId),
+    preparation.messages.map((entry) => entry.eventId),
+  );
+  const tighter = prepareAbandonedBranch(
+    store.listEvents("tool-boundary", "main"),
+    store.listEvents("tool-boundary", "main"),
+    root.eventId,
+    { maxContextTokens: 1_000 },
+  );
+  assert.ok(tighter.contextTokens <= 1_000);
+  assert.ok(tighter.messages.length <= preparation.messages.length);
+  assert.throws(
+    () => prepareAbandonedBranch([], [], null, { maxContextTokens: 0 }),
+    /positive safe integer/u,
+  );
   store.close();
 });
 

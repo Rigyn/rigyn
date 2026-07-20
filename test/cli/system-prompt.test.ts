@@ -89,6 +89,36 @@ test("trusted workspace prompt files are discovered separately from explicit pro
   assert.deepEqual(await discoverWorkspacePromptFiles(workspace, false), {});
 });
 
+test("global prompt files are fallbacks and trusted project files take precedence", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "harness-global-system-workspace-"));
+  const globalDirectory = await mkdtemp(join(tmpdir(), "harness-global-system-config-"));
+  await writeFile(join(globalDirectory, "SYSTEM.md"), "Global operating prompt.");
+  await writeFile(join(globalDirectory, "APPEND_SYSTEM.md"), "Global appended prompt.");
+
+  assert.deepEqual(await discoverWorkspacePromptFiles(workspace, false, { globalDirectory }), {
+    systemPrompt: { text: "Global operating prompt.", source: "SYSTEM.md" },
+    appendSystemPrompt: [{ text: "Global appended prompt.", source: "APPEND_SYSTEM.md" }],
+  });
+
+  await mkdir(join(workspace, ".rigyn"));
+  await writeFile(join(workspace, ".rigyn", "SYSTEM.md"), "Project operating prompt.");
+  await writeFile(join(workspace, ".rigyn", "APPEND_SYSTEM.md"), "Project appended prompt.");
+  assert.deepEqual(await discoverWorkspacePromptFiles(workspace, true, { globalDirectory }), {
+    systemPrompt: { text: "Project operating prompt.", source: ".rigyn/SYSTEM.md" },
+    appendSystemPrompt: [{ text: "Project appended prompt.", source: ".rigyn/APPEND_SYSTEM.md" }],
+  });
+});
+
+test("an absent global prompt directory is treated as having no prompt files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harness-missing-global-system-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+
+  assert.deepEqual(await discoverWorkspacePromptFiles(workspace, false, {
+    globalDirectory: join(root, "missing", "rigyn"),
+  }), {});
+});
+
 test("automatic workspace prompt files cannot escape through symlinks", async () => {
   const root = await mkdtemp(join(tmpdir(), "harness-auto-system-boundary-"));
   const workspace = join(root, "workspace");

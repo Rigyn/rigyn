@@ -30,6 +30,17 @@ export interface ExtensionThemeDeclaration extends ExtensionPathDeclaration {
 
 export type ExtensionRuntimeDeclaration = ExtensionPathDeclaration;
 
+export interface ExtensionManifestPermissions {
+  advancedUi: boolean;
+  nativeUi: boolean;
+  unsafeTerminal: boolean;
+  providerOverride: boolean;
+  providerWire: boolean;
+  credentialAccess: boolean;
+  sessionRaw: boolean;
+  hostConfiguration: boolean;
+}
+
 export interface ParsedExtensionManifest {
   schemaVersion: 1;
   id: string;
@@ -38,12 +49,36 @@ export interface ParsedExtensionManifest {
   description?: string;
   hostVersionRange?: string;
   enabled: boolean;
+  permissions: ExtensionManifestPermissions;
   integrity: Map<string, string>;
   skillRoots: ExtensionPathDeclaration[];
   prompts: ExtensionTemplateDeclaration[];
   commands: ExtensionCommandDeclaration[];
   themes: ExtensionThemeDeclaration[];
   runtime: ExtensionRuntimeDeclaration[];
+}
+
+function parsePermissions(value: unknown): ExtensionManifestPermissions {
+  const defaults: ExtensionManifestPermissions = {
+    advancedUi: false,
+    nativeUi: false,
+    unsafeTerminal: false,
+    providerOverride: false,
+    providerWire: false,
+    credentialAccess: false,
+    sessionRaw: false,
+    hostConfiguration: false,
+  };
+  if (value === undefined) return defaults;
+  const input = object(value, "permissions");
+  const keys = Object.keys(defaults) as (keyof ExtensionManifestPermissions)[];
+  allowed(input, keys, "permissions");
+  for (const key of keys) {
+    if (input[key] !== undefined && typeof input[key] !== "boolean") {
+      throw new Error(`permissions.${key} must be a boolean`);
+    }
+  }
+  return Object.fromEntries(keys.map((key) => [key, input[key] === true])) as unknown as ExtensionManifestPermissions;
 }
 
 function parseCompatibility(value: unknown): string | undefined {
@@ -191,7 +226,7 @@ function parseIntegrity(value: unknown): Map<string, string> {
 
 export function parseExtensionManifest(value: unknown): ParsedExtensionManifest {
   const input = object(value, "extension manifest");
-  allowed(input, ["schemaVersion", "id", "name", "version", "description", "compatibility", "enabled", "integrity", "contributions"], "extension manifest");
+  allowed(input, ["schemaVersion", "id", "name", "version", "description", "compatibility", "enabled", "permissions", "integrity", "contributions"], "extension manifest");
   if (input.schemaVersion !== 1) throw new Error("extension manifest schemaVersion must be 1");
   const id = string(input.id, "extension manifest id", 63);
   if (!IDENTIFIER.test(id)) throw new Error("extension manifest id is invalid");
@@ -219,6 +254,7 @@ export function parseExtensionManifest(value: unknown): ParsedExtensionManifest 
     ...(description === undefined ? {} : { description }),
     ...(hostVersionRange === undefined ? {} : { hostVersionRange }),
     enabled: input.enabled !== false,
+    permissions: parsePermissions(input.permissions),
     integrity: parseIntegrity(input.integrity),
     skillRoots,
     prompts,

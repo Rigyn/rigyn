@@ -7,6 +7,7 @@ import type { RuntimeExtensionEvent } from "../../src/extensions/runtime.js";
 
 const RUNTIME_EVENTS: Record<RuntimeExtensionEvent, true> = {
   resources_discover: true,
+  project_trust: true,
   session_start: true,
   session_info_changed: true,
   session_end: true,

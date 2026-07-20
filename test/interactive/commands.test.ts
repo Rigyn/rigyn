@@ -22,7 +22,7 @@ test("interactive command registry owns names, aliases, visibility, and active p
   }
   assert.equal(interactiveCommand("cancel")?.activePolicy, "cancel");
   assert.equal(interactiveCommand("follow")?.activePolicy, "follow_up");
-  for (const name of ["model", "settings", "compact", "resume", "fork", "tree", "login", "logout", "quit", "prompt", "skill"]) {
+  for (const name of ["model", "llama", "settings", "compact", "resume", "fork", "tree", "login", "logout", "quit", "prompt", "skill"]) {
     assert.notEqual(interactiveCommand(name), undefined, name);
   }
 });
@@ -30,6 +30,7 @@ test("interactive command registry owns names, aliases, visibility, and active p
 test("palette and help are generated from visible registry metadata", () => {
   const palette = interactiveCommandPalette();
   assert.equal(palette.some((item) => item.value === "/model"), true);
+  assert.equal(palette.some((item) => item.value === "/llama"), true);
   assert.equal(palette.some((item) => item.value === "/settings"), true);
   assert.equal(palette.some((item) => item.value === "/follow"), false);
   const help = renderInteractiveCommandHelp();

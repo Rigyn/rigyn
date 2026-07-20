@@ -29,12 +29,25 @@ export interface AwsCredentials {
   source: string;
 }
 
+export interface AwsProfileChainInput {
+  profile: string;
+  credentialsFilepath: string;
+  configFilepath: string;
+  region?: string;
+  signal?: AbortSignal;
+}
+
+export type AwsProfileChainResolver = (
+  input: AwsProfileChainInput,
+) => Promise<Omit<AwsCredentials, "source"> & { source?: string }>;
+
 export interface AwsDefaultCredentialsOptions {
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
   profile?: string;
   fetch?: typeof fetch;
   processRunner?: ProcessRunner;
+  profileChainResolver?: AwsProfileChainResolver;
   timeoutMs?: number;
   metadataTimeoutMs?: number;
   maxResponseBytes?: number;
@@ -51,6 +64,7 @@ interface AwsContext {
   homeDirectory: string;
   fetch: typeof fetch;
   processRunner: ProcessRunner;
+  profileChainResolver: AwsProfileChainResolver;
   timeoutMs: number;
   metadataTimeoutMs: number;
   maxResponseBytes: number;
@@ -71,12 +85,37 @@ function context(options: AwsDefaultCredentialsOptions): AwsContext {
     homeDirectory: options.homeDirectory ?? homedir(),
     fetch: options.fetch ?? fetch,
     processRunner: options.processRunner ?? runSafeProcess,
+    profileChainResolver: options.profileChainResolver ?? resolveSdkProfileChain,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     metadataTimeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
     maxResponseBytes: options.maxResponseBytes ?? DEFAULT_RESPONSE_LIMIT,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     now: options.now ?? Date.now,
     redactor: options.redactor ?? defaultSecretRedactor,
+  };
+}
+
+async function resolveSdkProfileChain(
+  input: AwsProfileChainInput,
+): Promise<Omit<AwsCredentials, "source"> & { source?: string }> {
+  input.signal?.throwIfAborted();
+  const { fromIni } = await import("@aws-sdk/credential-providers");
+  const provider = fromIni({
+    profile: input.profile,
+    filepath: input.credentialsFilepath,
+    configFilepath: input.configFilepath,
+    ignoreCache: true,
+    ...(input.region === undefined ? {} : { clientConfig: { region: input.region } }),
+  });
+  const identity = await provider();
+  input.signal?.throwIfAborted();
+  return {
+    accessKeyId: identity.accessKeyId,
+    secretAccessKey: identity.secretAccessKey,
+    ...(identity.sessionToken === undefined ? {} : { sessionToken: identity.sessionToken }),
+    ...(identity.expiration === undefined ? {} : { expiresAt: identity.expiration.getTime() }),
+    ...(identity.accountId === undefined ? {} : { accountId: identity.accountId }),
+    source: `profile:${input.profile}:official-chain`,
   };
 }
 
@@ -392,14 +431,25 @@ async function profileCredentials(
   if (settings.credential_process !== undefined) {
     return processCredentials(settings.credential_process, profile, ctx);
   }
+  const usesIdentityCenter = Object.keys(settings).some((name) => name === "sso_session" || name.startsWith("sso_"));
+  const usesRoleChain = settings.source_profile !== undefined
+    || settings.credential_source !== undefined
+    || (settings.role_arn !== undefined && settings.web_identity_token_file === undefined);
+  if (usesIdentityCenter || usesRoleChain) {
+    const chained = await ctx.profileChainResolver({
+      profile,
+      credentialsFilepath: credentialsPath,
+      configFilepath: configPath,
+      ...(settings.region === undefined ? {} : { region: settings.region }),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    });
+    return registerCredentials({
+      ...chained,
+      source: chained.source ?? `profile:${profile}:official-chain`,
+    }, ctx.redactor);
+  }
   if (settings.web_identity_token_file !== undefined || settings.role_arn !== undefined) {
     return webIdentityCredentials(settings, `profile:${profile}:web_identity`, ctx);
-  }
-  if (Object.keys(settings).some((name) => name === "sso_session" || name.startsWith("sso_"))) {
-    throw new Error("AWS IAM Identity Center profiles require an AWS SDK or AWS CLI credential_process");
-  }
-  if (settings.source_profile !== undefined || settings.credential_source !== undefined) {
-    throw new Error("AWS source-profile role assumption is not supported without SigV4 role chaining");
   }
   return undefined;
 }

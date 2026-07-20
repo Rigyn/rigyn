@@ -69,6 +69,21 @@ test("device authorization rejects insecure endpoints and malformed responses", 
   }
 });
 
+test("device authorization treats a zero provider interval as the interoperable default", async () => {
+  const response = await requestDeviceAuthorization({
+    deviceEndpoint: "https://issuer.example/device",
+    clientId: "client",
+    fetch: (async () => jsonResponse({
+      device_code: "device-secret",
+      user_code: "CODE",
+      verification_uri: "https://issuer.example/verify",
+      expires_in: 60,
+      interval: 0,
+    }, 200)) as typeof fetch,
+  });
+  assert.equal(response.intervalSeconds, 5);
+});
+
 test("device polling handles pending and slow_down before success", async () => {
   const responses = [
     jsonResponse({ error: "authorization_pending" }, 400),

@@ -52,6 +52,12 @@ function textMetadata(
 }
 
 export class ReadTool implements HarnessTool {
+  readonly #autoResizeImages: boolean;
+
+  constructor(options: { autoResizeImages?: boolean } = {}) {
+    this.#autoResizeImages = options.autoResizeImages ?? true;
+  }
+
   readonly definition = {
     name: "read",
     description: `Read a text file or image. Text output is limited to ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024}KB; use offset/limit to continue. Source files larger than ${formatBytes(MAX_TOOL_SOURCE_FILE_BYTES)} are rejected. Paths may be relative or absolute.`,
@@ -92,7 +98,10 @@ export class ReadTool implements HarnessTool {
     const detected = sniffImageMediaType(bytes);
     if (detected !== undefined && IMAGE_TYPES.has(detected)) {
       try {
-        const image = await preprocessImage(bytes, { signal: context.signal });
+        const image = await preprocessImage(bytes, {
+          signal: context.signal,
+          autoResize: this.#autoResizeImages,
+        });
         const info = inspectImage(image.bytes);
         if (info === undefined) throw new Error("Processed image could not be validated");
         const notes = [`Read image file [${image.mediaType}]`];

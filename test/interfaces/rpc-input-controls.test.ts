@@ -127,6 +127,7 @@ test("RPC input reducers transform start and queued images in invocation order a
 
 function blockingExtensions(entered: () => void): RuntimeExtensionHost {
   return {
+    setHostContext() {},
     async dispatch() {},
     async reduceInput(_event: RuntimeInputEvent, signal?: AbortSignal): Promise<RuntimeInputResult> {
       entered();
@@ -139,6 +140,7 @@ function blockingExtensions(entered: () => void): RuntimeExtensionHost {
 
 function blockingEventExtensions(entered: () => void): RuntimeExtensionHost {
   return {
+    setHostContext() {},
     async dispatch(event: string) {
       if (event !== "event") return;
       entered();
@@ -248,7 +250,12 @@ test("RPC queue-mode mutation and active controls are owner-scoped", async (cont
     statistics: true,
     lastAssistantText: true,
     maxLastAssistantTextBytes: 8 * 1024 * 1024,
-    runSelection: "durable-read-only",
+    runSelection: "durable-readable-and-idle-mutable",
+    setModel: "thread.model.set",
+    cycleModel: "thread.model.cycle",
+    setThinking: "thread.thinking.set",
+    cycleThinking: "thread.thinking.cycle",
+    setAutoCompaction: "thread.autoCompaction.set",
   });
   const started = await dispatcher.dispatch(owner, request("run.start", {
     prompt: "hold",

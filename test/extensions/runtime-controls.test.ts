@@ -312,6 +312,12 @@ test("runtime extensions control sessions, messages, selection, queues, and host
   assert.equal(fork.name, "Controlled copy");
   assert.notEqual(fork.threadId, session.threadId);
   assert.equal(focused.at(-1), `${fork.threadId}:main`);
+  const linked = await api.newSession({
+    name: "Controlled child",
+    parentThreadId: session.threadId,
+  });
+  assert.equal(linked.name, "Controlled child");
+  assert.equal(store.getThread(linked.threadId).parentThreadId, session.threadId);
   await api.switchSession({ threadId: session.threadId });
   assert.equal(focused.at(-1), `${session.threadId}:main`);
   assert.deepEqual(await api.reload({ threadId: session.threadId }), { warnings: ["reloaded"] });

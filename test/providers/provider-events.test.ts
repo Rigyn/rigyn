@@ -293,7 +293,7 @@ test("Anthropic subscription credentials use bearer OAuth compatibility headers"
   assert.match(headers?.get("anthropic-beta") ?? "", /claude-code-20250219/u);
   assert.match(headers?.get("anthropic-beta") ?? "", /oauth-2025-04-20/u);
   assert.equal(headers?.get("x-app"), "cli");
-  assert.equal(headers?.get("user-agent"), "rigyn/0.2.0");
+  assert.equal(headers?.get("user-agent"), "rigyn/0.3.0");
   assert.equal(posted?.system, undefined);
   assert.deepEqual((posted?.tools as Array<{ name: string }>).map((tool) => tool.name), ["Read", "custom_tool"]);
   const tool = events.find((event) => event.type === "tool_call_end");
@@ -468,6 +468,33 @@ test("Anthropic applies explicit custom thinking compatibility and bounded manua
     () => new AnthropicAdapter({ apiKey: "secret", thinking: { budgets: { low: 1023 } } }),
     /budget low must be an integer from 1024/u,
   );
+});
+
+test("per-run thinking budgets override provider defaults and retain Anthropic minimums", async () => {
+  let posted: Record<string, unknown> | undefined;
+  const adapter = new AnthropicAdapter({
+    apiKey: "secret",
+    thinking: { budgets: { high: 4096 }, models: { "partner-model": { mode: "enabled" } } },
+    fetch: fakeFetch(async (incoming) => {
+      posted = await incoming.json() as Record<string, unknown>;
+      return streamResponse(byteChunks(sse(
+        { type: "message_start", message: { id: "message", model: "partner-model", usage: { input_tokens: 1 } } },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      )));
+    }),
+  });
+  const providerRequest = request("anthropic");
+  providerRequest.model = "partner-model";
+  providerRequest.reasoningEffort = "high";
+  providerRequest.maxOutputTokens = 8192;
+  providerRequest.thinkingBudgets = { high: 2048 };
+  await collect(adapter.stream(providerRequest, new AbortController().signal));
+  assert.deepEqual(posted?.thinking, { type: "enabled", budget_tokens: 2048 });
+
+  providerRequest.thinkingBudgets = { high: 1 };
+  await collect(adapter.stream(providerRequest, new AbortController().signal));
+  assert.deepEqual(posted?.thinking, { type: "enabled", budget_tokens: 1024 });
 });
 
 test("Anthropic live model metadata selects future adaptive contracts and effort levels", async () => {
@@ -735,8 +762,14 @@ test("Anthropic prompt caching uses bounded stable-prefix breakpoints", async ()
     stream: true,
     system: [{ type: "text", text: "Stable coding instructions", cache_control: cacheControl }],
     tools: [
-      { name: "read", description: "Read a file", input_schema: { type: "object" } },
-      { name: "edit", description: "Edit a file", input_schema: { type: "object" }, cache_control: cacheControl },
+      { name: "read", description: "Read a file", input_schema: { type: "object" }, eager_input_streaming: true },
+      {
+        name: "edit",
+        description: "Edit a file",
+        input_schema: { type: "object" },
+        eager_input_streaming: true,
+        cache_control: cacheControl,
+      },
     ],
   });
 });
@@ -850,6 +883,30 @@ test("Gemini generateContent keeps thought signatures and maps complete function
     reasoningTokens: 200,
     totalTokens: 1_350,
   });
+});
+
+test("Gemini 2.5 generateContent uses configured token thinking budgets", async () => {
+  let posted: Record<string, unknown> | undefined;
+  const adapter = new GeminiAdapter({
+    apiKey: "secret",
+    fetch: fakeFetch(async (incoming) => {
+      posted = await incoming.json() as Record<string, unknown>;
+      return streamResponse(byteChunks(sse({
+        responseId: "gemini-budget",
+        modelVersion: "gemini-2.5-pro",
+        candidates: [{ index: 0, finishReason: "STOP", content: { role: "model", parts: [{ text: "done" }] } }],
+      })));
+    }),
+  });
+  const providerRequest = request("gemini");
+  providerRequest.model = "gemini-2.5-pro";
+  providerRequest.reasoningEffort = "high";
+  providerRequest.thinkingBudgets = { high: 12_345 };
+  await collect(adapter.stream(providerRequest, new AbortController().signal));
+  assert.deepEqual(
+    (posted?.generationConfig as { thinkingConfig?: unknown }).thinkingConfig,
+    { thinkingBudget: 12_345 },
+  );
 });
 
 test("OpenAI-compatible chat assembles interleaved tool arguments and final usage", async () => {

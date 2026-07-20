@@ -58,7 +58,7 @@ export default function activate(api) {
           nextActions: ["Inspect the marker path manually."],
         };
       }
-      if (!context.hasUI || context.mode !== "interactive") {
+      if (!context.hasUI) {
         return {
           content: "Interactive confirmation is unavailable; no file was changed.",
           isError: true,

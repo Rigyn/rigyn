@@ -27,6 +27,128 @@ class CatalogProvider implements ProviderAdapter {
   }
 }
 
+test("provider overrides compose as ownership-safe disposable layers", async () => {
+  const base = new CatalogProvider([model("base-model")]);
+  const first = new CatalogProvider([model("first-model")]);
+  const second = new CatalogProvider([model("second-model")]);
+  const registry = new ProviderRegistry([base]);
+
+  assert.throws(() => registry.register(first), /already registered/u);
+  assert.throws(
+    () => registry.override({
+      id: "missing",
+      async *stream() {},
+      async listModels() { return []; },
+    }),
+    /is not registered/u,
+  );
+
+  await registry.refreshModels("catalog", new AbortController().signal);
+  assert.deepEqual((await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id), ["base-model"]);
+
+  const disposeFirst = registry.override(first);
+  assert.equal(registry.get("catalog"), first);
+  assert.deepEqual(await registry.listModels("catalog", new AbortController().signal), []);
+  await registry.refreshModels("catalog", new AbortController().signal);
+  assert.deepEqual((await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id), ["first-model"]);
+
+  const disposeSecond = registry.override(second);
+  assert.equal(registry.get("catalog"), second);
+  disposeFirst();
+  assert.equal(registry.get("catalog"), second);
+  disposeFirst();
+
+  disposeSecond();
+  assert.equal(registry.get("catalog"), base);
+  assert.deepEqual(await registry.listModels("catalog", new AbortController().signal), []);
+  await registry.refreshModels("catalog", new AbortController().signal);
+  assert.deepEqual((await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id), ["base-model"]);
+  disposeSecond();
+  assert.equal(registry.get("catalog"), base);
+});
+
+test("provider overlays compose selected behavior and restore correctly out of order", async () => {
+  const base = new CatalogProvider([model("base-model")]);
+  const registry = new ProviderRegistry([base]);
+  const streamOverlay = registry.overlay({
+    id: "catalog",
+    async *stream() { yield { type: "text_delta", part: 0, text: "overlay" }; },
+  });
+  const catalogOverlay = registry.overlay({
+    id: "catalog",
+    async listModels() { return [model("overlay-model")]; },
+  });
+
+  let event: AdapterEvent | undefined;
+  for await (const current of registry.get("catalog").stream({
+    provider: "catalog",
+    model: "overlay-model",
+    messages: [],
+    tools: [],
+  }, new AbortController().signal)) {
+    event = current;
+    break;
+  }
+  assert.equal(event?.type === "text_delta" ? event.text : undefined, "overlay");
+  await registry.refreshModels("catalog", new AbortController().signal);
+  assert.deepEqual((await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id), ["overlay-model"]);
+
+  streamOverlay();
+  await assert.rejects(async () => {
+    for await (const _event of registry.get("catalog").stream({
+      provider: "catalog",
+      model: "overlay-model",
+      messages: [],
+      tools: [],
+    }, new AbortController().signal)) {
+      // The base fixture throws before yielding.
+    }
+  }, /unused/u);
+  catalogOverlay();
+  await registry.refreshModels("catalog", new AbortController().signal);
+  assert.deepEqual((await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id), ["base-model"]);
+});
+
+test("provider overrides abort stale catalog refreshes without blocking the replacement", async () => {
+  let markStarted: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const base: ProviderAdapter = {
+    id: "catalog",
+    async *stream() {},
+    async listModels() {
+      markStarted?.();
+      await blocked;
+      return [model("stale-model")];
+    },
+  };
+  const replacement = new CatalogProvider([model("replacement-model")]);
+  const registry = new ProviderRegistry([base]);
+
+  const staleRefresh = registry.refreshModels("catalog", new AbortController().signal);
+  await started;
+  const dispose = registry.override(replacement);
+  const replacementRefresh = await registry.refreshModels("catalog", new AbortController().signal);
+  assert.equal(replacementRefresh.ok, true);
+  assert.deepEqual(
+    (await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id),
+    ["replacement-model"],
+  );
+
+  release?.();
+  await assert.rejects(staleRefresh, /Provider adapter changed/u);
+  assert.deepEqual(
+    (await registry.listModels("catalog", new AbortController().signal)).map((entry) => entry.id),
+    ["replacement-model"],
+  );
+  dispose();
+});
+
 test("model resolution uses an exact catalog ID without aliases or name inference", async () => {
   const exact = model("model-1");
   const provider = new CatalogProvider([exact, model("model-10")]);

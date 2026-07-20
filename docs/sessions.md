@@ -17,6 +17,8 @@ By default, a new workspace conversation is stored in the global SQLite database
 /tree      navigate history and branches
 /export [--redact] [FILE]
            write a presentation export; --redact creates a review-required share copy
+/share [FILE]
+           create a redacted local copy, or a secret GitHub gist when FILE is omitted
 /import    import a session export
 ```
 
@@ -31,6 +33,8 @@ rigyn --continue --all --workspace ~/another-project
 Machine-readable JSONL exports start with an explicit format and schema version. See [Session JSONL export contract](session-export.md) for record ordering, import identity remapping, limits, and compatibility guarantees.
 
 From a shell, `rigyn --export share.html --redact` and `rigyn --export share.md --redact` create presentation-only copies that remove tool payloads, persisted `!` shell shortcut output, images, artifacts, structural IDs, and exact timestamps while redacting known secret patterns and workspace/home roots. Redacted JSONL is refused before output creation. This reduces accidental disclosure but does not guarantee anonymization; review the entire copy before sharing it.
+
+In the TUI, `/share FILE` writes the same owner-only redacted presentation copy. Bare `/share` creates a secret GitHub gist through an authenticated `gh` installation, reports its URL, and deletes the temporary local file. This is an explicit external publication action: redaction lowers accidental disclosure risk but cannot prove anonymity, so review the resulting gist before distributing its link. If `gh` is unavailable or unauthenticated, use `/share FILE` and upload only after manual review.
 
 Session lookup is workspace-scoped unless `--all` is used or an explicit verified database reference is supplied. Exact IDs and unambiguous partial IDs are accepted; ambiguous references fail instead of guessing.
 
@@ -111,9 +115,17 @@ See [Context compaction](compaction.md) for configuration, selection rules, cach
 
 `/tree` can move the branch head to a selected historical event. If requested, the harness generates a bounded summary of the abandoned path and attaches it at the continuation point. Branch navigation never mutates existing events, so the original path remains inspectable and resumable.
 
+Programmatic navigation can add `summaryInstructions`; `replaceInstructions: true` makes a non-empty instruction override the default summarizer prompt instead of appending a focus. Before mutation, `session_before_tree` receives the target, old leaf, common ancestor, and the exact bounded/redacted event projections selected as summary input. It may cancel, provide a bounded summary, or override the instructions, replace flag, and label. The final non-cancelling result wins as one object, and omitted fields fall back to the caller's values.
+
+A label targets the new summary when one is created. Without a summary—including an empty abandoned path—it targets the selected event, and the fork plus label event commit atomically. Empty labels suppress label creation. An empty abandoned path does not call the summary provider, but the guard still runs and navigation can proceed.
+
 Session selections for provider, model, and thinking level are also evented. They survive restart and follow reachable branch history rather than leaking from an unrelated branch.
 
 Extension-owned state follows the same reachable branch history. `api.session.compareAndAppendState` compares the prior state event ID and appends the replacement in one SQLite write transaction, so separate harness processes cannot silently lose a read-modify-write update. An omitted branch resolves to the thread's canonical default branch and is returned in both committed records and conflict results.
+
+Namespaced extension messages use backward opaque pagination. The first `api.session.readMessages` call returns the latest bounded chronological page. Passing that page's first `eventId` as `beforeEventId` returns the preceding page only when the cursor belongs to the same reachable branch, extension ID, schema version, and optional message kind. See [`paged-memory`](../examples/paged-memory/README.md) for a focused cursor loop.
+
+`api.getSessionUsage({ threadId, branch? })` reconstructs normalized token, cache, duration, server-tool, and cost totals from durable usage events, so the result remains available after a process restart. It also returns provider-neutral cache-effectiveness counters without estimating money saved. `api.getSystemPromptSnapshot` exposes the latest durable host instruction message only through an explicit branch query and credential-pattern redaction; provider state, authentication material, and request headers remain unavailable. The focused [`session-analytics`](../examples/session-analytics/README.md) and [`prompt-inspector`](../examples/prompt-inspector/README.md) packages demonstrate the two boundaries; [`session-tools`](../examples/session-tools/README.md) combines workspace-scoped discovery with bounded transcript paging.
 
 ## Safe transcript replay
 
@@ -122,3 +134,5 @@ Runtime extensions discover selectable sessions through `api.listSessions({ sear
 Extensions that need conversation history then use `api.getTranscript`, not the raw event store. The caller names a returned thread and optional branch, then follows the exclusive `nextSequence` cursor while `hasMore` is true. The service first verifies that the session belongs to the active workspace and that the branch exists.
 
 Replay pages are capped at 256 entries and one MiB. They contain only transcript-visible text, structural tool status/summaries, visible extension messages, safe summary/status rows, timestamps, event IDs, sequence numbers, and image media metadata without image content or locations. System instructions, provider continuation and opaque state, provider-trace reasoning, extension state/payloads, tool arguments and raw output, raw usage/errors, credentials, headers, and callbacks remain outside this API.
+
+An explicitly trusted package may request `sessionRaw` and use `api.native.session.read` when the transcript projection is insufficient. The caller still names an exact thread/branch and follows bounded sequence pages; the result contains canonical durable event envelopes, run records, saved model selection, and—when requested—provider-neutral compacted context. It is a snapshot rather than a mutable store handle, so branch and transaction ownership remain with the host. `api.native.session.getSystemPrompt` returns an unredacted prompt only while it remains in the current process; Rigyn never reconstructs or persists that secret-bearing value merely to satisfy a later query. Generation abort invalidates both APIs.

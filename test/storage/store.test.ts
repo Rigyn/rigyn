@@ -15,7 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import type { EventEnvelope } from "../../src/core/events.js";
+import {
+  MAX_TOOL_CALL_STREAM_DELTA_BYTES,
+  MAX_TOOL_CALL_STREAM_NAME_BYTES,
+  type EventEnvelope,
+} from "../../src/core/events.js";
 import { CURRENT_SCHEMA_VERSION, migrateDatabase, SessionStore } from "../../src/storage/index.js";
 
 const temporaryDirectories: string[] = [];
@@ -671,6 +675,54 @@ test("Mistral Conversations continuation state round-trips through durable event
   };
   store.appendEvent({ threadId: "thread_mistral_state", event });
   assert.deepEqual(store.listEvents("thread_mistral_state")[0]?.event, event);
+  store.close();
+});
+
+test("gateway message signatures and response identity round-trip through durable events", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("gateway_state") });
+  store.createThread({ threadId: "thread_gateway_state" });
+  const event = {
+    type: "message_appended" as const,
+    message: {
+      id: "gateway_message",
+      role: "assistant" as const,
+      createdAt: "2026-07-19T00:00:00.000Z",
+      provider: "company-gateway" as const,
+      content: [{ type: "text" as const, text: "hello" }],
+    },
+    providerState: {
+      kind: "gateway_messages" as const,
+      responseId: "response-1",
+      assistantContent: [
+        { type: "thinking", thinking: "trace", thinkingSignature: "thinking-signature" },
+        { type: "text", text: "hello", textSignature: "text-signature" },
+      ],
+    },
+  };
+  store.appendEvent({ threadId: "thread_gateway_state", event });
+  assert.deepEqual(store.listEvents("thread_gateway_state")[0]?.event, event);
+  store.close();
+});
+
+test("bounded tool-call stream events round-trip through durable storage", () => {
+  const store = new SessionStore(temporaryDatabase(), { idFactory: ids("tool_call_stream") });
+  store.createThread({ threadId: "thread_tool_call_stream" });
+  const events = [
+    { type: "tool_call_started" as const, index: 2, id: "call-2", name: "read" },
+    { type: "tool_call_delta" as const, index: 2, jsonFragment: "{\"path\":" },
+    { type: "tool_call_delta" as const, index: 2, jsonFragment: "\"README.md\"}" },
+  ];
+  store.appendEvents({ threadId: "thread_tool_call_stream", events });
+
+  assert.deepEqual(store.listEvents("thread_tool_call_stream").map((entry) => entry.event), events);
+  assert.throws(() => store.appendEvent({
+    threadId: "thread_tool_call_stream",
+    event: { type: "tool_call_started", index: 0, name: "x".repeat(MAX_TOOL_CALL_STREAM_NAME_BYTES + 1) },
+  }), /Invalid event shape: tool_call_started/u);
+  assert.throws(() => store.appendEvent({
+    threadId: "thread_tool_call_stream",
+    event: { type: "tool_call_delta", index: 0, jsonFragment: "x".repeat(MAX_TOOL_CALL_STREAM_DELTA_BYTES + 1) },
+  }), /Invalid event shape: tool_call_delta/u);
   store.close();
 });
 

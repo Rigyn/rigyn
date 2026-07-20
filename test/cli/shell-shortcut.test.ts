@@ -13,6 +13,20 @@ test("shell shortcut captures stdout, stderr, and exit without interpolation by 
   assert.match(result.text, /exit 7/u);
 });
 
+test("shell shortcut runs a configured prefix in the same shell", async () => {
+  const result = await runShellShortcut(
+    "printf '%s' \"$RIGYN_PREFIX_TEST\"",
+    process.cwd(),
+    new AbortController().signal,
+    5_000,
+    process.env,
+    undefined,
+    undefined,
+    "RIGYN_PREFIX_TEST=ready",
+  );
+  assert.match(result.text, /ready/u);
+});
+
 test("shell shortcut streams UTF-8-safe progress and flushes short output before completion", async () => {
   const progress: ToolProgress[] = [];
   const command = process.platform === "win32"

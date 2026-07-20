@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { resolveExternalCommandCredential } from "../../src/auth/external-command.js";
+import { CredentialBroker, ExternalCommandCredentialSource } from "../../src/auth/broker.js";
 import { SecretRedactor } from "../../src/auth/redaction.js";
 
 test("external auth uses argv without a shell and a minimal environment", async (context) => {
@@ -18,7 +19,7 @@ test("external auth uses argv without a shell and a minimal environment", async 
     else process.env.AUTH_SHOULD_NOT_LEAK = previous;
   });
 
-  const script = `console.log(JSON.stringify({type:"bearer",accessToken:"command-token",subject:process.env.AUTH_SHOULD_NOT_LEAK ?? "not-inherited"}))`;
+  const script = `require("node:fs").writeSync(1, JSON.stringify({type:"bearer",accessToken:"command-token",subject:process.env.AUTH_SHOULD_NOT_LEAK ?? "not-inherited"}))`;
   const credential = await resolveExternalCommandCredential({
     provider: "example",
     argv: [process.execPath, "-e", script, `;touch ${marker}`],
@@ -34,7 +35,7 @@ test("external auth returns after the command exits when a descendant retains it
     "const { spawn } = require('node:child_process')",
     `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 'inherit', 'inherit'] })`,
     "child.unref()",
-    `process.stdout.write(${JSON.stringify(JSON.stringify({ type: "bearer", accessToken: "bounded-drain-token" }))})`,
+    `require('node:fs').writeSync(1, ${JSON.stringify(JSON.stringify({ type: "bearer", accessToken: "bounded-drain-token" }))})`,
   ].join(";");
   const credential = await resolveExternalCommandCredential({
     provider: "example",
@@ -56,7 +57,7 @@ test("external auth enforces timeout and output bounds", async () => {
   await assert.rejects(
     resolveExternalCommandCredential({
       provider: "example",
-      argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(10000))"],
+      argv: [process.execPath, "-e", "require('node:fs').writeSync(1, 'x'.repeat(10000))"],
       maxOutputBytes: 64,
     }),
     /output exceeded/,
@@ -110,7 +111,7 @@ test("external auth redacts command errors", async () => {
       argv: [
         process.execPath,
         "-e",
-        "process.stderr.write('stderr-secret-value'); process.exit(2)",
+        "require('node:fs').writeSync(2, 'stderr-secret-value'); process.exit(2)",
       ],
       redactor,
     }),
@@ -121,4 +122,59 @@ test("external auth redacts command errors", async () => {
       return true;
     },
   );
+});
+
+test("configured external credential sources are provider-scoped, cached, and broker-compatible", async () => {
+  let now = 1_000_000;
+  const source = new ExternalCommandCredentialSource({
+    company: {
+      argv: [process.execPath, "-e", "require('node:fs').writeSync(1, JSON.stringify({type:'api_key',apiKey:process.env.COMPANY_TOKEN}))"],
+      environment: { COMPANY_TOKEN: "command-company-token" },
+      cacheTtlMs: 5_000,
+    },
+  }, { now: () => now });
+  const broker = new CredentialBroker([source]);
+
+  const first = await broker.resolve({ provider: "company" });
+  assert.equal(first?.source, "external-command");
+  assert.deepEqual(first?.credential, {
+    kind: "api_key",
+    provider: "company",
+    apiKey: "command-company-token",
+  });
+  assert.equal(await broker.resolve({ provider: "other" }), undefined);
+
+  now += 1_000;
+  const cached = await broker.resolve({ provider: "company" });
+  assert.notStrictEqual(cached?.credential, first?.credential);
+  assert.deepEqual(cached, first);
+});
+
+test("configured external credential caching respects bearer expiry and cancellation", async () => {
+  let now = 2_000_000;
+  const source = new ExternalCommandCredentialSource({
+    expiring: {
+      argv: [process.execPath, "-e", `require('node:fs').writeSync(1, JSON.stringify({type:'bearer',accessToken:'short-token',expiresAt:${now + 30_000}}))`],
+      cacheTtlMs: 60_000,
+    },
+  }, { now: () => now });
+
+  assert.equal((await source.resolve({ provider: "expiring" }))?.kind, "bearer");
+  const controller = new AbortController();
+  controller.abort(new Error("cancel configured credential"));
+  await assert.rejects(source.resolve({ provider: "expiring", signal: controller.signal }), /cancel configured credential/u);
+  now += 1;
+  assert.equal((await source.resolve({ provider: "expiring" }))?.kind, "bearer");
+});
+
+test("configured external credential sources reject unsafe resource bounds", () => {
+  assert.throws(() => new ExternalCommandCredentialSource({
+    company: { argv: [] as unknown as [string, ...string[]] },
+  }), /1 through 32/u);
+  assert.throws(() => new ExternalCommandCredentialSource({
+    company: { argv: [process.execPath], timeoutMs: 60_001 },
+  }), /timeoutMs/u);
+  assert.throws(() => new ExternalCommandCredentialSource({
+    company: { argv: [process.execPath], environment: { "INVALID-NAME": "value" } },
+  }), /environment/u);
 });

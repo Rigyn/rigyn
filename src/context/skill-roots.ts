@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import type { SkillRoot } from "./skills.js";
 
@@ -23,10 +24,36 @@ export function sharedUserSkillRoots(homeDirectory: string): SkillRoot[] {
  */
 export function sharedWorkspaceSkillRoots(workspace: string, projectTrusted: boolean): SkillRoot[] {
   if (!projectTrusted) return [];
-  return SHARED_SKILL_DIRECTORIES.map((directory) => ({
-    path: join(workspace, directory, "skills"),
+  const resolvedWorkspace = resolve(workspace);
+  const repositoryRoot = findRepositoryRoot(resolvedWorkspace);
+  const agentRoots: string[] = [];
+  let cursor = resolvedWorkspace;
+  while (true) {
+    agentRoots.unshift(join(cursor, ".agents", "skills"));
+    if (cursor === repositoryRoot) break;
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  return [
+    ...agentRoots,
+    ...SHARED_SKILL_DIRECTORIES
+      .filter((directory) => directory !== ".agents")
+      .map((directory) => join(resolvedWorkspace, directory, "skills")),
+  ].map((path) => ({
+    path,
     scope: "workspace",
     trusted: true,
     rootMarkdown: false,
   }));
+}
+
+function findRepositoryRoot(start: string): string {
+  let cursor = start;
+  while (true) {
+    if (existsSync(join(cursor, ".git"))) return cursor;
+    const parent = dirname(cursor);
+    if (parent === cursor) return start;
+    cursor = parent;
+  }
 }

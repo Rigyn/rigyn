@@ -7,10 +7,27 @@ import type { HarnessService } from "./service/harness.js";
 import type { HarnessResourceCatalog } from "./service/resource-catalog.js";
 import type { SessionStore } from "./storage/store.js";
 import { loadRuntime, type LoadedRuntime, type RuntimeReloadOptions, type RuntimeReloadResult } from "./cli/runtime.js";
+import { registerOwnedRuntime } from "./internal/runtime-owner.js";
 
 export interface CreateHarnessRuntimeOptions {
   workspace?: string;
   extensions?: boolean;
+  /** Trusted invocation-only runtime extension entry files. */
+  extensionPaths?: readonly string[];
+  /** Trusted invocation-only local, npm, or Git extension package sources. */
+  packagePaths?: readonly string[];
+  /** Permit lifecycle scripts for invocation-only packages. Disabled by default. */
+  allowPackageScripts?: boolean;
+  skills?: boolean;
+  skillPaths?: readonly string[];
+  promptTemplates?: boolean;
+  promptTemplatePaths?: readonly string[];
+  themes?: boolean;
+  themePaths?: readonly string[];
+  /** Explicit trust decision supplied by the embedding host. */
+  projectTrusted?: boolean;
+  /** Directory containing the runtime-owned session database. */
+  sessionDirectory?: string;
   recover?: boolean;
 }
 
@@ -18,6 +35,7 @@ export interface HarnessRunHandle {
   threadId: string;
   result: Promise<HarnessRun>;
   cancel(reason?: string): void;
+  cancelRetry(): boolean;
 }
 
 export interface HarnessRuntime {
@@ -64,12 +82,16 @@ class OwnedHarnessRuntime implements HarnessRuntime {
 
   constructor(runtime: LoadedRuntime) {
     this.#runtime = runtime;
-    runtime.setExtensionShutdownHandler(async () => {
+    const defaultShutdownHandler = async () => {
       setImmediate(() => { void this.close().catch(() => undefined); });
       return {
         accepted: true,
         message: "The embedding host acknowledged graceful shutdown.",
       };
+    };
+    runtime.setExtensionShutdownHandler(defaultShutdownHandler);
+    registerOwnedRuntime(this, runtime, () => {
+      try { runtime.setExtensionShutdownHandler(defaultShutdownHandler); } catch {}
     });
   }
 
@@ -122,6 +144,7 @@ class OwnedHarnessRuntime implements HarnessRuntime {
         threadId,
         result,
         cancel: (reason?: string) => this.#runtime.service.cancel(threadId, reason),
+        cancelRetry: () => this.#runtime.service.cancelRetry(threadId),
       };
     });
   }
@@ -182,6 +205,17 @@ export async function createHarnessRuntime(options: CreateHarnessRuntimeOptions 
   const extensions = options.extensions ?? true;
   const runtime = await loadRuntime({
     ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
+    ...(options.extensionPaths === undefined ? {} : { extensionPaths: [...options.extensionPaths] }),
+    ...(options.packagePaths === undefined ? {} : { packagePaths: [...options.packagePaths] }),
+    ...(options.allowPackageScripts === undefined ? {} : { allowPackageScripts: options.allowPackageScripts }),
+    ...(options.skills === undefined ? {} : { skills: options.skills }),
+    ...(options.skillPaths === undefined ? {} : { skillPaths: [...options.skillPaths] }),
+    ...(options.promptTemplates === undefined ? {} : { promptTemplates: options.promptTemplates }),
+    ...(options.promptTemplatePaths === undefined ? {} : { promptTemplatePaths: [...options.promptTemplatePaths] }),
+    ...(options.themes === undefined ? {} : { themes: options.themes }),
+    ...(options.themePaths === undefined ? {} : { themePaths: [...options.themePaths] }),
+    ...(options.projectTrusted === undefined ? {} : { projectTrusted: options.projectTrusted }),
+    ...(options.sessionDirectory === undefined ? {} : { sessionDirectory: options.sessionDirectory }),
     extensions,
     extensionRuntime: extensions,
     managedExtensionLifecycle: true,

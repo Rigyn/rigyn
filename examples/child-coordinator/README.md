@@ -12,3 +12,5 @@ rigyn remove child-coordinator-example
 ```
 
 The example uses ephemeral children. A product that deliberately retains child sessions must document retention, cleanup, and user navigation.
+
+When reviewers need a shared rubric, pass it through `appendSystemPrompt`; use `systemPrompt` only for a deliberate complete child-role replacement. Both are bounded, and the host keeps its no-recursive-delegation instruction after extension-supplied text.

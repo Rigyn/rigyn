@@ -10,8 +10,11 @@ import {
   discoverProjectTrustResources,
   ProjectTrustResolver,
 } from "../../src/cli/project-trust.js";
+import { loadRuntime, preactivateProjectTrustExtensions } from "../../src/cli/runtime.js";
 import { TrustStore } from "../../src/config/trust.js";
+import { loadRuntimeExtensions } from "../../src/extensions/runtime.js";
 import type { TerminalChoice, TerminalPrompter } from "../../src/interfaces/terminal.js";
+import { sha256 } from "../../src/tools/hash.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,6 +54,18 @@ async function fixture(context: TestContext, name: string) {
     workspace,
     store: new TrustStore(join(root, "state", "trust.json")),
   };
+}
+
+async function trustExtensionHost(workspace: string, root: string, source: string) {
+  const path = join(root, `trust-${Math.random().toString(16).slice(2)}.mjs`);
+  await writeFile(path, source);
+  return await loadRuntimeExtensions([{
+    extensionId: "trust-policy",
+    sourcePath: path,
+    sha256: sha256(source),
+    scope: "user",
+    trusted: true,
+  }], { workspace });
 }
 
 test("clean projects and empty resource directories never prompt", async (context) => {
@@ -224,6 +239,158 @@ test("one-run overrides are deterministic and never modify persisted trust", asy
   assert.equal(await denied.isTrusted(value.workspace), false);
   assert.equal(await value.store.isTrusted(value.workspace), true);
   assert.deepEqual(terminal.prompts, []);
+});
+
+test("extension decisions precede saved policy and persist only exact workspaces when requested", async (context) => {
+  const value = await fixture(context, "rigyn-project-trust-extension-policy-");
+  await mkdir(join(value.workspace, ".rigyn"), { recursive: true });
+  await writeFile(join(value.workspace, ".rigyn", "config.jsonc"), "{}");
+  await value.store.deny(value.workspace);
+  let activations = 0;
+  const launch = new ProjectTrustResolver(value.store, {
+    preactivate: async (workspace) => {
+      activations += 1;
+      return await trustExtensionHost(workspace, value.root, `export default (api) => api.on("project_trust", () => ({ decision: "yes" }));\n`);
+    },
+  });
+  assert.equal(await launch.isTrusted(value.workspace), true);
+  assert.equal(await launch.isTrusted(value.workspace), true);
+  assert.equal(activations, 1);
+  assert.equal(await value.store.decision(value.workspace), false);
+  await (await launch.takePreactivatedExtensions(value.workspace))?.close();
+
+  const remembered = new ProjectTrustResolver(value.store, {
+    preactivate: async (workspace) => await trustExtensionHost(
+      workspace,
+      value.root,
+      `export default (api) => api.on("project_trust", () => ({ decision: "yes", remember: true }));\n`,
+    ),
+  });
+  assert.equal(await remembered.isTrusted(value.workspace), true);
+  assert.deepEqual((await value.store.listDecisions()).map(({ workspace, descendants, decision }) => ({ workspace, descendants: descendants === true, decision })), [{
+    workspace: resolve(value.workspace),
+    descendants: false,
+    decision: true,
+  }]);
+  await (await remembered.takePreactivatedExtensions(value.workspace))?.close();
+});
+
+test("overrides and workspaces without protected resources suppress extension trust activation", async (context) => {
+  const value = await fixture(context, "rigyn-project-trust-extension-suppression-");
+  let activations = 0;
+  const preactivate = async (): Promise<undefined> => {
+    activations += 1;
+    return undefined;
+  };
+  assert.equal(await new ProjectTrustResolver(value.store, { preactivate }).isTrusted(value.workspace), false);
+  await mkdir(join(value.workspace, ".rigyn"), { recursive: true });
+  await writeFile(join(value.workspace, ".rigyn", "config.jsonc"), "{}");
+  assert.equal(await new ProjectTrustResolver(value.store, { override: "approve", preactivate }).isTrusted(value.workspace), true);
+  assert.equal(await new ProjectTrustResolver(value.store, { override: "deny", preactivate }).isTrusted(value.workspace), false);
+  assert.equal(activations, 0);
+});
+
+test("project trust events run once per target workspace and retain the launch cwd", async (context) => {
+  const value = await fixture(context, "rigyn-project-trust-extension-switch-");
+  const second = join(value.root, "projects", "second");
+  await mkdir(join(value.workspace, ".rigyn"), { recursive: true });
+  await mkdir(join(second, ".rigyn"), { recursive: true });
+  await writeFile(join(value.workspace, ".rigyn", "config.jsonc"), "{}");
+  await writeFile(join(second, ".rigyn", "config.jsonc"), "{}");
+  const seen: Array<{ workspace: string; cwd: string }> = [];
+  const resolver = new ProjectTrustResolver(value.store, {
+    cwd: value.root,
+    preactivate: async (workspace) => await trustExtensionHost(workspace, value.root, `export default (api) => api.on("project_trust", (event) => {
+      globalThis.__rigynTrustSwitchEvents = [...(globalThis.__rigynTrustSwitchEvents ?? []), event];
+      return { decision: "yes" };
+    });\n`),
+  });
+  for (const workspace of [value.workspace, second]) {
+    assert.equal(await resolver.isTrusted(workspace), true);
+    const host = await resolver.takePreactivatedExtensions(workspace);
+    assert.notEqual(host, undefined);
+    seen.push(...((globalThis as Record<string, any>).__rigynTrustSwitchEvents ?? []));
+    (globalThis as Record<string, any>).__rigynTrustSwitchEvents = [];
+    await host!.close();
+  }
+  assert.deepEqual(seen, [
+    { workspace: resolve(value.workspace), cwd: resolve(value.root) },
+    { workspace: resolve(second), cwd: resolve(value.root) },
+  ]);
+  delete (globalThis as Record<string, unknown>).__rigynTrustSwitchEvents;
+});
+
+test("pre-trust user extensions are handed off once and project extensions append after approval", async (context) => {
+  const value = await fixture(context, "rigyn-project-trust-handoff-");
+  const configHome = join(value.root, "config");
+  const stateHome = join(value.root, "state");
+  const userRoot = join(configHome, "rigyn", "extensions", "trust-owner");
+  const projectRoot = join(value.workspace, ".rigyn", "extensions", "project-owner");
+  await mkdir(join(userRoot, "runtime"), { recursive: true });
+  await mkdir(join(projectRoot, "runtime"), { recursive: true });
+  const manifest = (id: string, name: string) => JSON.stringify({
+    schemaVersion: 1,
+    id,
+    name,
+    contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+  });
+  await writeFile(join(userRoot, "extension.json"), manifest("trust-owner", "Trust Owner"));
+  await writeFile(join(userRoot, "runtime", "index.mjs"), `export default (api) => {
+    globalThis.__rigynTrustOwnerActivations = (globalThis.__rigynTrustOwnerActivations ?? 0) + 1;
+    api.on("project_trust", () => ({ decision: "yes" }));
+    api.registerCommand({ name: "user-trust-command", execute() {} });
+  };\n`);
+  await writeFile(join(projectRoot, "extension.json"), manifest("project-owner", "Project Owner"));
+  await writeFile(join(projectRoot, "runtime", "index.mjs"), `export default (api) => {
+    api.registerCommand({ name: "project-trust-command", execute() {} });
+  };\n`);
+  const priorConfig = process.env.XDG_CONFIG_HOME;
+  const priorState = process.env.XDG_STATE_HOME;
+  const priorKey = process.env.RIGYN_CREDENTIAL_KEY;
+  process.env.XDG_CONFIG_HOME = configHome;
+  process.env.XDG_STATE_HOME = stateHome;
+  process.env.RIGYN_CREDENTIAL_KEY = Buffer.alloc(32, 19).toString("base64url");
+  try {
+    const resolver = new ProjectTrustResolver(
+      new TrustStore(join(configHome, "rigyn", "trusted-workspaces.json")),
+      {
+        preactivate: async (workspace) => await preactivateProjectTrustExtensions({
+          userExtensions: join(configHome, "rigyn", "extensions"),
+          stateDirectory: join(stateHome, "rigyn"),
+        }, workspace, { extensions: true, extensionRuntime: true }),
+      },
+    );
+    const trusted = await resolver.isTrusted(value.workspace);
+    const preactivatedRuntimeExtensions = await resolver.takePreactivatedExtensions(value.workspace);
+    assert.equal(trusted, true);
+    assert.notEqual(preactivatedRuntimeExtensions, undefined);
+    if (preactivatedRuntimeExtensions === undefined) throw new Error("Pre-trust extension host was not retained");
+    const runtime = await loadRuntime({
+      workspace: value.workspace,
+      projectTrusted: trusted,
+      extensions: true,
+      extensionRuntime: true,
+      ephemeral: true,
+      preactivatedRuntimeExtensions,
+    });
+    try {
+      assert.equal((globalThis as Record<string, unknown>).__rigynTrustOwnerActivations, 1);
+      assert.deepEqual(runtime.runtimeExtensions.commands().map((entry) => entry.name), [
+        "user-trust-command",
+        "project-trust-command",
+      ]);
+    } finally {
+      await runtime.close();
+    }
+  } finally {
+    if (priorConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = priorConfig;
+    if (priorState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = priorState;
+    if (priorKey === undefined) delete process.env.RIGYN_CREDENTIAL_KEY;
+    else process.env.RIGYN_CREDENTIAL_KEY = priorKey;
+    delete (globalThis as Record<string, unknown>).__rigynTrustOwnerActivations;
+  }
 });
 
 test("trusted runtimes discover native and compatible project skill roots only after approval", async (context) => {

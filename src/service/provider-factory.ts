@@ -4,15 +4,23 @@ import { resolveAwsDefaultCredentials } from "../auth/aws-credentials.js";
 import { resolveAzureDefaultCredential } from "../auth/azure-identity.js";
 import { resolveGoogleApplicationDefaultCredentials } from "../auth/google-adc.js";
 import { exchangeGitHubCopilotToken, normalizeGitHubHost } from "../auth/github-copilot.js";
-import type { ProviderAdapter, ProviderId } from "../core/types.js";
+import type {
+  ModelInfo,
+  ModelProtocolFamily,
+  ProviderAdapter,
+  ProviderId,
+} from "../core/types.js";
 import type { NetworkWebSocketFactory } from "../net/index.js";
+import type { ProviderWireTransportHost } from "../providers/wire.js";
 import {
   AnthropicAdapter,
   AzureOpenAIResponsesAdapter,
   BedrockAdapter,
   GeminiAdapter,
   GeminiInteractionsAdapter,
+  GatewayMessagesAdapter,
   GitHubCopilotAdapter,
+  LlamaRouterAdapter,
   MistralAdapter,
   MistralConversationsAdapter,
   OllamaAdapter,
@@ -21,6 +29,7 @@ import {
   OpenAIResponsesAdapter,
   OpenRouterAdapter,
   VertexAdapter,
+  defineRoutedProviderAdapter,
   type AwsCredentials,
   type AnthropicThinkingConfig,
   type FetchLike,
@@ -29,7 +38,12 @@ import {
   type OpenAICompatibleProfile,
 } from "../providers/index.js";
 
-export type RuntimeProviderConfig =
+interface RuntimeProviderCredentialBinding {
+  /** Credential broker identity. Defaults to the adapter's public identity. */
+  credentialProvider?: string;
+}
+
+export type RuntimeLeafProviderConfig = RuntimeProviderCredentialBinding & (
   | { kind: "openai"; baseUrl?: string; organization?: string; project?: string; store?: boolean; promptCacheOptions?: OpenAIPromptCacheOptions; promptCacheRetention?: "in-memory" | "24h"; serviceTier?: "auto" | "default" | "flex" | "priority"; deferredToolLoading?: boolean }
   | {
       kind: "openai-codex";
@@ -41,14 +55,23 @@ export type RuntimeProviderConfig =
   | { kind: "azure-openai"; endpoint: string; store?: boolean }
   | {
       kind: "anthropic";
+      id?: ProviderId;
+      credentialProvider?: string;
       baseUrl?: string;
       beta?: string[];
       promptCache?: "off" | "5m" | "1h";
       thinking?: AnthropicThinkingConfig;
       deferredToolLoading?: boolean;
+      eagerToolInputStreaming?: boolean;
     }
   | { kind: "github-copilot"; host?: string }
-  | { kind: "gemini"; protocol?: "interactions" | "generate-content"; baseUrl?: string; store?: boolean; userProject?: string }
+  | {
+      kind: "gemini";
+      protocol?: "interactions" | "generate-content";
+      baseUrl?: string;
+      store?: boolean;
+      userProject?: string;
+    }
   | { kind: "vertex"; project: string; location?: string; baseUrl?: string; userProject?: string }
   | { kind: "bedrock"; region: string; runtimeEndpoint?: string; controlEndpoint?: string; promptCache?: "off" | "5m" | "1h" }
   | { kind: "openrouter"; baseUrl?: string; appName?: string; siteUrl?: string; promptCache?: "off" | "5m" | "1h" }
@@ -62,12 +85,43 @@ export type RuntimeProviderConfig =
     }
   | { kind: "ollama"; host?: string }
   | {
+      kind: "llama-router";
+      id?: ProviderId;
+      baseUrl?: string;
+      timeoutMs?: number;
+    }
+  | {
+      kind: "gateway-messages";
+      id: ProviderId;
+      gatewayUrl: string;
+      cacheRetention?: "none" | "short" | "long";
+      toolChoice?: "auto" | "none" | "required";
+      temperature?: number;
+    }
+  | {
       kind: "openai-compatible";
       id?: ProviderId;
       baseUrl: string;
-      credentialProvider?: string;
       profile?: OpenAICompatibleProfile;
-    };
+    }
+);
+
+export interface RuntimeRoutedProviderRouteConfig {
+  model: string;
+  adapter: string;
+  protocolFamily: ModelProtocolFamily;
+  upstreamModel?: string;
+  modelInfo?: ModelInfo;
+}
+
+export interface RuntimeRoutedProviderConfig extends RuntimeProviderCredentialBinding {
+  kind: "routed";
+  id: ProviderId;
+  adapters: Readonly<Record<string, RuntimeLeafProviderConfig>>;
+  routes: readonly RuntimeRoutedProviderRouteConfig[];
+}
+
+export type RuntimeProviderConfig = RuntimeLeafProviderConfig | RuntimeRoutedProviderConfig;
 
 async function credential(
   broker: CredentialBroker,
@@ -212,10 +266,11 @@ function githubCopilotCredentialSource(
   broker: CredentialBroker,
   fetchImplementation?: FetchLike,
   configuredHost?: string,
+  credentialProvider = "github-copilot",
 ): (signal?: AbortSignal) => Promise<{ accessToken: string; enterpriseHost?: string }> {
   let cached: { sourceToken: string; accessToken: string; expiresAt: number; enterpriseHost?: string } | undefined;
   return async (signal) => {
-    const found = await credential(broker, "github-copilot", signal);
+    const found = await credential(broker, credentialProvider, signal);
     if (found.kind === "oauth") {
       return {
         accessToken: found.accessToken,
@@ -243,17 +298,144 @@ function githubCopilotCredentialSource(
   };
 }
 
+function routedWireHost(
+  wire: ProviderWireTransportHost | undefined,
+  provider: ProviderId,
+): ProviderWireTransportHost | undefined {
+  if (wire === undefined) return undefined;
+  return {
+    wrapFetch(_delegate, fetchImplementation) {
+      return wire.wrapFetch(provider, fetchImplementation);
+    },
+    begin(_delegate) {
+      return wire.begin(provider);
+    },
+  };
+}
+
+export function runtimeProviderProtocolFamily(config: RuntimeLeafProviderConfig): ModelProtocolFamily | undefined {
+  switch (config.kind) {
+    case "openai":
+    case "openai-codex":
+    case "azure-openai":
+      return "openai-responses";
+    case "anthropic":
+      return "anthropic-messages";
+    case "gemini":
+      return config.protocol === "generate-content" ? "gemini-generate-content" : "gemini-interactions";
+    case "vertex":
+      return "gemini-generate-content";
+    case "bedrock":
+      return "bedrock-converse";
+    case "mistral":
+      return config.protocol === "conversations" ? "mistral-conversations" : "openai-chat-completions";
+    case "ollama":
+      return "ollama-chat";
+    case "gateway-messages":
+      return "gateway-messages";
+    case "llama-router":
+    case "openrouter":
+    case "openai-compatible":
+      return "openai-chat-completions";
+    case "github-copilot":
+      return undefined;
+  }
+}
+
+function createRoutedProviderAdapter(
+  config: RuntimeRoutedProviderConfig,
+  broker: CredentialBroker,
+  options: { fetch?: FetchLike; webSocket?: NetworkWebSocketFactory; wire?: ProviderWireTransportHost },
+): ProviderAdapter {
+  if (config.adapters === null || typeof config.adapters !== "object" || Array.isArray(config.adapters)) {
+    throw new TypeError(`Routed provider ${config.id} adapters must be an object`);
+  }
+  const definitions = Object.entries(config.adapters);
+  if (definitions.length === 0 || definitions.length > 128) {
+    throw new TypeError(`Routed provider ${config.id} must define 1 through 128 adapters`);
+  }
+  if (!Array.isArray(config.routes) || config.routes.length === 0 || config.routes.length > 20_000) {
+    throw new TypeError(`Routed provider ${config.id} must define 1 through 20000 routes`);
+  }
+  const normalizedDefinitions = new Map<string, RuntimeLeafProviderConfig>();
+  for (const [name, definition] of definitions) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(name)) {
+      throw new TypeError(`Routed provider ${config.id} adapter name is invalid: ${name}`);
+    }
+    if (definition === null || typeof definition !== "object" || Array.isArray(definition)) {
+      throw new TypeError(`Routed provider ${config.id} adapter ${name} must be an object`);
+    }
+    const credentialProvider = definition.credentialProvider ?? config.credentialProvider ?? config.id;
+    const normalized = { ...definition, credentialProvider } as RuntimeLeafProviderConfig;
+    normalizedDefinitions.set(name, normalized);
+  }
+  for (const [index, route] of config.routes.entries()) {
+    if (route === null || typeof route !== "object" || Array.isArray(route)) {
+      throw new TypeError(`Routed provider ${config.id} route ${index} must be an object`);
+    }
+    const definition = normalizedDefinitions.get(route.adapter);
+    if (definition === undefined) {
+      throw new TypeError(`Routed provider ${config.id} route ${index} references unknown adapter ${route.adapter}`);
+    }
+    const protocolFamily = runtimeProviderProtocolFamily(definition);
+    if (protocolFamily === undefined) {
+      throw new TypeError(
+        `Routed provider ${config.id} adapter ${route.adapter} selects its protocol dynamically and cannot be used in an exact route`,
+      );
+    }
+    if (protocolFamily !== route.protocolFamily) {
+      throw new TypeError(
+        `Routed provider ${config.id} route ${index} declares ${route.protocolFamily} but adapter ${route.adapter} uses ${protocolFamily}`,
+      );
+    }
+  }
+  const delegates = new Map<string, ProviderAdapter>();
+  const publicWire = routedWireHost(options.wire, config.id);
+  for (const [name, normalized] of normalizedDefinitions) {
+    delegates.set(name, createProviderAdapter(normalized, broker, {
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+        ...(publicWire === undefined ? {} : { wire: publicWire }),
+      }));
+  }
+  return defineRoutedProviderAdapter({
+    id: config.id,
+    delegateOwnership: "owned",
+    routes: config.routes.map((route, index) => {
+      const delegate = delegates.get(route.adapter);
+      if (delegate === undefined) {
+        throw new TypeError(`Routed provider ${config.id} route ${index} references unknown adapter ${route.adapter}`);
+      }
+      return {
+        model: route.model,
+        adapter: delegate,
+        protocolFamily: route.protocolFamily,
+        ...(route.upstreamModel === undefined ? {} : { upstreamModel: route.upstreamModel }),
+        ...(route.modelInfo === undefined ? {} : { modelInfo: route.modelInfo }),
+      };
+    }),
+  });
+}
+
 export function createProviderAdapter(
   config: RuntimeProviderConfig,
   broker: CredentialBroker,
-  options: { fetch?: FetchLike; webSocket?: NetworkWebSocketFactory } = {},
+  options: { fetch?: FetchLike; webSocket?: NetworkWebSocketFactory; wire?: ProviderWireTransportHost } = {},
 ): ProviderAdapter {
-  const transport = options.fetch === undefined ? {} : { fetch: options.fetch };
+  if (config.kind === "routed") return createRoutedProviderAdapter(config, broker, options);
+  const credentialProvider = config.credentialProvider ?? runtimeProviderId(config);
+  const providerFetch = options.wire?.wrapFetch(
+    runtimeProviderId(config),
+    options.fetch ?? globalThis.fetch,
+  );
+  const transport = providerFetch === undefined
+    ? options.fetch === undefined ? {} : { fetch: options.fetch }
+    : { fetch: providerFetch };
   switch (config.kind) {
     case "openai-codex":
       return new OpenAICodexResponsesAdapter({
         credential: async (signal) => {
-          const found = await credential(broker, "openai-codex", signal);
+          const found = await credential(broker, credentialProvider, signal);
           if (found.kind !== "oauth") throw new Error("OpenAI Codex requires ChatGPT subscription OAuth");
           if (found.accountId === undefined) throw new Error("OpenAI Codex credential has no ChatGPT account ID; run /login openai-codex again");
           return { accessToken: found.accessToken, accountId: found.accountId };
@@ -263,11 +445,12 @@ export function createProviderAdapter(
         ...(config.webSocketConnectTimeoutMs === undefined ? {} : { webSocketConnectTimeoutMs: config.webSocketConnectTimeoutMs }),
         ...(config.webSocketIdleTimeoutMs === undefined ? {} : { webSocketIdleTimeoutMs: config.webSocketIdleTimeoutMs }),
         ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+        ...(options.wire === undefined ? {} : { wire: options.wire }),
         ...transport,
       });
     case "openai":
       return new OpenAIResponsesAdapter({
-        accessToken: bearerSource(broker, "openai"),
+        accessToken: bearerSource(broker, credentialProvider),
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         ...(config.organization === undefined ? {} : { organization: config.organization }),
         ...(config.project === undefined ? {} : { project: config.project }),
@@ -281,32 +464,37 @@ export function createProviderAdapter(
     case "azure-openai":
       return new AzureOpenAIResponsesAdapter({
         endpoint: config.endpoint,
-        apiKey: optionalApiKeySource(broker, "azure-openai"),
+        apiKey: optionalApiKeySource(broker, credentialProvider),
         accessToken: azureTokenSource(broker, options.fetch),
         ...(config.store === undefined ? {} : { store: config.store }),
         ...transport,
       });
     case "anthropic":
       return new AnthropicAdapter({
-        apiKey: apiKeyIfPresent(broker, "anthropic"),
-        accessToken: accessTokenIfPresent(broker, "anthropic"),
-        oauth: async (signal) => (await credential(broker, "anthropic", signal)).kind === "oauth",
+        ...(config.id === undefined ? {} : { id: config.id }),
+        apiKey: apiKeyIfPresent(broker, credentialProvider),
+        accessToken: accessTokenIfPresent(broker, credentialProvider),
+        oauth: async (signal) =>
+          (await credential(broker, credentialProvider, signal)).kind === "oauth",
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         ...(config.beta === undefined ? {} : { beta: config.beta }),
         ...(config.promptCache === undefined ? {} : { promptCache: config.promptCache }),
         ...(config.thinking === undefined ? {} : { thinking: config.thinking }),
         ...(config.deferredToolLoading === undefined ? {} : { deferredToolLoading: config.deferredToolLoading }),
+        ...(config.eagerToolInputStreaming === undefined
+          ? {}
+          : { eagerToolInputStreaming: config.eagerToolInputStreaming }),
         ...transport,
       });
     case "github-copilot":
       return new GitHubCopilotAdapter({
-        credential: githubCopilotCredentialSource(broker, options.fetch, config.host),
+        credential: githubCopilotCredentialSource(broker, options.fetch, config.host, credentialProvider),
         ...transport,
       });
     case "gemini": {
-      const google = googleTokenSources(broker, "gemini", config.userProject, options.fetch);
+      const google = googleTokenSources(broker, credentialProvider, config.userProject, options.fetch);
       const common = {
-        apiKey: optionalApiKeySource(broker, "gemini"),
+        apiKey: optionalApiKeySource(broker, credentialProvider),
         accessToken: google.accessToken,
         userProject: google.userProject,
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
@@ -317,7 +505,7 @@ export function createProviderAdapter(
         : new GeminiInteractionsAdapter({ ...common, ...(config.store === undefined ? {} : { store: config.store }) });
     }
     case "vertex": {
-      const google = googleTokenSources(broker, "vertex", config.userProject, options.fetch);
+      const google = googleTokenSources(broker, credentialProvider, config.userProject, options.fetch);
       return new VertexAdapter({
         project: config.project,
         accessToken: google.accessToken,
@@ -328,7 +516,7 @@ export function createProviderAdapter(
       });
     }
     case "bedrock": {
-      const bearerToken = optionalBearerSource(broker, "bedrock");
+      const bearerToken = optionalBearerSource(broker, credentialProvider);
       return new BedrockAdapter({
         region: config.region,
         bearerToken,
@@ -336,12 +524,13 @@ export function createProviderAdapter(
         ...(config.runtimeEndpoint === undefined ? {} : { runtimeEndpoint: config.runtimeEndpoint }),
         ...(config.controlEndpoint === undefined ? {} : { controlEndpoint: config.controlEndpoint }),
         ...(config.promptCache === undefined ? {} : { promptCache: config.promptCache }),
-        ...transport,
+        fetch: options.fetch ?? globalThis.fetch,
+        ...(options.wire === undefined ? {} : { wire: options.wire }),
       });
     }
     case "openrouter":
       return new OpenRouterAdapter({
-        apiKey: bearerSource(broker, "openrouter"),
+        apiKey: bearerSource(broker, credentialProvider),
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         ...(config.appName === undefined ? {} : { appName: config.appName }),
         ...(config.siteUrl === undefined ? {} : { siteUrl: config.siteUrl }),
@@ -357,14 +546,14 @@ export function createProviderAdapter(
           throw new TypeError("Mistral Conversations supports reasoningMode: effort only");
         }
         return new MistralConversationsAdapter({
-          apiKey: bearerSource(broker, "mistral"),
+          apiKey: bearerSource(broker, credentialProvider),
           ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
           ...(config.store === undefined ? {} : { store: config.store }),
           ...transport,
         });
       }
       return new MistralAdapter({
-        apiKey: bearerSource(broker, "mistral"),
+        apiKey: bearerSource(broker, credentialProvider),
         ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
         ...(config.promptCache === undefined ? {} : { promptCache: config.promptCache }),
         ...(config.reasoningMode === undefined ? {} : { reasoningMode: config.reasoningMode }),
@@ -376,11 +565,29 @@ export function createProviderAdapter(
         const hostname = new URL(host).hostname;
         const local = ["127.0.0.1", "localhost", "::1"].includes(hostname);
         return new OllamaAdapter({
-          ...(local ? {} : { apiKey: optionalBearerSource(broker, "ollama") }),
+          ...(local ? {} : { apiKey: optionalBearerSource(broker, credentialProvider) }),
           host,
           ...transport,
         });
       }
+    case "llama-router":
+      return new LlamaRouterAdapter({
+        ...(config.id === undefined ? {} : { id: config.id }),
+        ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
+        apiKey: optionalBearerSource(broker, credentialProvider),
+        ...(config.timeoutMs === undefined ? {} : { timeoutMs: config.timeoutMs }),
+        ...transport,
+      });
+    case "gateway-messages":
+      return new GatewayMessagesAdapter({
+        id: config.id,
+        gatewayUrl: config.gatewayUrl,
+        accessToken: bearerSource(broker, credentialProvider),
+        ...(config.cacheRetention === undefined ? {} : { cacheRetention: config.cacheRetention }),
+        ...(config.toolChoice === undefined ? {} : { toolChoice: config.toolChoice }),
+        ...(config.temperature === undefined ? {} : { temperature: config.temperature }),
+        ...transport,
+      });
     default: {
       const id = config.id ?? "openai-compatible";
       const provider = config.credentialProvider ?? id;
@@ -393,4 +600,13 @@ export function createProviderAdapter(
       });
     }
   }
+}
+
+export function runtimeProviderId(config: RuntimeProviderConfig): ProviderId {
+  if (config.kind === "routed") return config.id;
+  if (config.kind === "openai-compatible") return config.id ?? "openai-compatible";
+  if (config.kind === "anthropic") return config.id ?? "anthropic";
+  if (config.kind === "llama-router") return config.id ?? "llama.cpp";
+  if (config.kind === "gateway-messages") return config.id;
+  return config.kind;
 }

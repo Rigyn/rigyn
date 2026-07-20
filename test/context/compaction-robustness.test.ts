@@ -113,6 +113,8 @@ test("hard overflow splits an oversized turn only at a tool-safe boundary", () =
   if (selection.kind !== "compact") return;
   assert.equal(selection.reason, "overflow");
   assert.equal(selection.splitTurn, true);
+  assert.deepEqual(selection.sourceMessageIds, ["u1", "a1", "a-tool", "t1"]);
+  assert.deepEqual(selection.trailingMessages.map((entry) => entry.id), ["a2"]);
   assert.doesNotThrow(() => groupContextMessages(selection.sourceMessages));
   const summary = textMessage("summary", "user", "earlier work");
   const compacted = applyCompaction(selection, { sourceMessageIds: selection.sourceMessageIds, message: summary });
@@ -215,7 +217,7 @@ test("a previous durable summary is supplied separately for iterative compaction
   assert.equal(selection.sourceMessages.some((entry) => entry.id === previous.id), false);
 
   let observedPrevious: CanonicalMessage | undefined;
-  await compactWithSummarizer(
+  const compacted = await compactWithSummarizer(
     selection,
     {
       async summarize(request) {
@@ -229,6 +231,24 @@ test("a previous durable summary is supplied separately for iterative compaction
     new AbortController().signal,
   );
   assert.strictEqual(observedPrevious, previous);
+
+  const repeatedMessages = [
+    ...compacted.messages,
+    ...fourTurns(160).map((entry) => ({ ...entry, id: `repeat-${entry.id}` })),
+  ];
+  const repeatedProjection = buildContextProjection(repeatedMessages, "openai");
+  const repeated = selectManualCompaction(repeatedMessages, {
+    provider: "openai",
+    maxTokens: repeatedProjection.estimatedTokens + 1_000,
+    maxSummaryTokens: 60,
+    keepRecentTokens: repeatedProjection.groups.at(-1)!.estimatedTokens,
+  });
+  assert.equal(repeated.kind, "compact");
+  if (repeated.kind === "compact") {
+    assert.equal(repeated.previousSummary?.id, "next-summary");
+    assert.ok(repeated.sourceMessageIds.includes("next-summary"));
+    assert.equal(repeated.sourceMessages.some((entry) => entry.id === "next-summary"), false);
+  }
 });
 
 test("automatic compaction does not mutate or pre-elide old tool results", () => {

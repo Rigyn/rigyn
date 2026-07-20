@@ -105,6 +105,36 @@ test("multiple collapsed reasoning rows wrap independently downward", () => {
   assert.ok(lines.every((line) => cellWidth(line) <= 52));
 });
 
+test("persistent UI supports above and below widgets plus complete header and footer replacement", () => {
+  const block = (text: string) => ({ lines: [{ spans: [{ text, role: "accent" as const }] }] });
+  const frame = renderFrame({
+    context: {
+      status: "idle",
+      model: "HOST-MODEL",
+      extensionHeaders: ["OLD HEADER"],
+      extensionFooters: ["OLD FOOTER"],
+    },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "draft",
+    editorCursor: 5,
+    inputLabel: "PROMPT",
+    inputMode: "normal",
+    runtimeHeaderReplacement: block("REPLACED HEADER"),
+    runtimeFooterReplacement: block("REPLACED FOOTER"),
+    runtimeWidgetComponents: [block("ABOVE EDITOR")],
+    runtimeWidgetBelowComponents: [block("BELOW EDITOR")],
+  }, { columns: 50, rows: 18 }, createTheme("mono", { color: false, unicode: true }));
+  const visible = stripAnsi(frame.text);
+  assert.doesNotMatch(visible, /OLD HEADER|OLD FOOTER|HOST-MODEL/u);
+  const header = visible.indexOf("REPLACED HEADER");
+  const above = visible.indexOf("ABOVE EDITOR");
+  const editor = visible.indexOf("PROMPT> draft");
+  const below = visible.indexOf("BELOW EDITOR");
+  const footer = visible.indexOf("REPLACED FOOTER");
+  assert.ok(header >= 0 && header < above && above < editor && editor < below && below < footer);
+});
+
 test("frame renderer produces a stable transcript, editor, and footer layout", () => {
   const view: TuiViewState = {
     context: {
@@ -1658,4 +1688,35 @@ test("thinking level changes the released composer separator accent", () => {
   }, { columns: 60, rows: 10 }, theme);
   assert.ok(frame.text.includes(theme.codes.editorActive));
   assert.ok(frame.text.includes(theme.codes.warning));
+});
+
+test("operator transcript preferences hide reasoning runs and bound padded output", () => {
+  const width = 32;
+  const rendered = renderTranscript([
+    { id: "r1", kind: "reasoning", text: "secret one", expanded: true },
+    { id: "r2", kind: "reasoning", text: "secret two", expanded: true },
+    { id: "a", kind: "assistant", text: "```ts\nconst value = 1;\n```" },
+  ], width, createTheme("mono", { color: false, unicode: false }), {
+    hideReasoningBlock: true,
+    outputPad: 1,
+    codeBlockIndent: "  ",
+  });
+  assert.equal(rendered.match(/Thinking\.\.\./gu)?.length, 1);
+  assert.doesNotMatch(rendered, /secret one|secret two/u);
+  assert.match(rendered, /  const value = 1;/u);
+  assert.ok(rendered.split("\n").every((line) => cellWidth(line) <= width));
+});
+
+test("editorPaddingX reserves equal composer edges", () => {
+  const frame = renderFrame({
+    context: { status: "idle" },
+    transcript: [],
+    transcriptOffset: 0,
+    editorText: "draft",
+    editorCursor: 5,
+    inputLabel: "you",
+    inputMode: "normal",
+  }, { columns: 24, rows: 8 }, createTheme("mono", { color: false, unicode: false }), { editorPaddingX: 2 });
+  assert.ok(frame.text.split("\n").some((line) => line.startsWith("   draft")));
+  assert.ok((frame.cursor?.column ?? 0) >= 3);
 });

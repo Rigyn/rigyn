@@ -107,6 +107,59 @@ export default function activate(api: any) {
   delete (globalThis as Record<string, unknown>).__runtimeProbeDisposed;
 });
 
+test("activation-time provider registration returns an idempotent owner disposer", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-provider-disposer-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "provider-disposer.mjs");
+  const source = `export default (api) => {
+    globalThis.__runtimeProviderDisposer = api.registerProvider({
+      id: "owned-provider",
+      async *stream() {},
+      async listModels() { return []; }
+    });
+    api.registerProviderAuth({ provider: "owned-provider", methods: [{ kind: "api_key" }] });
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{ extensionId: "provider-owner", sourcePath: path, sha256: sha256(source) }], { workspace: root });
+  const removed: string[] = [];
+  host.setLiveRegistrationHandler({
+    registerTool() {},
+    registerProvider() {},
+    unregisterProvider(provider) { removed.push(provider.id); },
+    registerProviderAuth() {},
+    async fetchProvider() { throw new Error("not used"); },
+  });
+  assert.deepEqual(host.providers().map((provider) => provider.id), ["owned-provider"]);
+  const dispose = (globalThis as Record<string, any>).__runtimeProviderDisposer;
+  await dispose();
+  await dispose();
+  assert.deepEqual(removed, ["owned-provider"]);
+  assert.deepEqual(host.providers(), []);
+  assert.deepEqual(host.providerAuth(), []);
+  await host.close();
+  delete (globalThis as Record<string, unknown>).__runtimeProviderDisposer;
+});
+
+test("disposing a provider during activation removes its staged auth atomically", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "harness-runtime-staged-provider-disposer-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const path = join(root, "staged-provider-disposer.mjs");
+  const source = `export default async (api) => {
+    const dispose = api.registerProvider({
+      id: "staged-provider",
+      async *stream() {},
+      async listModels() { return []; }
+    });
+    api.registerProviderAuth({ provider: "staged-provider", methods: [{ kind: "api_key" }] });
+    await dispose();
+  };\n`;
+  await writeFile(path, source);
+  const host = await loadRuntimeExtensions([{ extensionId: "staged-provider-owner", sourcePath: path, sha256: sha256(source) }], { workspace: root });
+  assert.deepEqual(host.providers(), []);
+  assert.deepEqual(host.providerAuth(), []);
+  await host.close();
+});
+
 test("loose CommonJS-scoped TypeScript entries re-evaluate across generations", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "harness-runtime-loose-ts-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
@@ -1081,7 +1134,7 @@ test("post-activation registrations update the live host and clean up with it", 
     execute() { return { content: "late", isError: false }; },
   });
   api.registerCommand({ name: "late-command", execute() { return "late prompt"; } });
-  api.registerProvider({ id: "late-provider", async *stream() {}, async listModels() { return []; } });
+  const disposeProvider = api.registerProvider({ id: "late-provider", async *stream() {}, async listModels() { return []; } });
   api.registerProviderAuth({ provider: "late-provider", methods: [{ kind: "api_key", label: "Late key" }] });
   api.registerToolRenderer("late_tool", { renderCall: () => ({ lines: [] }) });
   api.on("event", () => lifecycle.push("late-event"));
@@ -1148,15 +1201,20 @@ test("post-activation registrations update the live host and clean up with it", 
     methods: [{ kind: "api_key" }],
   }), /duplicate provider auth descriptor/u);
 
+  await disposeProvider();
+  await disposeProvider();
+  assert.deepEqual(host.providers(), []);
+  assert.deepEqual(host.providerAuth(), []);
+
   await host.close();
   assert.deepEqual(lifecycle, [
     "integrate-tool:late_tool",
     "integrate-provider:late-provider",
     "integrate-auth:late-provider",
     "late-event",
-    "late-dispose",
     "remove-auth:late-provider",
     "remove-provider:late-provider",
+    "late-dispose",
     "remove-tool:late_tool",
   ]);
   assert.throws(() => api.ui.notify("stale"), /no longer active/u);

@@ -289,6 +289,7 @@ export class TuiModel {
   readonly #messageIds = new Set<string>();
   readonly #mutableEntryIds = new Set<string>();
   readonly #usageByRun = new Map<string, NormalizedUsage>();
+  readonly #cacheRunContext = new Map<string, { provider: string; model: string; timestamp: number }>();
   readonly #entryBytes = new WeakMap<TranscriptEntry, number>();
   #startup: TranscriptEntry | undefined;
   #entries: TranscriptEntry[] = [];
@@ -300,6 +301,16 @@ export class TuiModel {
   #localSequence = 0;
   #assistantStep = 0;
   #reasoningExpanded = false;
+  #toolOutputExpanded = true;
+  #showCacheMissNotices = false;
+  #lastCacheRequest: {
+    provider: string;
+    model: string;
+    promptTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    timestamp: number;
+  } | undefined;
 
   constructor(limits: TuiLimits) {
     this.#limits = limits;
@@ -319,6 +330,15 @@ export class TuiModel {
 
   get notice(): string | undefined {
     return this.#notice;
+  }
+
+  get toolOutputExpanded(): boolean {
+    return this.#toolOutputExpanded;
+  }
+
+  setShowCacheMissNotices(enabled: boolean): void {
+    if (typeof enabled !== "boolean") throw new TypeError("showCacheMissNotices must be boolean");
+    this.#showCacheMissNotices = enabled;
   }
 
   setContext(value: TuiContext): void {
@@ -365,6 +385,8 @@ export class TuiModel {
     this.#messageIds.clear();
     this.#mutableEntryIds.clear();
     this.#usageByRun.clear();
+    this.#cacheRunContext.clear();
+    this.#lastCacheRequest = undefined;
     this.#usage = undefined;
     this.#context = { ...this.#context, contextTokens: 0 };
     this.#truncated = false;
@@ -393,6 +415,10 @@ export class TuiModel {
     };
   }
 
+  clearStartup(): void {
+    this.#startup = undefined;
+  }
+
   toggleTool(callId?: string): boolean {
     const entries = callId === undefined
       ? [
@@ -403,7 +429,19 @@ export class TuiModel {
     if (entries.length === 0) return false;
     const expanded = entries.some((entry) => entry.expanded !== true);
     for (const entry of entries) entry.expanded = expanded;
+    if (callId === undefined) this.#toolOutputExpanded = expanded;
     return true;
+  }
+
+  setToolOutputExpanded(expanded: boolean): boolean {
+    if (typeof expanded !== "boolean") throw new TypeError("Tool output expansion must be boolean");
+    const changed = this.#toolOutputExpanded !== expanded
+      || this.#entries.some((entry) => entry.kind === "tool" && entry.expanded !== expanded);
+    this.#toolOutputExpanded = expanded;
+    for (const entry of this.#entries) {
+      if (entry.kind === "tool") entry.expanded = expanded;
+    }
+    return changed;
   }
 
   toggleReasoning(): boolean {
@@ -430,6 +468,11 @@ export class TuiModel {
     const event = envelope.event;
     switch (event.type) {
       case "run_started": {
+        this.#cacheRunContext.set(envelope.runId ?? `${envelope.threadId}:unscoped`, {
+          provider: event.provider,
+          model: event.model,
+          timestamp: Date.parse(envelope.timestamp),
+        });
         const sameModel = this.#context.provider === event.provider && this.#context.model === event.model;
         this.#assistantStep = 0;
         this.#context = {
@@ -623,6 +666,7 @@ export class TuiModel {
         };
         break;
       case "compaction_started":
+        this.#lastCacheRequest = undefined;
         this.#notice = "Compacting older context";
         this.#context = {
           ...this.#context,
@@ -650,6 +694,7 @@ export class TuiModel {
         }
         break;
       case "branch_summary_created":
+        this.#lastCacheRequest = undefined;
         this.#append({
           id: envelope.eventId,
           kind: "status",
@@ -691,18 +736,21 @@ export class TuiModel {
         this.#notice = "Steering queued for the next model boundary";
         break;
       case "run_completed":
+        this.#recordCacheRequest(envelope);
         this.#mutableEntryIds.clear();
         this.#context = { ...this.#context, active: false, status: "completed" };
         this.#notice = undefined;
         delete this.#context.activity;
         break;
       case "run_failed":
+        this.#cacheRunContext.delete(envelope.runId ?? `${envelope.threadId}:unscoped`);
         this.#mutableEntryIds.clear();
         this.#context = { ...this.#context, active: false, status: "failed" };
         this.#append({ id: envelope.eventId, kind: "error", text: errorMessage(event) });
         delete this.#context.activity;
         break;
       case "run_cancelled":
+        this.#cacheRunContext.delete(envelope.runId ?? `${envelope.threadId}:unscoped`);
         this.#mutableEntryIds.clear();
         this.#context = { ...this.#context, active: false, status: "cancelled" };
         this.#notice = `Cancelled: ${sanitizeTerminalText(event.reason)}`;
@@ -716,6 +764,43 @@ export class TuiModel {
         this.#append({ id: envelope.eventId, kind: "warning", title: event.code, text: event.message });
         break;
     }
+  }
+
+  #recordCacheRequest(envelope: EventEnvelope): void {
+    const key = envelope.runId ?? `${envelope.threadId}:unscoped`;
+    const context = this.#cacheRunContext.get(key);
+    const usage = this.#usageByRun.get(key);
+    this.#cacheRunContext.delete(key);
+    if (context === undefined || usage === undefined) return;
+    const current = {
+      ...context,
+      promptTokens: (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
+      cacheReadTokens: usage.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+    };
+    const prior = this.#lastCacheRequest;
+    this.#lastCacheRequest = current;
+    if (prior === undefined || !this.#showCacheMissNotices) return;
+    const cacheAware = prior.cacheReadTokens > 0 || prior.cacheWriteTokens > 0
+      || current.cacheReadTokens > 0 || current.cacheWriteTokens > 0;
+    if (!cacheAware) return;
+    const missedTokens = Math.max(0, Math.min(prior.promptTokens, current.promptTokens) - current.cacheReadTokens);
+    if (missedTokens < 20_000) return;
+    const modelChanged = prior.provider !== current.provider || prior.model !== current.model;
+    const idleMs = Number.isFinite(current.timestamp) && Number.isFinite(prior.timestamp)
+      ? current.timestamp - prior.timestamp
+      : 0;
+    const detail = modelChanged
+      ? " after the model changed"
+      : idleMs >= 5 * 60_000
+        ? " after an idle interval"
+        : "";
+    this.#append({
+      id: `cache-miss:${envelope.eventId}`,
+      kind: "warning",
+      title: "Cache miss",
+      text: `About ${missedTokens.toLocaleString("en-US")} reusable prompt tokens were not read from provider cache${detail}.`,
+    });
   }
 
   #appendMessage(message: CanonicalMessage): void {
@@ -830,7 +915,8 @@ export class TuiModel {
       images?: readonly TranscriptImage[];
     } = {},
   ): void {
-    const expanded = status === "completed" || status === "failed" || status === "in_doubt";
+    const expanded = (status === "completed" || status === "failed" || status === "in_doubt")
+      && this.#toolOutputExpanded;
     const entry = this.#entries.findLast((item) => item.callId === callId);
     if (entry === undefined) {
       this.#append({

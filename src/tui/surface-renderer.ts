@@ -41,6 +41,7 @@ export interface LiveSurfaceRendererOptions {
   alternateScreen: boolean;
   synchronizedOutput?: boolean;
   imageProtocol?: TerminalImageProtocol | null;
+  clearOnShrink?: boolean;
 }
 
 interface RenderedImageIdentity {
@@ -172,6 +173,7 @@ export class LiveSurfaceRenderer {
   readonly #alternateScreen: boolean;
   readonly #synchronizedOutput: boolean;
   readonly #imageProtocol: TerminalImageProtocol | null;
+  #clearOnShrink: boolean;
   readonly #validatedImageSources = new Map<string, ValidatedImageSource>();
   #rows: string[] = [];
   #images: RenderedImageIdentity[] = [];
@@ -184,6 +186,12 @@ export class LiveSurfaceRenderer {
     this.#alternateScreen = options.alternateScreen;
     this.#synchronizedOutput = options.synchronizedOutput !== false;
     this.#imageProtocol = options.imageProtocol ?? null;
+    this.#clearOnShrink = options.clearOnShrink === true;
+  }
+
+  setClearOnShrink(enabled: boolean): void {
+    if (typeof enabled !== "boolean") throw new TypeError("Clear-on-shrink must be boolean");
+    this.#clearOnShrink = enabled;
   }
 
   render(frame: Frame, size: { columns: number; rows: number }): SurfaceRenderResult {
@@ -228,6 +236,15 @@ export class LiveSurfaceRenderer {
       const drawn = this.#drawFromAnchor(nextRows, physicalRow);
       body += drawn.output;
       physicalRow = drawn.row;
+    } else if (this.#clearOnShrink && nextRows.length < this.#rows.length) {
+      const cleared = this.#clearForResize(terminalRows, physicalRow);
+      body += cleared.output;
+      physicalRow = 0;
+      const drawn = this.#drawFromAnchor(nextRows, physicalRow);
+      body += drawn.output;
+      physicalRow = drawn.row;
+      strategy = cleared.viewport ? "viewport-clear" : "surface-clear";
+      changedRows = this.#rows.length;
     } else if (this.#rows.length === 0 && nextRows.length > 0) {
       if (this.#alternateScreen && this.#columns === 0) body += "\u001b[H";
       const drawn = this.#drawFromAnchor(nextRows, physicalRow);

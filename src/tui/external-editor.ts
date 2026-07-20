@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { trackActiveProcessGroup } from "../process/active-groups.js";
-import { normalizeCommandArgv } from "../process/command.js";
+import { normalizeCommandArgv, parseCommandLine } from "../process/command.js";
 import { terminateProcessTree } from "../process/process-tree.js";
 
 const MAX_EDITOR_BYTES = 256 * 1024;
@@ -15,45 +15,17 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 export function parseEditorCommand(value: string): string[] {
-  const parts: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | undefined;
-  let started = false;
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index]!;
-    if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-      else current += character;
-    } else if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-    } else if (character === "\\" && value[index + 1] !== undefined && /[\s'"]/u.test(value[index + 1]!)) {
-      current += value[index + 1]!;
-      started = true;
-      index += 1;
-    } else if (/\s/u.test(character)) {
-      if (started) {
-        parts.push(current);
-        current = "";
-        started = false;
-      }
-    } else {
-      current += character;
-      started = true;
-    }
-  }
-  if (quote !== undefined) throw new Error("VISUAL/EDITOR contains an unfinished quote");
-  if (started) parts.push(current);
-  if (parts.length === 0) throw new Error("VISUAL/EDITOR is empty");
-  return parts;
+  return parseCommandLine(value, "VISUAL/EDITOR");
 }
 
 export async function editTextExternally(
   initial: string,
-  options: { environment?: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal } = {},
+  options: { environment?: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal; command?: string } = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const command = parseEditorCommand(environment.VISUAL ?? environment.EDITOR ?? (process.platform === "win32" ? "notepad" : "vi"));
+  const command = parseEditorCommand(
+    options.command ?? environment.VISUAL ?? environment.EDITOR ?? (process.platform === "win32" ? "notepad" : "nano"),
+  );
   const directory = await mkdtemp(join(tmpdir(), "rigyn-editor-"));
   const path = join(directory, "prompt.md");
   try {

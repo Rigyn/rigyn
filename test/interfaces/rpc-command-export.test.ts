@@ -48,7 +48,10 @@ test("RPC discovers built-in and extension commands without exposing source temp
     extraTools: [],
     resourceCatalog: { extensions: catalog },
   });
-  const runtimeExtensions = { commands: () => [] } as unknown as RuntimeExtensionHost;
+  const runtimeExtensions = {
+    commands: () => [],
+    setHostContext() {},
+  } as unknown as RuntimeExtensionHost;
   const dispatcher = new RpcRuntimeDispatcher({
     runtime: { ...runtime, extensions: catalog, runtimeExtensions },
   });

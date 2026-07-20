@@ -315,6 +315,53 @@ test("runtime reload swaps resources in place and preserves stable session owner
   });
 });
 
+test("configured prompt and theme roots support bounded globs and reload atomically", async () => {
+  await withRuntimeEnvironment(async ({ root, workspace, configHome }) => {
+    const promptsOne = join(root, "prompts-one");
+    const promptsTwo = join(root, "prompts-two");
+    const themesOne = join(root, "themes-one");
+    const themesTwo = join(root, "themes-two");
+    await Promise.all([
+      mkdir(promptsOne, { recursive: true }),
+      mkdir(promptsTwo, { recursive: true }),
+      mkdir(themesOne, { recursive: true }),
+      mkdir(themesTwo, { recursive: true }),
+    ]);
+    await writeFile(join(promptsOne, "operator-one.md"), "first prompt {{input}}\n");
+    await writeFile(join(promptsTwo, "operator-two.md"), "second prompt {{input}}\n");
+    const theme = (name: string, foreground: string) => JSON.stringify({
+      schemaVersion: 1,
+      name,
+      base: "dark",
+      styles: { accent: { foreground } },
+    });
+    await writeFile(join(themesOne, "operator-one.json"), theme("operator-one", "#111111"));
+    await writeFile(join(themesTwo, "operator-two.json"), theme("operator-two", "#222222"));
+    const configPath = join(configHome, "rigyn", "config.jsonc");
+    await writeFile(configPath, JSON.stringify({
+      promptRoots: [join(promptsOne, "*.md")],
+      themeRoots: [join(themesOne, "*.json")],
+    }));
+
+    const runtime = await loadRuntime({ workspace, extensions: false, extensionRuntime: false });
+    try {
+      assert.equal(runtime.extensions.prompt("operator-one")?.template, "first prompt {{input}}\n");
+      assert.equal(runtime.extensions.theme("operator-one")?.definition.base, "dark");
+      await writeFile(configPath, JSON.stringify({
+        promptRoots: [join(promptsTwo, "*.md")],
+        themeRoots: [join(themesTwo, "*.json")],
+      }));
+      await runtime.reload();
+      assert.equal(runtime.extensions.prompt("operator-one"), undefined);
+      assert.equal(runtime.extensions.theme("operator-one"), undefined);
+      assert.equal(runtime.extensions.prompt("operator-two")?.template, "second prompt {{input}}\n");
+      assert.equal(runtime.extensions.theme("operator-two")?.definition.base, "dark");
+    } finally {
+      await runtime.close();
+    }
+  });
+});
+
 test("runtime reload rejects overlap before constructing a second candidate generation", async () => {
   await withRuntimeEnvironment(async ({ workspace, configHome }) => {
     const directory = join(configHome, "rigyn", "extensions", "single-flight-reload");

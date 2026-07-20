@@ -51,6 +51,12 @@ import {
   type ResolvedModelSelection,
   type ResolveModelSelectionOptions,
   type RunOptions,
+  type RuntimeAdvancedUiApi,
+  type RuntimeAdvancedUiHostHandler,
+  type RuntimeAdvancedUiKeyObserver,
+  type RuntimeAdvancedUiOperation,
+  type RuntimeAdvancedUiSlot,
+  type RuntimeAdvancedUiWorkingIndicator,
   type RuntimeExtensionApi,
   type RuntimeExtensionDataPaths,
   type RuntimeAutocompleteCompletion,
@@ -63,6 +69,10 @@ import {
   type RuntimeExtensionMessageAppendInput,
   type RuntimeExtensionMessageRecord,
   type RuntimeExtensionMessagesReadInput,
+  type RuntimeDiscoverableResource,
+  type RuntimeDiscoveryView,
+  type RuntimeSessionUsageSnapshot,
+  type RuntimeSystemPromptSnapshot,
   type RuntimeResourcesDiscoverEvent,
   type RuntimeResourcesDiscoverResult,
   type RuntimeExtensionSessionRenderer,
@@ -81,9 +91,15 @@ import {
   type RuntimeToolContext,
   type RuntimeToolRenderView,
   type RpcExtensionUiRequest,
+  type RpcCurrentSession,
+  type RpcForkMessagePage,
   type RpcMethodResult,
+  type RpcModelCycleResult,
   type RpcNotificationParams,
   type RpcRunStartParams,
+  type RpcSessionCopyResult,
+  type RpcSessionForkResult,
+  type RpcThinkingCycleResult,
   type RpcThreadState,
   type RpcThreadStatistics,
   type RuntimeSessionBeforeCompactEvent,
@@ -115,6 +131,10 @@ const oversizedEvent = {
   resumeAfterSequence: 2,
 } satisfies RpcOversizedEvent;
 void oversizedEvent;
+
+declare const publicRunHandle: Awaited<ReturnType<HarnessRuntime["start"]>>;
+const retryCancellationAccepted: boolean = publicRunHandle.cancelRetry();
+void retryCancellationAccepted;
 
 const routedStateProvenance = {
   provider: "company",
@@ -160,6 +180,20 @@ declare const typedRpcResources: RpcMethodResult<"resources.list">;
 declare const typedRpcRun: RpcRunStartParams;
 declare const typedRpcEvent: RpcNotificationParams<"events.event">;
 void [typedRpcHealth.status, typedRpcResources.schemaVersion, typedRpcRun.model, typedRpcEvent.subscriptionId];
+declare const typedCurrentSession: RpcCurrentSession;
+declare const typedForkMessages: RpcForkMessagePage;
+declare const typedModelCycle: RpcModelCycleResult;
+declare const typedThinkingCycle: RpcThinkingCycleResult;
+declare const typedSessionCopy: RpcSessionCopyResult;
+declare const typedSessionFork: RpcSessionForkResult;
+void [
+  typedCurrentSession.branch,
+  typedForkMessages.nextCursor,
+  typedModelCycle.availableModels,
+  typedThinkingCycle.levels,
+  typedSessionCopy.events,
+  typedSessionFork.selectedText,
+];
 
 const cache: CacheEffectiveness = analyzeCacheEffectiveness([{ inputTokens: 10, cacheReadTokens: 90 }]);
 void cache.status;
@@ -240,11 +274,91 @@ const extensionAuth = {
   request: { origins: ["https://consumer.example.test"], apiKey: { header: "x-api-key" } },
 } satisfies ProviderAuthDescriptor;
 void extensionAuth;
+
+const advancedUiSlot: RuntimeAdvancedUiSlot = "widget";
+const advancedUiIndicator = {
+  frames: [".", "..", "..."],
+  intervalMs: 120,
+} satisfies RuntimeAdvancedUiWorkingIndicator;
+const advancedUiKeyObserver: RuntimeAdvancedUiKeyObserver = (event) => {
+  void [event.key, event.text, event.ctrl, event.alt, event.shift];
+};
+const advancedUiContract = {
+  setComponent(_slot, _key, _factory) {},
+  setWorkingIndicator(_value) {},
+  setHiddenReasoningLabel(_value) {},
+  getToolOutputExpanded() { return false; },
+  setToolOutputExpanded(_expanded) {},
+  observeKeys(_observer) { return () => {}; },
+} satisfies RuntimeAdvancedUiApi;
+const advancedUiHost = {
+  apply(_operation) {},
+  getToolOutputExpanded() { return false; },
+} satisfies RuntimeAdvancedUiHostHandler;
+const advancedUiOperationKinds = [
+  "component",
+  "working_indicator",
+  "hidden_reasoning_label",
+  "tool_output_expanded",
+  "key_observer",
+] satisfies readonly RuntimeAdvancedUiOperation["type"][];
+const discoverableResource = {
+  kind: "skill",
+  name: "consumer-skill",
+  description: "A bounded public discovery fixture",
+  scope: "workspace",
+  trusted: true,
+  disableModelInvocation: false,
+} satisfies RuntimeDiscoverableResource;
+const discoverySnapshot = {
+  resources: [discoverableResource],
+  truncated: false,
+  omitted: { commands: 0, prompts: 0, skills: 0 },
+} satisfies RuntimeDiscoveryView;
+const historicalUsageSnapshot = {
+  threadId: "consumer-thread",
+  branch: "main",
+  runCount: 1,
+  responseCount: 1,
+  usageEventCount: 1,
+  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheReadTokens: 4, cost: "0.001" },
+  cache: {
+    status: "mixed",
+    samples: 1,
+    observedInputTokens: 10,
+    uncachedInputTokens: 6,
+    cacheReadTokens: 4,
+    cacheWriteTokens: 0,
+    reuseRatio: 0.4,
+  },
+} satisfies RuntimeSessionUsageSnapshot;
+const safePromptSnapshot = {
+  threadId: "consumer-thread",
+  branch: "main",
+  text: "Bounded redacted instructions",
+  bytes: 29,
+  sha256: "a".repeat(64),
+  redacted: true,
+} satisfies RuntimeSystemPromptSnapshot;
+void [
+  advancedUiSlot,
+  advancedUiIndicator,
+  advancedUiKeyObserver,
+  advancedUiContract,
+  advancedUiHost,
+  advancedUiOperationKinds,
+  discoverySnapshot,
+  historicalUsageSnapshot,
+  safePromptSnapshot,
+];
+
 declare const extensionApi: RuntimeExtensionApi;
 const extensionDataPaths: RuntimeExtensionDataPaths = extensionApi.dataPaths;
 void [extensionDataPaths.user, extensionDataPaths.workspace];
 const extensionCatalogPromise: Promise<HarnessResourceCatalog> = extensionApi.getResourceCatalog();
 void extensionCatalogPromise;
+const extensionDiscoveryPromise: Promise<RuntimeDiscoveryView> = extensionApi.getDiscoveryView();
+void extensionDiscoveryPromise;
 const extensionSessionsPromise: Promise<HarnessSessionPage> = extensionApi.listSessions({ search: "consumer", limit: 20 });
 void extensionSessionsPromise;
 const extensionTranscriptPromise: Promise<HarnessTranscriptPage> = extensionApi.getTranscript({
@@ -322,6 +436,7 @@ const extensionMessagesRead = {
   schemaVersion: 1,
   kind: "consumer_message",
   limit: 10,
+  beforeEventId: "event-cursor",
 } satisfies RuntimeExtensionMessagesReadInput;
 const extensionSessionRenderer = {
   renderState(entry) {
@@ -353,6 +468,7 @@ const extensionChild: Promise<RuntimeChildRunResult> = extensionApi.runChild({
   prompt: "inspect the focused failure",
   context: "fresh",
   tools: ["read", "grep"],
+  appendSystemPrompt: "Report evidence before recommendations.",
   execution: { backend: "inherit", requireAllTools: true },
 });
 void extensionChild.then((result) => {
@@ -370,6 +486,8 @@ const promptComposition = {
 void extensionApi.getSessionTree({ threadId: "consumer-thread" });
 const extensionToolCatalog: Promise<RuntimeToolCatalogEntry[]> = extensionApi.getAllTools({ threadId: "consumer-thread" });
 const extensionCommandCatalog: RuntimeCommandDescription[] = extensionApi.getCommands();
+const extensionUsage: Promise<RuntimeSessionUsageSnapshot> = extensionApi.getSessionUsage({ threadId: "consumer-thread" });
+const extensionPrompt: Promise<RuntimeSystemPromptSnapshot | undefined> = extensionApi.getSystemPromptSnapshot({ threadId: "consumer-thread" });
 const extensionName: Promise<RuntimeSessionNameRecord> = extensionApi.setSessionName({
   threadId: "consumer-thread",
   name: "consumer session",
@@ -379,7 +497,7 @@ const extensionLabel: Promise<RuntimeEntryLabelRecord> = extensionApi.setEntryLa
   targetEventId: "event-1",
   label: "checkpoint",
 });
-void [extensionToolCatalog, extensionCommandCatalog, extensionName, extensionLabel, extensionChild, extensionShutdown, promptComposition];
+void [extensionToolCatalog, extensionCommandCatalog, extensionUsage, extensionPrompt, extensionName, extensionLabel, extensionChild, extensionShutdown, promptComposition];
 void extensionApi.setModel({
   threadId: "consumer-thread",
   provider: "consumer-offline",
@@ -405,7 +523,12 @@ extensionApi.on("agent_settled", (event) => { void event.outcome; });
 extensionApi.on("turn_start", (event) => { void [event.step, event.messageCount, event.toolCount]; });
 extensionApi.on("turn_end", (event) => { void [event.step, event.outcome.status]; });
 extensionApi.on("message_start", (event) => { void [event.step, event.role]; });
-extensionApi.on("message_update", (event) => { void [event.kind, event.delta, event.part]; });
+extensionApi.on("message_update", (event) => {
+  if (event.kind === "text" || event.kind === "reasoning") void [event.delta, event.part];
+  else if (event.kind === "tool_call_start") void [event.index, event.id, event.name];
+  else if (event.kind === "tool_call_delta") void [event.index, event.jsonFragment];
+  else void [event.index, event.id, event.name, event.rawArguments, event.arguments, event.parseError];
+});
 extensionApi.on("tool_call", (event: RuntimeToolCallEvent) => {
   void [event.callId, event.threadId, event.runId, event.branch];
   return { block: false };

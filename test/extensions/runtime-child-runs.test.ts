@@ -152,6 +152,48 @@ test("configured child-run defaults and maxima govern extension-requested runs",
   assert.equal(value.provider.callCount, 2);
 });
 
+test("child runs accept bounded replacement and appended instructions while retaining the delegation invariant", async (t) => {
+  const source = `export default (api) => { globalThis.__runtimeChildApi = api; };\n`;
+  const value = await fixture(t, source, [
+    { kind: "turn", content: [{ type: "text", text: "instruction probe complete" }] },
+  ]);
+  const parent = await value.service.createSession();
+  value.store.appendEvent({
+    threadId: parent.threadId,
+    event: { type: "model_selected", provider: value.provider.id, model: "child-model" },
+  });
+  const api = (globalThis as Record<string, any>).__runtimeChildApi;
+
+  await api.runChild({
+    threadId: parent.threadId,
+    prompt: "inspect child instructions",
+    context: "fresh",
+    tools: [],
+    systemPrompt: "CHILD_REPLACEMENT_INSTRUCTIONS",
+    appendSystemPrompt: "CHILD_APPENDED_INSTRUCTIONS",
+  });
+  const wire = JSON.stringify(value.provider.capturedRequests()[0]?.messages);
+  assert.match(wire, /CHILD_REPLACEMENT_INSTRUCTIONS/u);
+  assert.match(wire, /CHILD_APPENDED_INSTRUCTIONS/u);
+  assert.match(wire, /Do not start or delegate another child run/u);
+  assert.doesNotMatch(wire, /You are an expert coding assistant/u);
+
+  for (const [field, selected, expected] of [
+    ["systemPrompt", "", /systemPrompt is invalid/u],
+    ["appendSystemPrompt", "bad\0value", /appendSystemPrompt is invalid/u],
+    ["appendSystemPrompt", "x".repeat(64 * 1024 + 1), /exceeds 65536 bytes/u],
+  ] as const) {
+    await assert.rejects(api.runChild({
+      threadId: parent.threadId,
+      prompt: "reject invalid child instructions",
+      context: "fresh",
+      tools: [],
+      [field]: selected,
+    }), expected);
+  }
+  assert.equal(value.provider.callCount, 1);
+});
+
 test("runtime child admission deduplicates requester metadata and skips root branch histories", async (t) => {
   const source = `export default (api) => {
     api.registerTool({
@@ -680,6 +722,7 @@ test("all host-owned child boundaries retain child requester identity from sessi
     prompt: "probe every child boundary",
     provider: value.provider.id,
     model: "child-model",
+    reasoningEffort: "high",
     allowedTools: ["probe_child_boundaries"],
   });
 

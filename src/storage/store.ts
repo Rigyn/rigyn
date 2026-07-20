@@ -9,7 +9,15 @@ import {
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { EventEnvelope, EventSink, RunState, RuntimeEvent } from "../core/events.js";
+import {
+  MAX_TOOL_CALL_STREAM_DELTA_BYTES,
+  MAX_TOOL_CALL_STREAM_ID_BYTES,
+  MAX_TOOL_CALL_STREAM_NAME_BYTES,
+  type EventEnvelope,
+  type EventSink,
+  type RunState,
+  type RuntimeEvent,
+} from "../core/events.js";
 import {
   canonicalExtensionMessageEvent,
   canonicalExtensionStateEvent,
@@ -566,6 +574,7 @@ function validProviderState(value: unknown): boolean {
         "bedrock-converse",
         "mistral-conversations",
         "ollama-chat",
+        "gateway-messages",
       ].includes(String(routed["protocolFamily"])) ||
       typeof routed["scope"] !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(routed["scope"])
@@ -587,6 +596,9 @@ function validProviderState(value: unknown): boolean {
         (value["conversationId"] === undefined || hasString(value, "conversationId"));
     case "gemini_generate_content":
       return Array.isArray(value["parts"]) && value["parts"].every(isJsonValue);
+    case "gateway_messages":
+      return Array.isArray(value["assistantContent"]) && value["assistantContent"].every(isJsonValue) &&
+        (value["responseId"] === undefined || hasString(value, "responseId"));
     case "bedrock_converse":
     case "chat_completions":
     case "openrouter_chat":
@@ -628,6 +640,37 @@ function validToolProgress(value: unknown): boolean {
 function exactObjectKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
   const selected = new Set(allowed);
   return Object.keys(value).every((key) => selected.has(key));
+}
+
+const FINISH_REASONS = new Set([
+  "stop", "tool_calls", "length", "context_limit", "content_filter", "refusal",
+  "pause", "cancelled", "error", "incomplete", "unknown",
+]);
+const ASSISTANT_RESPONSE_TRANSFORMATION_FIELDS = new Set([
+  "message", "finishReason", "usage", "rawReason", "explanation",
+]);
+
+function validAssistantResponseAuditSnapshot(value: unknown): boolean {
+  if (!isRecord(value) || !exactObjectKeys(value, ["finishReason", "usage"])) return false;
+  if (!hasString(value, "finishReason") || !FINISH_REASONS.has(value["finishReason"] as string)) return false;
+  if (value["usage"] === undefined) return true;
+  if (!isRecord(value["usage"]) || value["usage"]["raw"] !== undefined) return false;
+  return isNormalizedUsage(value["usage"]);
+}
+
+function validAssistantResponseTransformations(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 128) return false;
+  return value.every((entry) => {
+    if (!isRecord(entry) || !exactObjectKeys(entry, ["actor", "fields"])) return false;
+    if (
+      typeof entry["actor"] !== "string" || entry["actor"] === "" || entry["actor"].includes("\0") ||
+      Buffer.byteLength(entry["actor"], "utf8") > 256
+    ) return false;
+    if (!Array.isArray(entry["fields"]) || entry["fields"].length === 0 || entry["fields"].length > 5) return false;
+    const fields = entry["fields"] as unknown[];
+    return new Set(fields).size === fields.length && fields.every((field) =>
+      typeof field === "string" && ASSISTANT_RESPONSE_TRANSFORMATION_FIELDS.has(field));
+  });
 }
 
 function validPromptComposition(value: unknown): boolean {
@@ -700,9 +743,27 @@ function validEventShape(event: Record<string, unknown>): boolean {
         hasInteger(event, "part") &&
         (event["visibility"] === "summary" || event["visibility"] === "provider_trace")
       );
+    case "tool_call_started":
+      return hasInteger(event, "index") && (event["index"] as number) >= 0 &&
+        (event["id"] === undefined || (
+          hasString(event, "id") && Buffer.byteLength(event["id"] as string, "utf8") <= MAX_TOOL_CALL_STREAM_ID_BYTES
+        )) &&
+        (event["name"] === undefined || (
+          hasString(event, "name") && Buffer.byteLength(event["name"] as string, "utf8") <= MAX_TOOL_CALL_STREAM_NAME_BYTES
+        ));
+    case "tool_call_delta":
+      return hasInteger(event, "index") && (event["index"] as number) >= 0 &&
+        hasString(event, "jsonFragment") &&
+        Buffer.byteLength(event["jsonFragment"] as string, "utf8") <= MAX_TOOL_CALL_STREAM_DELTA_BYTES;
     case "assistant_completed":
       return hasString(event, "finishReason") &&
-        (event["rawReason"] === undefined || hasString(event, "rawReason"));
+        (event["rawReason"] === undefined || hasString(event, "rawReason")) &&
+        (event["explanation"] === undefined || hasString(event, "explanation"));
+    case "assistant_response_transformed":
+      return hasInteger(event, "step") && (event["step"] as number) > 0 &&
+        validAssistantResponseTransformations(event["transformations"]) &&
+        validAssistantResponseAuditSnapshot(event["original"]) &&
+        validAssistantResponseAuditSnapshot(event["final"]);
     case "tool_input_transformed":
       return hasString(event, "callId") && hasString(event, "name") && hasInteger(event, "index") &&
         Array.isArray(event["actors"]) && event["actors"].length > 0 && event["actors"].length <= 128 &&
@@ -2143,8 +2204,25 @@ export class SessionStore {
     fromBranch?: string;
     newBranch: string;
     atEventId?: EventId | null;
+    label?: string;
   }): BranchRecord {
-    this.transaction(() => this.forkBranchInTransaction(input));
+    const label = input.label?.replace(/\s+/gu, " ").trim() || undefined;
+    if (label !== undefined && !validEntryLabel(label)) {
+      throw new HarnessError("STORAGE_LABEL", `Entry label must be at most ${MAX_ENTRY_LABEL_BYTES} UTF-8 bytes without control characters`);
+    }
+    this.transaction(() => {
+      this.forkBranchInTransaction(input);
+      if (label === undefined) return;
+      const targetEventId = optionalString(this.branchRow(input.threadId, input.newBranch), "head_event_id");
+      if (targetEventId === undefined) {
+        throw new HarnessError("STORAGE_LABEL", "A labelled branch requires a target event");
+      }
+      this.appendEventInTransaction({
+        threadId: input.threadId,
+        branch: input.newBranch,
+        event: { type: "entry_label_changed", targetEventId, label },
+      });
+    });
     return this.listBranches(input.threadId).find((branch) => branch.name === input.newBranch)!;
   }
 

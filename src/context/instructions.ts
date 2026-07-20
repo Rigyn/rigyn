@@ -60,19 +60,27 @@ function boundedText(text: string, maxBytes: number): { text: string; bytes: num
   return boundedBuffer(Buffer.from(text, "utf8"), maxBytes);
 }
 
-function directoriesBetween(root: string, cwd: string): string[] {
+function assertWithinWorkspace(root: string, cwd: string): void {
   const path = relative(root, cwd);
-  if (path === "") return [root];
   if (path === ".." || path.startsWith(`..${sep}`)) {
     throw new HarnessError("CONTEXT_BOUNDARY", `Working directory escapes workspace: ${cwd}`);
   }
-  const directories = [root];
-  let cursor = root;
-  for (const segment of path.split(sep)) {
-    cursor = resolve(cursor, segment);
-    directories.push(cursor);
+}
+
+function directoriesFromFilesystemRoot(cwd: string): string[] {
+  const directories: string[] = [];
+  let cursor = cwd;
+  while (true) {
+    directories.unshift(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) return directories;
+    cursor = parent;
   }
-  return directories;
+}
+
+function within(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
 }
 
 export async function discoverInstructions(
@@ -143,13 +151,17 @@ export async function discoverInstructions(
 
     const initialBoundary = await WorkspaceBoundary.create(options.workspaceRoot);
     const realRoot = await initialBoundary.readable(".");
-    const boundary = await WorkspaceBoundary.create(realRoot);
-    const realCwd = await boundary.readable(options.cwd);
-    for (const directory of directoriesBetween(realRoot, realCwd)) {
+    const workspaceBoundary = await WorkspaceBoundary.create(realRoot);
+    const realCwd = await workspaceBoundary.readable(options.cwd);
+    assertWithinWorkspace(realRoot, realCwd);
+    for (const directory of directoriesFromFilesystemRoot(realCwd)) {
       if (remaining === 0) {
         anyTruncated = true;
         break;
       }
+      const boundary = within(realRoot, directory)
+        ? workspaceBoundary
+        : await WorkspaceBoundary.create(directory);
       for (const filename of filenames) {
         const candidate = resolve(directory, filename);
         let readable: string;

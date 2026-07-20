@@ -23,6 +23,64 @@ export type ThemeRole =
   | "toolSuccess"
   | "toolError";
 
+export const THEME_TOKENS = [
+  "accent",
+  "border",
+  "borderAccent",
+  "borderMuted",
+  "success",
+  "error",
+  "warning",
+  "muted",
+  "dim",
+  "text",
+  "thinkingText",
+  "selectedBg",
+  "userMessageBg",
+  "userMessageText",
+  "customMessageBg",
+  "customMessageText",
+  "customMessageLabel",
+  "toolPendingBg",
+  "toolSuccessBg",
+  "toolErrorBg",
+  "toolTitle",
+  "toolOutput",
+  "mdHeading",
+  "mdLink",
+  "mdLinkUrl",
+  "mdCode",
+  "mdCodeBlock",
+  "mdCodeBlockBorder",
+  "mdQuote",
+  "mdQuoteBorder",
+  "mdHr",
+  "mdListBullet",
+  "toolDiffAdded",
+  "toolDiffRemoved",
+  "toolDiffContext",
+  "syntaxComment",
+  "syntaxKeyword",
+  "syntaxFunction",
+  "syntaxVariable",
+  "syntaxString",
+  "syntaxNumber",
+  "syntaxType",
+  "syntaxOperator",
+  "syntaxPunctuation",
+  "thinkingOff",
+  "thinkingMinimal",
+  "thinkingLow",
+  "thinkingMedium",
+  "thinkingHigh",
+  "thinkingXhigh",
+  "thinkingMax",
+  "bashMode",
+] as const;
+
+export type ThemeToken = (typeof THEME_TOKENS)[number];
+export type ThemeColorValue = "" | number | `#${string}`;
+
 export interface Theme {
   name: ThemeName;
   ansi: boolean;
@@ -40,10 +98,16 @@ export interface Theme {
 }
 
 export interface ThemeStyleDefinition {
-  foreground?: "" | number | `#${string}`;
+  foreground?: ThemeColorValue;
   background?: number | `#${string}`;
   bold?: boolean;
   italic?: boolean;
+}
+
+export interface ThemeExportDefinition {
+  pageBg?: ThemeColorValue;
+  cardBg?: ThemeColorValue;
+  infoBg?: ThemeColorValue;
 }
 
 export interface ThemeDefinition {
@@ -51,6 +115,10 @@ export interface ThemeDefinition {
   name: string;
   base: "dark" | "light";
   styles: Partial<Record<ThemeRole, ThemeStyleDefinition>>;
+  /** Fully resolved semantic tokens when the source used the token-shaped contract. */
+  tokens?: Readonly<Record<ThemeToken, ThemeColorValue>>;
+  /** Fully resolved export backgrounds; omitted fields inherit the message background token. */
+  export?: Readonly<ThemeExportDefinition>;
 }
 
 export interface ThemeContrastDiagnostic {
@@ -60,11 +128,17 @@ export interface ThemeContrastDiagnostic {
   message: string;
 }
 
+export interface AutomaticThemePair {
+  readonly light: string;
+  readonly dark: string;
+}
+
 export const THEME_SCHEMA_URI = "urn:rigyn:schema:theme:v1";
 
 const reset = "\u001b[0m";
 const themeName = /^[a-z][a-z0-9._-]{0,62}$/u;
 const hexColor = /^#[0-9a-f]{6}$/iu;
+const REQUIRED_THEME_TOKENS = THEME_TOKENS.filter((token) => token !== "thinkingMax") as readonly Exclude<ThemeToken, "thinkingMax">[];
 export const THEME_ROLES: readonly ThemeRole[] = [
   "title",
   "muted",
@@ -88,6 +162,30 @@ export const THEME_ROLES: readonly ThemeRole[] = [
   "toolSuccess",
   "toolError",
 ];
+
+/**
+ * A paired setting uses `LIGHT/DARK`. Theme names themselves cannot contain a
+ * slash, so the form is unambiguous and remains a single backwards-compatible
+ * configuration value.
+ */
+export function parseAutomaticThemePair(value: string): AutomaticThemePair | undefined {
+  const parts = value.split("/");
+  if (parts.length === 1) return undefined;
+  if (parts.length !== 2) throw new Error("Automatic theme setting must use LIGHT/DARK");
+  const light = parts[0]!.trim();
+  const dark = parts[1]!.trim();
+  if (!themeName.test(light) || !themeName.test(dark)) {
+    throw new Error("Automatic theme setting must contain two valid theme names");
+  }
+  return Object.freeze({ light, dark });
+}
+
+export function resolveThemeSetting(value: string, terminal: "dark" | "light"): string {
+  const pair = parseAutomaticThemePair(value);
+  if (pair !== undefined) return terminal === "light" ? pair.light : pair.dark;
+  if (!themeName.test(value)) throw new Error("Theme must be a valid name or LIGHT/DARK pair");
+  return value;
+}
 
 const glyphs = {
   assistant: "◆",
@@ -181,52 +279,100 @@ function color(value: unknown, label: string, empty: boolean): "" | number | `#$
 }
 
 function tokenTheme(value: Record<string, unknown>): ThemeDefinition {
-  allowed(value, ["$schema", "name", "vars", "colors", "export"], "theme");
+  allowed(value, ["$schema", "schemaVersion", "name", "base", "vars", "colors", "export"], "theme");
+  if (value.$schema !== undefined && (typeof value.$schema !== "string" || value.$schema.length > 4_096)) {
+    throw new Error("theme $schema must be a bounded string");
+  }
+  if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error("theme schemaVersion must be 1");
   if (typeof value.name !== "string" || value.name === "" || value.name.includes("/") || value.name.includes("\\")) {
     throw new Error("theme name must be non-empty and must not contain a path separator");
   }
+  const base = value.base ?? (value.name === "light" ? "light" : "dark");
+  if (base !== "dark" && base !== "light") throw new Error("theme base must be dark or light");
+
   const variables = value.vars === undefined ? {} : record(value.vars, "theme vars");
-  const colors = record(value.colors, "theme colors");
-  const resolved = (name: string, empty: boolean): "" | number | `#${string}` | undefined => {
-    let selected = colors[name];
-    const seen = new Set<string>();
-    while (typeof selected === "string" && selected !== "" && !hexColor.test(selected)) {
-      if (seen.has(selected)) throw new Error(`theme variable cycle at ${selected}`);
-      seen.add(selected);
-      if (!Object.hasOwn(variables, selected)) throw new Error(`theme color ${name} references unknown variable ${selected}`);
-      selected = variables[selected];
+  const tokenValue = (selected: unknown, label: string): ThemeColorValue | string => {
+    if (selected === "" || (typeof selected === "string" && hexColor.test(selected))) return selected as ThemeColorValue;
+    if (typeof selected === "number" && Number.isSafeInteger(selected) && selected >= 0 && selected <= 255) return selected;
+    if (
+      typeof selected === "string"
+      && selected !== ""
+      && !selected.startsWith("#")
+      && !selected.includes("\0")
+      && Buffer.byteLength(selected, "utf8") <= 1_024
+    ) {
+      return selected;
     }
-    return empty
-      ? color(selected, `theme colors.${name}`, true)
-      : color(selected, `theme colors.${name}`, false);
+    throw new Error(`${label} must be a variable name, 0-255 palette index, an empty default color, or #RRGGBB`);
   };
-  const foreground = (name: string): ThemeStyleDefinition => {
-    const selected = resolved(name, true);
-    return selected === undefined ? {} : { foreground: selected };
+  for (const [name, selected] of Object.entries(variables)) tokenValue(selected, `theme vars.${name}`);
+
+  const resolvedVariables = new Map<string, ThemeColorValue>();
+  const resolveVariable = (name: string, trail: Set<string>): ThemeColorValue => {
+    const cached = resolvedVariables.get(name);
+    if (cached !== undefined || resolvedVariables.has(name)) return cached!;
+    if (!Object.hasOwn(variables, name)) throw new Error(`theme references unknown variable ${name}`);
+    if (trail.has(name)) throw new Error(`theme variable cycle at ${name}`);
+    const selected = tokenValue(variables[name], `theme vars.${name}`);
+    const resolved = typeof selected === "string" && selected !== "" && !hexColor.test(selected)
+      ? resolveVariable(selected, new Set(trail).add(name))
+      : selected as ThemeColorValue;
+    resolvedVariables.set(name, resolved);
+    return resolved;
   };
-  const background = (foregroundName: string, backgroundName: string): ThemeStyleDefinition => {
-    const fg = resolved(foregroundName, true);
-    const bg = resolved(backgroundName, true);
+  const resolveValue = (selected: unknown, label: string): ThemeColorValue => {
+    const parsed = tokenValue(selected, label);
+    return typeof parsed === "string" && parsed !== "" && !hexColor.test(parsed)
+      ? resolveVariable(parsed, new Set())
+      : parsed as ThemeColorValue;
+  };
+
+  const colors = record(value.colors, "theme colors");
+  allowed(colors, THEME_TOKENS, "theme colors");
+  const missing = REQUIRED_THEME_TOKENS.filter((token) => colors[token] === undefined);
+  if (missing.length > 0) throw new Error(`theme colors is missing required tokens: ${missing.join(", ")}`);
+  const tokens = {} as Record<ThemeToken, ThemeColorValue>;
+  for (const token of REQUIRED_THEME_TOKENS) tokens[token] = resolveValue(colors[token], `theme colors.${token}`);
+  tokens.thinkingMax = colors.thinkingMax === undefined
+    ? tokens.thinkingXhigh
+    : resolveValue(colors.thinkingMax, "theme colors.thinkingMax");
+
+  const exportInput = value.export === undefined ? {} : record(value.export, "theme export");
+  allowed(exportInput, ["pageBg", "cardBg", "infoBg"], "theme export");
+  const exportColor = (name: keyof ThemeExportDefinition): ThemeColorValue => {
+    const selected = exportInput[name] === undefined
+      ? tokens.userMessageBg
+      : resolveValue(exportInput[name], `theme export.${name}`);
+    return selected === "" ? tokens.userMessageBg : selected;
+  };
+  const exportDefinition = Object.freeze({
+    pageBg: exportColor("pageBg"),
+    cardBg: exportColor("cardBg"),
+    infoBg: exportColor("infoBg"),
+  });
+  const foreground = (name: ThemeToken): ThemeStyleDefinition => ({ foreground: tokens[name] });
+  const background = (foregroundName: ThemeToken, backgroundName: ThemeToken): ThemeStyleDefinition => {
+    const backgroundColor = tokens[backgroundName];
     return {
-      ...(fg === undefined ? {} : { foreground: fg }),
-      ...(bg === undefined || bg === "" ? {} : { background: bg }),
+      foreground: tokens[foregroundName],
+      ...(backgroundColor === "" ? {} : { background: backgroundColor }),
     };
   };
   return {
     schemaVersion: 1,
     name: value.name,
-    base: "dark",
+    base,
     styles: {
-      title: { ...foreground("accent"), bold: true },
+      title: { ...foreground("mdHeading"), bold: true },
       muted: foreground("muted"),
       accent: foreground("accent"),
-      info: foreground("accent"),
-      link: foreground("accent"),
-      code: foreground("text"),
+      info: foreground("thinkingText"),
+      link: foreground("mdLink"),
+      code: foreground("mdCode"),
       border: foreground("border"),
       editor: foreground("text"),
-      editorActive: foreground("accent"),
-      working: foreground("accent"),
+      editorActive: foreground("borderAccent"),
+      working: foreground("thinkingText"),
       user: foreground("accent"),
       assistant: foreground("text"),
       success: foreground("success"),
@@ -239,6 +385,8 @@ function tokenTheme(value: Record<string, unknown>): ThemeDefinition {
       toolSuccess: background("toolOutput", "toolSuccessBg"),
       toolError: background("toolOutput", "toolErrorBg"),
     },
+    tokens: Object.freeze(tokens),
+    export: exportDefinition,
   };
 }
 

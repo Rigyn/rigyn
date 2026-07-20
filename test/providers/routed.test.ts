@@ -263,6 +263,31 @@ test("routed provider fails closed for missing and ambiguous routes", async () =
   await assert.rejects(missingUpstream.listModels(new AbortController().signal), /did not advertise model missing/u);
 });
 
+test("routed provider accepts explicit catalog metadata without probing an unavailable discovery endpoint", async () => {
+  let discoveryCalls = 0;
+  const delegate = adapter("private-wire", [], async function* () {});
+  delegate.listModels = async () => {
+    discoveryCalls += 1;
+    throw new Error("discovery is unavailable");
+  };
+  const routed = defineRoutedProviderAdapter({
+    id: "private-gateway",
+    delegateOwnership: "borrowed",
+    routes: [{
+      model: "public-model",
+      upstreamModel: "private-model",
+      protocolFamily: "anthropic-messages",
+      adapter: delegate,
+      modelInfo: model("private-model", "private-wire", "anthropic-messages"),
+    }],
+  });
+
+  const models = await routed.listModels(new AbortController().signal);
+
+  assert.equal(discoveryCalls, 0);
+  assert.deepEqual(models.map((entry) => [entry.provider, entry.id]), [["private-gateway", "public-model"]]);
+});
+
 test("routed provider preserves route-specific endpoints and adapter configuration", async () => {
   const requests: Array<{ url: string; authorization: string | null; model: unknown }> = [];
   const wire = (label: string) => fakeFetch(async (incoming) => {

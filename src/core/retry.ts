@@ -2,6 +2,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterError } from "./types.js";
 
 export interface RetryPolicy {
+  /** Automatic retries are enabled unless explicitly disabled. */
+  enabled?: boolean;
   maxAttempts: number;
   baseDelayMs: number;
   maxDelayMs: number;
@@ -9,6 +11,7 @@ export interface RetryPolicy {
 }
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  enabled: true,
   maxAttempts: 3,
   baseDelayMs: 500,
   maxDelayMs: 30_000,
@@ -29,7 +32,7 @@ export function retryDelay(
 }
 
 export function mayRetry(error: AdapterError, attempt: number, policy: RetryPolicy, bodyStarted: boolean): boolean {
-  return error.retryable && !error.partial && error.bodyStarted !== true && !bodyStarted && attempt < policy.maxAttempts;
+  return policy.enabled !== false && error.retryable && !error.partial && error.bodyStarted !== true && !bodyStarted && attempt < policy.maxAttempts;
 }
 
 export function isContextOverflowError(error: AdapterError): boolean {

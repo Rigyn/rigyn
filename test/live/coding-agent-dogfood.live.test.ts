@@ -388,6 +388,7 @@ export function average(values) {
       join(resources.examplesRoot, "custom-tool", "README.md"),
       join(resources.examplesRoot, "custom-tool", "extension.json"),
       join(resources.examplesRoot, "custom-tool", "runtime", "index.mjs"),
+      join(resources.examplesRoot, "custom-tool", "runtime.activation.mjs"),
     ];
     const referenceHashes = new Map(await Promise.all(readOnlyReferences.map(async (path) => [path, await hashFile(path)] as const)));
 
@@ -406,8 +407,8 @@ export function average(values) {
           "First read the build-extension SKILL.md and the extensions/package documentation it routes to, then inspect only the focused package-starter and custom-tool examples.",
           "Create extension.json, runtime/index.mjs, package.json, README.md, and test/dogfood.test.mjs.",
           "Register exactly one model-callable tool named dogfood_echo with a closed schema requiring one string field named text.",
-          "For valid input, return isError false, top-level status success, a non-empty summary, an empty nextActions array, and JSON content shaped as {\"echo\": <the exact input>}.",
-          "Add and run a deterministic node:test covering activation, schema, and the structured result.",
+          "For valid input, return isError false, top-level status success, a non-empty summary, an empty nextActions array, and a content string whose parsed JSON is shaped as {\"echo\": <the exact input>}. Never return an object directly as content.",
+          "Add and run a deterministic node:test covering activation, schema, and the structured result, including typeof result.content === 'string' before parsing it.",
           "Inspect the test exit status and output; if it fails, fix the package or test and rerun it. Finish only after the test passes.",
           "This temporary project has no host dependency installed: the test must import only Node built-ins and local package files, use a minimal local activation host stub, and must not import rigyn or rigyn/extensions.",
           "Do not install the package; the independent verifier will install, reload, invoke, and remove it.",

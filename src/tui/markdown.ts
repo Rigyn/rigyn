@@ -14,6 +14,10 @@ export interface MarkdownRenderedLine {
   spans: readonly MarkdownSpan[];
 }
 
+export interface MarkdownRenderOptions {
+  codeBlockIndent?: string;
+}
+
 const MAX_MARKDOWN_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_MARKDOWN_SOURCE_LINES = 20_000;
 const MAX_MARKDOWN_RENDERED_LINES = 20_000;
@@ -756,11 +760,13 @@ export function renderMarkdownMessageLines(
   width: number,
   fallbackRole: ThemeRole,
   prefixRole?: ThemeRole,
+  options: MarkdownRenderOptions = {},
 ): MarkdownRenderedLine[] {
   const safeWidth = Math.max(1, Math.min(500, Number.isSafeInteger(width) ? width : 80));
   const safePrefix = truncateCells(sanitizeTerminalText(prefix).replaceAll("\n", " "), Math.max(0, safeWidth - 1), "");
   const indentation = " ".repeat(cellWidth(safePrefix));
   const state: BlockState = { fence: undefined, listIndent: undefined, table: false };
+  const codeBlockIndent = /^ {0,8}$/u.test(options.codeBlockIndent ?? "") ? options.codeBlockIndent ?? "" : "";
   const lines: MarkdownRenderedLine[] = [];
   let omitted = false;
   let first = true;
@@ -771,7 +777,14 @@ export function renderMarkdownMessageLines(
       const closing = closesFence(active.content, state.fence);
       if (closing === undefined) {
         const code = codeLine(active.content, state.fence);
-        parsed = { ...code, spans: [...active.prefix, ...code.spans] };
+        parsed = {
+          ...code,
+          spans: [
+            ...active.prefix,
+            ...(codeBlockIndent === "" ? [] : [{ text: codeBlockIndent, role: "muted" as const }]),
+            ...code.spans,
+          ],
+        };
       } else {
         parsed = { spans: [...active.prefix, ...fenceSpans(active.content, closing)], role: "accent" };
         state.fence = undefined;

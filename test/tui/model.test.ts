@@ -977,6 +977,41 @@ test("TUI usage aggregates runs without double-counting cumulative updates", () 
   });
 });
 
+test("cache miss notices are opt-in, bounded, and reset after compaction", () => {
+  const run = (
+    model: TuiModel,
+    id: string,
+    sequence: number,
+    usage: { inputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number },
+  ): void => {
+    model.apply({
+      ...envelope({ type: "run_started", provider: "anthropic", model: "claude-test" }, sequence),
+      runId: id,
+      timestamp: `2026-01-01T00:0${sequence}:00.000Z`,
+    });
+    model.apply({ ...envelope({ type: "usage", semantics: "final", usage }, sequence + 1), runId: id });
+    model.apply({ ...envelope({ type: "run_completed", finishReason: "stop" }, sequence + 2), runId: id });
+  };
+
+  const hidden = new TuiModel(DEFAULT_TUI_LIMITS);
+  run(hidden, "hidden-one", 1, { cacheWriteTokens: 25_000 });
+  run(hidden, "hidden-two", 4, { inputTokens: 25_000 });
+  assert.equal(hidden.entries.some((entry) => entry.title === "Cache miss"), false);
+
+  const visible = new TuiModel(DEFAULT_TUI_LIMITS);
+  visible.setShowCacheMissNotices(true);
+  run(visible, "visible-one", 1, { cacheWriteTokens: 25_000 });
+  run(visible, "visible-two", 4, { inputTokens: 25_000 });
+  assert.match(visible.entries.find((entry) => entry.title === "Cache miss")?.text ?? "", /25,000 reusable prompt tokens/u);
+
+  const reset = new TuiModel(DEFAULT_TUI_LIMITS);
+  reset.setShowCacheMissNotices(true);
+  run(reset, "reset-one", 1, { cacheWriteTokens: 25_000 });
+  reset.apply(envelope({ type: "compaction_started" }, 4));
+  run(reset, "reset-two", 5, { inputTokens: 25_000 });
+  assert.equal(reset.entries.some((entry) => entry.title === "Cache miss"), false);
+});
+
 test("same-model run startup preserves the last authoritative context pressure until new usage arrives", () => {
   const model = new TuiModel(DEFAULT_TUI_LIMITS);
   model.setContext({ provider: "openai", model: "gpt-test", contextWindowTokens: 20_000 });

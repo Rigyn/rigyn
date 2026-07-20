@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
 import { commandShellArgv } from "../process/command-shell.js";
-import { runProcess } from "../process/runner.js";
+import { resolveExecutable, runProcess } from "../process/runner.js";
+import { runShellShortcut, shellShortcutEnvironment } from "../process/user-shell.js";
 import {
   withGracefulTermination,
   type GracefulTerminationContext,
 } from "../process/graceful-termination.js";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   authorizeAnthropic,
   authorizeGitHubCopilot,
@@ -33,6 +36,8 @@ import type { QueueMode } from "../core/agent.js";
 import { createId } from "../core/ids.js";
 import {
   MODEL_REASONING_EFFORTS,
+  LlamaRouterAdapter,
+  manageLlamaRouter,
   modelMatchesScope,
   modelReferenceFailureMessage,
   modelReasoningEfforts,
@@ -57,6 +62,8 @@ import {
   loadKeybindings,
   sanitizeTerminalText,
   scanWorkspaceFiles,
+  createNativeUiHost,
+  createUnsafeTerminalHost,
   TuiController,
   TuiSelectionCancelledError,
   type KeybindingAction,
@@ -72,7 +79,12 @@ import { copyToNativeClipboard, imageCoordinateHint, preprocessImage, readClipbo
 import { discoverInstructions, loadSkill, resolveEffectiveContextBudget, type SkillMetadata } from "../context/index.js";
 import { flagBoolean, flagString, flagStrings, parseArguments, type ParsedArguments } from "./args.js";
 import { resolveRequestedModel } from "./model-resolution.js";
-import { BUILTIN_PROVIDER_CONFIGS, loadRuntime, type LoadedRuntime } from "./runtime.js";
+import {
+  BUILTIN_PROVIDER_CONFIGS,
+  loadRuntime,
+  preactivateProjectTrustExtensions,
+  type LoadedRuntime,
+} from "./runtime.js";
 import { expandPath, harnessPaths, type HarnessPaths } from "./paths.js";
 import { runRpcServer } from "./rpc.js";
 import { persistDefaultSelection, persistUiPreferences, persistUiTheme, updateGlobalConfig } from "./setup.js";
@@ -92,10 +104,10 @@ import {
   normalizeHarnessSessionListRequest,
 } from "../service/session-catalog.js";
 import { readFileBounded, WorkspaceBoundary } from "../tools/paths.js";
-import { CoalescedOutputProgress } from "../tools/progress.js";
 import {
   renderExtensionCommand,
   renderExtensionPrompt,
+  type RuntimeAdvancedUiOperation,
   type RuntimeCommandUi,
   type RuntimeInitialUiOperation,
 } from "../extensions/index.js";
@@ -110,6 +122,7 @@ import { resolveRuntimeShortcuts } from "./extension-shortcuts.js";
 import { renderCliHelp } from "./help.js";
 import { runDiagnosticsCommand } from "./diagnostics-command.js";
 import { runSessionsCommand } from "./sessions-command.js";
+import { ThemeHotReloader } from "./theme-hot-reload.js";
 import { RIGYN_VERSION } from "../version.js";
 import {
   BoundedDeferredSubmissionQueue,
@@ -163,6 +176,13 @@ async function persistProviderRetryAttempts(runtime: LoadedRuntime, maxAttempts:
   await updateGlobalConfig(runtime.paths.globalConfig, (existing) => ({
     ...existing,
     providerRetry: { ...objectValue(existing.providerRetry), maxAttempts },
+  }));
+}
+
+async function persistProviderRetryEnabled(runtime: LoadedRuntime, enabled: boolean): Promise<void> {
+  await updateGlobalConfig(runtime.paths.globalConfig, (existing) => ({
+    ...existing,
+    providerRetry: { ...objectValue(existing.providerRetry), enabled },
   }));
 }
 
@@ -251,7 +271,11 @@ function attachmentStorageBytes(attachment: TuiInputImageAttachment): number {
     + 128;
 }
 
-async function pasteClipboardImage(terminal: TuiController, signal?: AbortSignal): Promise<void> {
+async function pasteClipboardImage(
+  terminal: TuiController,
+  signal?: AbortSignal,
+  autoResizeImages = true,
+): Promise<void> {
   terminal.setInputBlocked("Reading clipboard…", "clipboard");
   try {
     const acquired = await readClipboardImage({ ...(signal === undefined ? {} : { signal }) });
@@ -265,7 +289,10 @@ async function pasteClipboardImage(terminal: TuiController, signal?: AbortSignal
       const details = acquired.diagnostics.slice(-3).map((entry) => `${entry.backend}: ${entry.detail}`).join("; ");
       throw new Error(`No clipboard image or text is available${details === "" ? "" : ` (${details})`}`);
     }
-    const processed = await preprocessImage(acquired.image.bytes, { ...(signal === undefined ? {} : { signal }) });
+    const processed = await preprocessImage(acquired.image.bytes, {
+      ...(signal === undefined ? {} : { signal }),
+      autoResize: autoResizeImages,
+    });
     const count = terminal.attachInputImage({
       block: { type: "image", mediaType: processed.mediaType, data: Buffer.from(processed.bytes).toString("base64") },
       label: "clipboard",
@@ -465,6 +492,16 @@ export const DEFAULT_MODEL_PER_PROVIDER: Readonly<Record<string, string>> = Obje
   "vercel-ai-gateway": "anthropic/claude-sonnet-4.6",
   zai: "glm-5.1",
   "zai-coding-cn": "glm-5.1",
+  moonshotai: "kimi-k2.6",
+  "moonshotai-cn": "kimi-k2.6",
+  opencode: "kimi-k2.6",
+  "opencode-go": "kimi-k2.6",
+  "cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
+  "cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
+  xiaomi: "mimo-v2.5-pro",
+  "xiaomi-token-plan-cn": "mimo-v2.5-pro",
+  "xiaomi-token-plan-ams": "mimo-v2.5-pro",
+  "xiaomi-token-plan-sgp": "mimo-v2.5-pro",
   "kimi-coding": "kimi-for-coding",
   minimax: "MiniMax-M3",
   "minimax-cn": "MiniMax-M3",
@@ -789,6 +826,10 @@ function outboundImageOptions(argumentsValue: ParsedArguments): { outboundImages
   return outboundImages === undefined ? {} : { outboundImages };
 }
 
+function offlineRequested(argumentsValue: ParsedArguments): boolean {
+  return flagBoolean(argumentsValue, "offline") || process.env.RIGYN_OFFLINE === "1";
+}
+
 async function stdinText(maxBytes = 1024 * 1024): Promise<string> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -801,58 +842,7 @@ async function stdinText(maxBytes = 1024 * 1024): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-export async function runShellShortcut(
-  command: string,
-  cwd: string,
-  signal: AbortSignal,
-  timeoutMs = 120_000,
-  environment: NodeJS.ProcessEnv = process.env,
-  onProgress?: (progress: ToolProgress) => void,
-  shellPath?: string,
-): Promise<{ text: string; exitCode: number | null; signal?: NodeJS.Signals }> {
-  if (command.trim() === "" || Buffer.byteLength(command) > 131_072) throw new Error("Shell shortcut command is empty or too large");
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new RangeError("Shell shortcut timeout must be between 1 and 600000 ms");
-  signal.throwIfAborted();
-  const argv = await commandShellArgv(command, {
-    environment,
-    ...(shellPath === undefined ? {} : { configuredPath: shellPath }),
-  });
-  const childEnvironment = shellShortcutEnvironment(environment);
-  const maximum = 512 * 1024;
-  const progress = onProgress === undefined ? undefined : new CoalescedOutputProgress(onProgress);
-  let outcome: Awaited<ReturnType<typeof runProcess>>;
-  try {
-    outcome = await runProcess({
-      argv,
-      cwd,
-      env: Object.fromEntries(
-        Object.entries(childEnvironment).filter((entry): entry is [string, string] => entry[1] !== undefined),
-      ),
-      inheritEnv: false,
-      timeoutMs,
-      outputLimitBytes: maximum,
-      onOutput(stream, chunk) {
-        progress?.push(stream, Buffer.from(chunk));
-      },
-    }, signal);
-  } finally {
-    progress?.close();
-  }
-  if (outcome.cancelled) throw signal.reason ?? new Error("Shell shortcut cancelled");
-  if (outcome.timedOut) throw new Error(`Shell shortcut timed out after ${timeoutMs} ms`);
-  const result = {
-    exitCode: outcome.exitCode,
-    ...(outcome.signal === null ? {} : { signal: outcome.signal }),
-  };
-  const sections = [
-    `$ ${defaultSecretRedactor.redact(command)}`,
-    outcome.stdout.length === 0 ? undefined : defaultSecretRedactor.redact(outcome.stdout.toString("utf8").replace(/\s+$/u, "")),
-    outcome.stderr.length === 0 ? undefined : `stderr:\n${defaultSecretRedactor.redact(outcome.stderr.toString("utf8").replace(/\s+$/u, ""))}`,
-    outcome.stdoutBytes > outcome.stdout.length || outcome.stderrBytes > outcome.stderr.length ? "… output truncated" : undefined,
-    result.signal === undefined ? `exit ${result.exitCode ?? "unknown"}` : `signal ${result.signal}`,
-  ].filter((value): value is string => value !== undefined && value !== "");
-  return { text: sections.join("\n"), ...result };
-}
+export { runShellShortcut, shellShortcutEnvironment };
 
 export function shellShortcutProgressStatus(command: string, progress?: ToolProgress): string {
   const shownCommand = byteTruncate(
@@ -880,22 +870,6 @@ function formatElapsed(milliseconds: number): string {
   return remaining === 0 ? `${minutes}m` : `${minutes}m ${remaining}s`;
 }
 
-const SENSITIVE_ENVIRONMENT_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
-const CREDENTIAL_URL = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/u;
-
-export function shellShortcutEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(environment)) {
-    if (value === undefined) continue;
-    if (SENSITIVE_ENVIRONMENT_NAME.test(name) || CREDENTIAL_URL.test(value)) {
-      defaultSecretRedactor.register(value);
-      continue;
-    }
-    result[name] = value;
-  }
-  return result;
-}
-
 function projectTrustOverride(argumentsValue: ParsedArguments): ProjectTrustOverride | undefined {
   const approve = flagBoolean(argumentsValue, "approve");
   const deny = flagBoolean(argumentsValue, "no-approve");
@@ -905,7 +879,7 @@ function projectTrustOverride(argumentsValue: ParsedArguments): ProjectTrustOver
 
 function projectTrustResolver(
   argumentsValue: ParsedArguments,
-  paths: Pick<HarnessPaths, "globalConfig" | "trustStore">,
+  paths: Pick<HarnessPaths, "globalConfig" | "trustStore" | "userExtensions" | "stateDirectory">,
   terminal?: TerminalPrompter,
 ): ProjectTrustResolver {
   const override = projectTrustOverride(argumentsValue);
@@ -917,6 +891,10 @@ function projectTrustResolver(
     ...(override === undefined ? {} : { override }),
     ...(terminal === undefined ? {} : { terminal }),
     defaultProjectTrust,
+    preactivate: async (workspace) => await preactivateProjectTrustExtensions(paths, workspace, {
+      ...invocationExtensionOptions(argumentsValue),
+      extensionRuntime: true,
+    }),
   });
 }
 
@@ -981,6 +959,8 @@ async function persistInteractiveModelSelection(
   branch: string | undefined,
   selection: ModelSelection,
 ): Promise<void> {
+  const selectedBranch = branch ?? runtime.store.getThread(threadId).defaultBranch;
+  const previous = runtime.store.getModelSelection(threadId, selectedBranch);
   runtime.store.appendEvent({
     threadId,
     ...(branch === undefined ? {} : { branch }),
@@ -990,6 +970,14 @@ async function persistInteractiveModelSelection(
       model: selection.model,
       ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
     },
+  });
+  runtime.service.setRuntimeModelSelection({ threadId, branch: selectedBranch, selection });
+  await runtime.service.publishRuntimeModelSelectionChange({
+    threadId,
+    branch: selectedBranch,
+    ...(previous === undefined ? {} : { previous }),
+    current: selection,
+    source: "set",
   });
   await persistDefaultSelection(runtime.paths, selection);
 }
@@ -1444,23 +1432,36 @@ async function stageIndexedRuntime(
   projectTrust?: ProjectTrustResolver,
 ) {
   const trust = projectTrust ?? projectTrustResolver(argumentsValue, runtime.paths, terminal);
-  return await prepareIndexedSessionRuntimeSwitch(
-    record,
-    runtime.workspace,
-    index,
-    trust,
-    async (workspace) => {
-      const projectTrusted = await trust.isTrusted(workspace);
-      return await loadRuntime({
-        ...runtimeOptions(argumentsValue),
-        ...invocationExtensionOptions(argumentsValue),
-        workspace,
-        ...(projectTrusted ? { projectTrusted: true } : {}),
-        extensionRuntime: true,
-        recover: false,
-      });
-    },
-  );
+  try {
+    return await prepareIndexedSessionRuntimeSwitch(
+      record,
+      runtime.workspace,
+      index,
+      trust,
+      async (workspace) => {
+        const projectTrusted = await trust.isTrusted(workspace);
+        const preactivatedRuntimeExtensions = await trust.takePreactivatedExtensions(workspace);
+        return await loadRuntime({
+          ...runtimeOptions(argumentsValue),
+          ...invocationExtensionOptions(argumentsValue),
+          workspace,
+          ...(projectTrusted ? { projectTrusted: true } : {}),
+          ...(preactivatedRuntimeExtensions === undefined ? {} : { preactivatedRuntimeExtensions }),
+          extensionRuntime: true,
+          recover: false,
+        });
+      },
+    );
+  } catch (error) {
+    const abandoned = await trust.takePreactivatedExtensions(record.workspaceRoot).catch(() => undefined);
+    if (abandoned === undefined) throw error;
+    try {
+      await abandoned.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Session switch and pre-trust extension cleanup failed");
+    }
+    throw error;
+  }
 }
 
 async function pickTimelineEvent(
@@ -1493,6 +1494,7 @@ async function pickTimelineEvent(
         ...(row.labelTimestamp === undefined ? {} : { labelTimestamp: row.labelTimestamp }),
       },
     })), {
+      filter: options.userOnly === true ? "default" : runtime.config.treeFilterMode,
       async onLabelChange(eventId, label) {
         const changed = await runtime.service.setSessionEntryLabel({
           threadId,
@@ -1594,10 +1596,28 @@ async function pickProvider(runtime: LoadedRuntime, terminal: TerminalPrompter):
 export type LoginPath = "subscription" | "api_key";
 
 export function authMethodLoginPath(method: ProviderAuthMethod): LoginPath {
-  return method.kind === "oauth" || method.kind === "openai_codex_browser" || method.kind === "openai_codex_device"
+  return method.kind === "oauth" || method.kind === "managed_oauth" || method.kind === "openai_codex_browser" || method.kind === "openai_codex_device"
     || method.kind === "anthropic_browser" || method.kind === "github_copilot_device"
     ? "subscription"
     : "api_key";
+}
+
+function managedAuthText(value: unknown, label: string, maximum = 4_096): string {
+  if (
+    typeof value !== "string" || value === "" || Buffer.byteLength(value, "utf8") > maximum ||
+    /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/u.test(value)
+  ) throw new TypeError(`${label} is invalid`);
+  return value;
+}
+
+function managedAuthUrl(value: string | URL): URL {
+  const url = new URL(String(value));
+  const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  if (
+    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    url.username !== "" || url.password !== "" || Buffer.byteLength(url.toString(), "utf8") > 16 * 1024
+  ) throw new TypeError("Managed provider authorization URL is invalid");
+  return url;
 }
 
 function loginPathLabel(path: LoginPath): string {
@@ -1694,20 +1714,27 @@ async function runCommandOperation(
   if (allWorkspaces && flagString(argumentsValue, "fork") !== undefined) throw new Error("--fork cannot be combined with --all");
   // Explicit one-shot runs never interrupt startup for project trust.
   const projectTrust = projectTrustResolver(argumentsValue, harnessPaths());
+  const startupWorkspace = flagString(argumentsValue, "workspace") ?? process.cwd();
   let projectTrusted: boolean;
   try {
-    projectTrusted = await projectTrust.isTrusted(flagString(argumentsValue, "workspace") ?? process.cwd());
+    projectTrusted = await projectTrust.isTrusted(startupWorkspace);
   } catch (error) {
     terminal?.close();
     throw error;
   }
+  const preactivatedRuntimeExtensions = await projectTrust.takePreactivatedExtensions(startupWorkspace);
   let runtime = await loadRuntime({
     ...runtimeOptions(argumentsValue),
     ...invocationExtensionOptions(argumentsValue),
     ...(projectTrusted ? { projectTrusted: true } : {}),
+    ...(preactivatedRuntimeExtensions === undefined ? {} : { preactivatedRuntimeExtensions }),
     ephemeral,
     extensionRuntime: true,
     recover: !allWorkspaces,
+  });
+  runtime.runtimeExtensions.setHostContext({
+    mode: terminal === undefined ? (json ? "json" : "print") : "tui",
+    projectTrusted: runtime.trusted,
   });
   let sessionIndex: WorkspaceSessionIndex | undefined;
   let ephemeralThreadId: string | undefined;
@@ -1812,7 +1839,12 @@ async function runCommandOperation(
         termination.signal,
       );
       if (submission === undefined) continue;
-      const expandedPrompt = await expandPromptReferences(submission, runtime.workspace);
+      const expandedPrompt = await expandPromptReferences(
+        submission,
+        runtime.workspace,
+        undefined,
+        runtime.config.images.autoResize,
+      );
       termination.throwIfTerminated();
       const run = await runtime.service.run({
         prompt: expandedPrompt.text,
@@ -2092,6 +2124,45 @@ export async function loginInteractively(
     await runtime.auth.storeCredential(provider, credential, storeOptions);
     return provider;
   }
+  if (method.kind === "managed_oauth") {
+    const interactionSignal = signal ?? new AbortController().signal;
+    const credential = await runtime.auth.authorizeManaged(provider, method.methodId, {
+      signal: interactionSignal,
+      async showAuthorization({ url: value }) {
+        const url = managedAuthUrl(value);
+        terminal.notify(`Open this URL to sign in:\n${url.toString()}`);
+        openBrowser(url, noBrowser);
+      },
+      async showDeviceCode(input) {
+        const url = managedAuthUrl(input.verificationUri);
+        const userCode = managedAuthText(input.userCode, "Managed provider device code", 1_024);
+        terminal.notify(`Open ${url.toString()} and enter code ${userCode}\nWaiting for authentication...`);
+        openBrowser(url, noBrowser);
+      },
+      showProgress(message) {
+        terminal.notify(managedAuthText(message, "Managed provider progress"));
+      },
+      async prompt(input) {
+        return await terminal.question(managedAuthText(input.message, "Managed provider prompt"), interactionSignal);
+      },
+      async select(input) {
+        const message = managedAuthText(input.message, "Managed provider selection prompt");
+        if (!Array.isArray(input.options) || input.options.length === 0 || input.options.length > 64) {
+          throw new TypeError("Managed provider selection options are invalid");
+        }
+        const choices = input.options.map((option) => ({
+          label: managedAuthText(option.label, "Managed provider selection label", 256),
+          ...(option.detail === undefined
+            ? {}
+            : { detail: managedAuthText(option.detail, "Managed provider selection detail", 2_048) }),
+          value: managedAuthText(option.id, "Managed provider selection ID", 128),
+        }));
+        return await terminal.choose(message, choices, interactionSignal);
+      },
+    });
+    await runtime.auth.storeCredential(provider, credential, storeOptions);
+    return provider;
+  }
   const secret = await terminal.readSecret(`${provider} ${method.kind === "api_key" ? "API key" : "bearer token"}: `, signal);
   if (secret === "") throw new Error("Credential is empty");
   defaultSecretRedactor.register(secret);
@@ -2138,7 +2209,7 @@ async function expandOneShotSubmission(
     const prompt = id === undefined || id === "" ? undefined : runtime.extensions.prompt(id);
     return prompt === undefined ? message : renderExtensionPrompt(prompt, input.join(" "));
   }
-  if (message.startsWith("/skill:")) {
+  if (runtime.config.enableSkillCommands && message.startsWith("/skill:")) {
     const separator = message.indexOf(" ");
     const name = message.slice(7, separator < 0 ? undefined : separator);
     const skill = runtime.service.skills.find((entry) => entry.name === name);
@@ -2272,6 +2343,29 @@ function applyRuntimeUi(terminal: TuiController, operation: RuntimeInitialUiOper
   else ui.setWorkingVisible(operation.visible);
 }
 
+function applyRuntimeAdvancedUi(terminal: TuiController, operation: RuntimeAdvancedUiOperation): void {
+  if (operation.type === "component") {
+    terminal.setPersistentComponent(
+      operation.slot,
+      `${operation.extensionId}:${operation.key}`,
+      operation.factory,
+      operation.signal,
+    );
+  } else if (operation.type === "working_indicator") {
+    terminal.setKeyedWorkingIndicator(`${operation.extensionId}:global`, operation.value, operation.signal);
+  } else if (operation.type === "hidden_reasoning_label") {
+    terminal.setKeyedHiddenReasoningLabel(`${operation.extensionId}:global`, operation.value, operation.signal);
+  } else if (operation.type === "tool_output_expanded") {
+    terminal.setKeyedToolOutputExpanded(`${operation.extensionId}:global`, operation.expanded, operation.signal);
+  } else {
+    terminal.setNormalizedKeyObserver(
+      `${operation.extensionId}:${operation.key}`,
+      operation.observer,
+      operation.signal,
+    );
+  }
+}
+
 async function chatCommand(argumentsValue: ParsedArguments): Promise<void> {
   await withGracefulTermination(async (termination) => await chatCommandOperation(argumentsValue, termination));
 }
@@ -2327,6 +2421,9 @@ async function chatCommandOperation(
       else startupActionOverflow = true;
     },
   });
+  const themeHotReloader = new ThemeHotReloader({
+    apply: (definition) => terminal.updateCustomTheme(definition),
+  });
   let uninstallEmergencyRecovery: (() => void) | undefined;
   const projectTrust = projectTrustResolver(argumentsValue, paths, terminal);
   if (keybindingsWarning !== undefined) terminal.notify(keybindingsWarning, "warning");
@@ -2347,9 +2444,12 @@ async function chatCommandOperation(
   let shellAbort: AbortController | undefined;
   let branchSummaryAbort: AbortController | undefined;
   let authAbort: AbortController | undefined;
+  let providerManagementAbort: AbortController | undefined;
   let reloadAbort: AbortController | undefined;
   let activeRunAbort: AbortController | undefined;
   let extensionActionAbort: AbortController | undefined;
+  let anthropicUsageWarningShown = false;
+  let anthropicUsageWarningPending = false;
   let threadId = "";
   let branch: string | undefined;
   let extensionSession: { threadId: string; branch?: string } | undefined;
@@ -2367,6 +2467,7 @@ async function chatCommandOperation(
   let defaultProjectTrust: DefaultProjectTrust = "ask";
   let codexTransport: CodexTransportSetting = "auto";
   let providerRetryAttempts = 3;
+  let providerRetryEnabled = true;
   let promptOptions: SystemPromptCliOptions = {};
   let activeRuntimeShortcuts: Array<{ shortcut: string; description?: string }> = [];
   let activeSubmissionOrder = 0;
@@ -2456,6 +2557,7 @@ async function chatCommandOperation(
     shellAbort?.abort(new Error(`shell shortcut interrupted by ${source}`));
     branchSummaryAbort?.abort(new Error(`branch summary interrupted by ${source}`));
     authAbort?.abort(new Error(`authorization interrupted by ${source}`));
+    providerManagementAbort?.abort(new Error(`provider management interrupted by ${source}`));
     reloadAbort?.abort(new Error(`reload interrupted by ${source}`));
     activeRunAbort?.abort(new Error(`run interrupted by ${source}`));
     extensionActionAbort?.abort(new Error(`extension action interrupted by ${source}`));
@@ -2476,11 +2578,14 @@ async function chatCommandOperation(
     uninstallEmergencyRecovery = installInteractiveEmergencyRecovery({
       restoreTerminal: () => terminal.close(),
     });
-    const projectTrusted = await projectTrust.isTrusted(flagString(argumentsValue, "workspace") ?? process.cwd());
+    const startupWorkspace = flagString(argumentsValue, "workspace") ?? process.cwd();
+    const projectTrusted = await projectTrust.isTrusted(startupWorkspace);
+    const preactivatedRuntimeExtensions = await projectTrust.takePreactivatedExtensions(startupWorkspace);
     runtime = await loadRuntime({
       ...runtimeOptions(argumentsValue),
       ...invocationExtensionOptions(argumentsValue),
       ...(projectTrusted ? { projectTrusted: true } : {}),
+      ...(preactivatedRuntimeExtensions === undefined ? {} : { preactivatedRuntimeExtensions }),
       ephemeral,
       extensionRuntime: true,
       recover: !startupAllWorkspaces,
@@ -2688,7 +2793,7 @@ async function chatCommandOperation(
         runtime!.auth,
         (statuses) => target.setModelPickerEmptyMessage(modelCatalogEmptyMessage(statuses)),
         runtime!.providers,
-        { refresh: !flagBoolean(argumentsValue, "offline") },
+        { refresh: !offlineRequested(argumentsValue) },
       ).then(async (models) => {
         if (generation !== modelRefreshGeneration || signal.aborted) return;
         modelCatalog.clear();
@@ -2757,6 +2862,24 @@ async function chatCommandOperation(
         );
       }
     };
+    const warnAnthropicExtraUsage = async (): Promise<void> => {
+      if (
+        anthropicUsageWarningShown || anthropicUsageWarningPending ||
+        runtime!.config.warnings.anthropicExtraUsage !== true || choice?.provider !== "anthropic"
+      ) return;
+      anthropicUsageWarningPending = true;
+      try {
+        const state = await runtime!.auth.state("anthropic");
+        if (choice?.provider !== "anthropic" || state.kind !== "oauth") return;
+        anthropicUsageWarningShown = true;
+        terminal.notify(
+          "Anthropic subscription authentication is active. Usage outside an included plan may be billed under Anthropic's terms; review your Anthropic usage settings. Disable this notice with warnings.anthropicExtraUsage.",
+          "warning",
+        );
+      } finally {
+        anthropicUsageWarningPending = false;
+      }
+    };
     const syncContext = (options: { announceRecovered?: boolean } = {}): void => {
       if (choice === undefined) terminal.clearModelContext();
       runtime!.service.setRuntimeModelSelection({
@@ -2778,9 +2901,12 @@ async function chatCommandOperation(
         ? undefined
         : resolveEffectiveContextBudget(
             selectedModel,
-            runtime!.config.contextTokenBudget === undefined
-              ? {}
-              : { contextTokenBudget: runtime!.config.contextTokenBudget },
+            {
+              ...(runtime!.config.contextTokenBudget === undefined
+                ? {}
+                : { contextTokenBudget: runtime!.config.contextTokenBudget }),
+              reserveTokens: runtime!.config.compaction.reserveTokens,
+            },
           );
       const availableProviders = new Set([...modelCatalog.values()].map((model) => model.provider));
       if (availableProviders.size === 0 && choice !== undefined) availableProviders.add(choice.provider);
@@ -2799,6 +2925,7 @@ async function chatCommandOperation(
         thinking,
       });
       if (choice !== undefined) {
+        void warnAnthropicExtraUsage();
         const selectedProvider = choice.provider;
         const selectedModelId = choice.model;
         void runtime!.auth.state(selectedProvider).then((state) => {
@@ -3080,6 +3207,20 @@ async function chatCommandOperation(
 
     const bindRuntimePresentation = async (): Promise<{ summary: string[]; inventory: StartupInventory }> => {
       const bundle = runtime!.extensions.bundle();
+      terminal.setOperatorPreferences({
+        hideThinkingBlock: runtime!.config.hideThinkingBlock,
+        showCacheMissNotices: runtime!.config.showCacheMissNotices,
+        externalEditor: runtime!.config.externalEditor,
+        treeFilterMode: runtime!.config.treeFilterMode,
+        editorPaddingX: runtime!.config.editorPaddingX,
+        outputPad: runtime!.config.outputPad as 0 | 1,
+        autocompleteMaxVisible: runtime!.config.autocompleteMaxVisible,
+        showHardwareCursor: runtime!.config.showHardwareCursor,
+        showImages: runtime!.config.terminal.showImages,
+        imageWidthCells: runtime!.config.terminal.imageWidthCells,
+        clearOnShrink: runtime!.config.terminal.clearOnShrink,
+        codeBlockIndent: runtime!.config.markdown.codeBlockIndent,
+      });
       doubleEscapeAction = runtime!.config.doubleEscapeAction;
       defaultProjectTrust = parseHarnessConfig(resolveConfig({
         globalPath: runtime!.paths.globalConfig,
@@ -3087,6 +3228,7 @@ async function chatCommandOperation(
       }).value).defaultProjectTrust;
       codexTransport = selectedCodexTransport(runtime!);
       providerRetryAttempts = runtime!.config.providerRetry.maxAttempts;
+      providerRetryEnabled = runtime!.config.providerRetry.enabled !== false;
       terminal.setDoubleEscapeAction(doubleEscapeAction);
       terminal.clearExtensionUi();
       const rendererHost = runtime!.runtimeExtensions;
@@ -3176,13 +3318,13 @@ async function chatCommandOperation(
           ...(prompt.description === undefined ? {} : { detail: prompt.description }),
           keywords: [prompt.extensionId, prompt.argumentHint ?? "", "prompt template"],
         })),
-        ...runtime!.service.skills.map((skill): PickerItem<string> => ({
+        ...(runtime!.config.enableSkillCommands ? runtime!.service.skills.map((skill): PickerItem<string> => ({
           id: `skill:${skill.name}`,
           label: `/skill:${skill.name}`,
           value: `/skill:${skill.name}`,
           ...(skill.description === "" ? {} : { detail: skill.description }),
           keywords: [skill.scope, skill.manifestPath],
-        })),
+        })) : []),
         ...runtime!.runtimeExtensions.commands().map((command): PickerItem<string> => ({
           id: `runtime-command:${command.extensionId}:${command.name}`,
           label: `/${command.name}`,
@@ -3222,9 +3364,8 @@ async function chatCommandOperation(
         }, rendererSignal);
         else if (change === "provider" || change === "provider_auth") scheduleModelRefresh();
       });
-      const selectedTheme = terminal.selectedThemeName();
       terminal.setCustomThemes(bundle.themes.map((theme) => theme.definition));
-      const desiredTheme = runtime!.config.theme ?? selectedTheme;
+      const desiredTheme = runtime!.config.theme ?? "light/dark";
       try {
         terminal.setTheme(desiredTheme);
       } catch {
@@ -3232,7 +3373,14 @@ async function chatCommandOperation(
         terminal.setTheme("dark");
         await persistUiTheme(runtime!.paths, "dark");
       }
+      const watchActiveTheme = (): void => {
+        const selected = bundle.themes.find((theme) =>
+          theme.extensionId === "theme" && theme.name === terminal.selectedThemeName());
+        themeHotReloader.select(selected);
+      };
+      watchActiveTheme();
       terminal.onThemeChange((change) => {
+        watchActiveTheme();
         void rendererHost.dispatch("theme_change", {
           previous: change.previous,
           current: change.current,
@@ -3242,6 +3390,14 @@ async function chatCommandOperation(
       }, rendererSignal);
       for (const operation of runtime!.runtimeExtensions.initialUi()) applyRuntimeUi(terminal, operation);
       runtime!.runtimeExtensions.setUiHandler((operation) => applyRuntimeUi(terminal, operation));
+      runtime!.runtimeExtensions.setAdvancedUiHandler({
+        apply: (operation) => applyRuntimeAdvancedUi(terminal, operation),
+        getToolOutputExpanded: () => terminal.getToolOutputExpanded(),
+      });
+      runtime!.runtimeExtensions.setNativeUiHandler((extensionId, signal) =>
+        createNativeUiHost(terminal, extensionId, signal));
+      runtime!.runtimeExtensions.setUnsafeTerminalHandler((extensionId, signal) =>
+        createUnsafeTerminalHost(terminal, extensionId, signal));
       runtime!.runtimeExtensions.setInteractiveUiHandler((extensionId, signal) =>
         runtimeUi(terminal, extensionId, signal));
       runtime!.runtimeExtensions.setSessionFocusHandler(async (session, signal) => {
@@ -3450,7 +3606,10 @@ async function chatCommandOperation(
       if (deferredSubmissions.size > 0) {
         throw new Error("Wait for deferred submissions to finish before switching workspaces");
       }
-      if (shellAbort !== undefined || branchSummaryAbort !== undefined || authAbort !== undefined || extensionActionAbort !== undefined) {
+      if (
+        shellAbort !== undefined || branchSummaryAbort !== undefined || authAbort !== undefined ||
+        providerManagementAbort !== undefined || extensionActionAbort !== undefined
+      ) {
         throw new Error("Finish or cancel the current shell, extension, authorization, or summary operation before switching workspaces");
       }
       if (terminal.getEditorText().trim() !== "") {
@@ -3596,6 +3755,8 @@ async function chatCommandOperation(
     ) => {
       const before = runtime!.runtimeExtensions.diagnostics().length;
       const result = await runtime!.runtimeExtensions.reduceInput({
+        threadId,
+        ...(branch === undefined ? {} : { branch }),
         text,
         ...(images.length === 0 ? {} : { images: images.map((image) => ({ ...image })) }),
         source: "tui",
@@ -3730,7 +3891,7 @@ async function chatCommandOperation(
         return;
       }
       if (action.type === "paste_image") {
-        await pasteClipboardImage(terminal, catalogAbort.signal);
+        await pasteClipboardImage(terminal, catalogAbort.signal, runtime!.config.images.autoResize);
         return;
       }
       if (action.type === "copy") {
@@ -3905,6 +4066,14 @@ async function chatCommandOperation(
         authAbort.abort(new Error("authorization cancelled from terminal"));
         return;
       }
+      if (providerManagementAbort !== undefined && (
+        action.type === "cancel" ||
+        (action.type === "command" && action.item.value === "/cancel") ||
+        (action.type === "submit" && action.text.trim() === "/cancel")
+      )) {
+        providerManagementAbort.abort(new Error("provider management cancelled from terminal"));
+        return;
+      }
       if (extensionActionAbort !== undefined && (
         action.type === "cancel" ||
         (action.type === "command" && action.item.value === "/cancel") ||
@@ -3963,10 +4132,13 @@ async function chatCommandOperation(
       terminal.notify("Some startup input was rejected after the 64-action safety limit", "warning");
     }
 
-    terminal.setStartup(
-      formatCompactStartupReport(keybindings, choice !== undefined, presentation.inventory),
-      formatStartupReport(keybindings, choice !== undefined, presentation.inventory),
-    );
+    if (runtime.config.quietStartup && !flagBoolean(argumentsValue, "verbose")) terminal.clearStartup();
+    else {
+      terminal.setStartup(
+        formatCompactStartupReport(keybindings, choice !== undefined, presentation.inventory),
+        formatStartupReport(keybindings, choice !== undefined, presentation.inventory),
+      );
+    }
     if (flagBoolean(argumentsValue, "verbose")) terminal.toggleTool();
     while (true) {
       let submission: string;
@@ -4036,6 +4208,7 @@ async function chatCommandOperation(
               process.env,
               (progress) => terminal.setTransientStatus(shellShortcutProgressStatus(selectedCommand, progress)),
               runtime.config.shellPath,
+              runtime.config.shellCommandPrefix,
             );
           signal.throwIfAborted();
           if (!hidden) {
@@ -4194,11 +4367,13 @@ async function chatCommandOperation(
       }
       if (line === "/tree") {
         const selected = await pickTimelineEvent(runtime, terminal, threadId, branch);
-        const summaryMode = await terminal.choose("Summarize abandoned branch?", [
-          { label: "No summary", detail: "Move without adding model-generated context", value: "none" as const },
-          { label: "Summarize", detail: "Attach a bounded continuation note at the selected point", value: "summary" as const },
-          { label: "Summarize with focus", detail: "Add a short operator instruction for the summary", value: "custom" as const },
-        ]);
+        const summaryMode = runtime.config.branchSummary.skipPrompt
+          ? "none" as const
+          : await terminal.choose("Summarize abandoned branch?", [
+              { label: "No summary", detail: "Move without adding model-generated context", value: "none" as const },
+              { label: "Summarize", detail: "Attach a bounded continuation note at the selected point", value: "summary" as const },
+              { label: "Summarize with focus", detail: "Add a short operator instruction for the summary", value: "custom" as const },
+            ]);
         const summarize = summaryMode !== "none";
         if (summarize) requireModelSelection(choice);
         const summaryInstructions = summaryMode === "custom"
@@ -4300,6 +4475,53 @@ async function chatCommandOperation(
           : `${result.removedStored ? "Removed the stored credential" : "No stored credential was present"} for ${provider}; ${remaining}.`);
         continue;
       }
+      if (line === "/llama") {
+        const adapter = runtime.providers.get("llama.cpp");
+        if (!(adapter instanceof LlamaRouterAdapter)) {
+          throw new Error("The llama.cpp provider is currently replaced; restore its router adapter before using /llama");
+        }
+        const controller = new AbortController();
+        providerManagementAbort = controller;
+        terminal.setInterruptHandler(() => controller.abort(new Error("provider management cancelled from terminal")));
+        try {
+          const result = await manageLlamaRouter({
+            terminal,
+            client: adapter.client,
+            signal: AbortSignal.any([catalogAbort.signal, runtime.generationSignal, controller.signal]),
+            onStatus(message, progress) {
+              if (message === undefined) {
+                terminal.setTransientStatus();
+                return;
+              }
+              const ratio = progress?.ratio === undefined ? "" : ` ${Math.round(progress.ratio * 100)}%`;
+              const detail = progress?.detail === undefined ? "" : ` · ${progress.detail}`;
+              terminal.setTransientStatus(`${message}${ratio}${detail} · Esc cancels`);
+            },
+          });
+          runtime.providers.invalidateModels("llama.cpp");
+          for (const key of modelCatalog.keys()) if (key.startsWith("llama.cpp\u0000")) modelCatalog.delete(key);
+          if (choice?.provider === "llama.cpp" && result.unloaded.includes(choice.model)) {
+            choice = undefined;
+            terminal.notify("The selected local model was unloaded; choose another model.", "warning");
+          }
+          syncContext();
+          scheduleModelRefresh();
+          const changes = [
+            result.loaded.length === 0 ? undefined : `loaded ${result.loaded.length}`,
+            result.unloaded.length === 0 ? undefined : `unloaded ${result.unloaded.length}`,
+            result.downloaded.length === 0 ? undefined : `downloaded ${result.downloaded.length}`,
+          ].filter((value): value is string => value !== undefined);
+          terminal.notify(changes.length === 0 ? "Local model manager closed" : `Local models: ${changes.join(" · ")}`);
+        } catch (error) {
+          if (controller.signal.aborted) throw new TuiSelectionCancelledError();
+          throw error;
+        } finally {
+          if (providerManagementAbort === controller) providerManagementAbort = undefined;
+          terminal.setInterruptHandler(undefined);
+          terminal.setTransientStatus();
+        }
+        continue;
+      }
       if (line === "/model" || line.startsWith("/model ")) {
         const requested = line.startsWith("/model ") ? line.slice(7).trim() : undefined;
         if (terminal.mode === "full") {
@@ -4389,6 +4611,11 @@ async function chatCommandOperation(
       }
       if (line === "/resources") {
         terminal.notify(formatResourceCatalogReport(await runtime.service.resourceCatalog()));
+        continue;
+      }
+      if (line === "/changelog") {
+        const loaded = await readFileBounded(fileURLToPath(new URL("../../CHANGELOG.md", import.meta.url)), 256 * 1024);
+        terminal.notify(loaded.data.toString("utf8") + (loaded.truncated ? "\n\n[Changelog truncated at 256 KiB]" : ""));
         continue;
       }
       if (line === "/compact" || line.startsWith("/compact ")) {
@@ -4499,11 +4726,14 @@ async function chatCommandOperation(
         terminal.notify(reloadMessage);
         continue;
       }
-      if (line === "/export" || line.startsWith("/export ")) {
-        const request = parseInteractiveExportRequest(line.startsWith("/export ") ? line.slice(8) : "");
+      if (line === "/export" || line.startsWith("/export ") || line === "/share" || line.startsWith("/share ")) {
+        const share = line === "/share" || line.startsWith("/share ");
+        const request = share
+          ? { redact: true, pathArgument: line.startsWith("/share ") ? line.slice(7).trimStart() : "" }
+          : parseInteractiveExportRequest(line.startsWith("/export ") ? line.slice(8) : "");
         const requested = request.pathArgument === ""
           ? ""
-          : parseInteractivePathArgument(request.pathArgument, "/export");
+          : parseInteractivePathArgument(request.pathArgument, share ? "/share" : "/export");
         const outputPath = expandPath(
           requested || (request.redact ? "rigyn-share.html" : `rigyn-${threadId}.html`),
           runtime.workspace,
@@ -4523,9 +4753,23 @@ async function chatCommandOperation(
             : lower.endsWith(".md")
               ? exportThreadMarkdown(runtime.store, threadId, branch)
               : exportThreadHtml(runtime.store, threadId, branch);
+        if (share && request.pathArgument === "") {
+          terminal.setInputBlocked("Creating a secret GitHub gist from the redacted session...", "share");
+          try {
+            const gistUrl = await createRedactedSessionGist(
+              data,
+              runtime.workspace,
+              AbortSignal.any([catalogAbort.signal, AbortSignal.timeout(65_000)]),
+            );
+            terminal.notify(`Share URL: ${gistUrl}\nThe uploaded session was redacted; review the gist before distributing the link.`);
+          } finally {
+            terminal.setInputBlocked();
+          }
+          continue;
+        }
         await mkdir(dirname(outputPath), { recursive: true });
         await writeFile(outputPath, data, { encoding: "utf8", flag: "wx", mode: 0o600 });
-        terminal.notify(`Exported session to ${outputPath}`);
+        terminal.notify(`${share ? "Created redacted share copy" : "Exported session"} at ${outputPath}`);
         continue;
       }
       if (line === "/import" || line.startsWith("/import ")) {
@@ -4587,6 +4831,13 @@ async function chatCommandOperation(
             values: ["ask", "always", "never"],
           },
           {
+            id: "provider-retry-enabled",
+            label: "Automatic provider retry",
+            description: "Retry transient provider failures before any unsafe partial response",
+            value: String(providerRetryEnabled),
+            values: ["true", "false"],
+          },
+          {
             id: "provider-retry-attempts",
             label: "Provider retry attempts",
             description: "Maximum safe provider attempts per response; changes apply after /reload",
@@ -4639,8 +4890,12 @@ async function chatCommandOperation(
             id: "theme",
             label: "Theme",
             description: "Color theme for the interface",
-            value: terminal.selectedThemeName(),
-            values: terminal.themeNames(),
+            value: terminal.selectedThemeSetting(),
+            values: [...new Set([
+              terminal.selectedThemeSetting(),
+              "light/dark",
+              ...terminal.themeNames(),
+            ])],
           },
         ];
         if (terminal.mode === "full") {
@@ -4652,6 +4907,10 @@ async function chatCommandOperation(
             } else if (setting.id === "default-project-trust") {
               defaultProjectTrust = value as DefaultProjectTrust;
               await persistUiPreferences(runtime!.paths, { defaultProjectTrust });
+            } else if (setting.id === "provider-retry-enabled") {
+              providerRetryEnabled = value === "true";
+              runtime!.service.setAutoRetryEnabled(providerRetryEnabled);
+              await persistProviderRetryEnabled(runtime!, providerRetryEnabled);
             } else if (setting.id === "provider-retry-attempts") {
               providerRetryAttempts = Number(value);
               await persistProviderRetryAttempts(runtime!, providerRetryAttempts);
@@ -4695,6 +4954,10 @@ async function chatCommandOperation(
           } else if (selected.id === "default-project-trust") {
             defaultProjectTrust = value as DefaultProjectTrust;
             await persistUiPreferences(runtime.paths, { defaultProjectTrust });
+          } else if (selected.id === "provider-retry-enabled") {
+            providerRetryEnabled = value === "true";
+            runtime.service.setAutoRetryEnabled(providerRetryEnabled);
+            await persistProviderRetryEnabled(runtime, providerRetryEnabled);
           } else if (selected.id === "provider-retry-attempts") {
             providerRetryAttempts = Number(value);
             await persistProviderRetryAttempts(runtime, providerRetryAttempts);
@@ -4732,7 +4995,7 @@ async function chatCommandOperation(
         if (prompt === undefined) throw new Error(`Unknown extension prompt: ${id}`);
         submission = renderExtensionPrompt(prompt, input.join(" "));
         terminal.notify(`Expanded prompt ${id} from extension ${prompt.extensionId}`);
-      } else if (line.startsWith("/skill:")) {
+      } else if (runtime.config.enableSkillCommands && line.startsWith("/skill:")) {
         const separator = line.indexOf(" ");
         const name = line.slice(7, separator < 0 ? undefined : separator);
         const skill = runtime.service.skills.find((entry) => entry.name === name);
@@ -4812,7 +5075,12 @@ async function chatCommandOperation(
         submission = inputResult.text;
       }
       requireModelSelection(choice);
-      const expandedPrompt = await expandPromptReferences(submission, runtime.workspace, catalogAbort.signal);
+      const expandedPrompt = await expandPromptReferences(
+        submission,
+        runtime.workspace,
+        catalogAbort.signal,
+        runtime.config.images.autoResize,
+      );
       const prompt = inputResult.action === "transform"
         ? expandedPrompt.text
         : attachmentPrompt(expandedPrompt.text, submittedImages);
@@ -4828,6 +5096,10 @@ async function chatCommandOperation(
       const runController = new AbortController();
       activeRunAbort = runController;
       terminal.setInterruptHandler(() => {
+        if (runtime!.service.cancelRetry(threadId)) {
+          terminal.notify("Scheduled retry cancelled");
+          return;
+        }
         restoreQueueAfterCancellation = true;
         runtime!.service.cancel(threadId, "cancelled from terminal");
         runController.abort(new Error("run cancelled from terminal"));
@@ -5026,10 +5298,12 @@ async function chatCommandOperation(
     modelRefreshAbort?.abort(new Error("Terminal session closed"));
     fileRefreshAbort?.abort(new Error("Terminal session closed"));
     extensionActionAbort?.abort(new Error("Terminal session closed"));
+    providerManagementAbort?.abort(new Error("Terminal session closed"));
     terminal.setInterruptHandler(undefined);
     catalogAbort.abort(new Error("Terminal session closed"));
     extensionSessionPublicationCleanup?.();
     extensionSessionPublicationCleanup = undefined;
+    themeHotReloader.close();
     await terminal.drainInput().catch(() => undefined);
     terminal.close();
     await actionQueue.catch(() => undefined);
@@ -5080,6 +5354,36 @@ function openBrowser(url: URL, disabled: boolean): void {
   child.unref();
 }
 
+async function createRedactedSessionGist(html: string, workspace: string, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const executable = await resolveExecutable(process.platform === "win32" ? "gh.exe" : "gh");
+  if (executable === undefined) {
+    throw new Error("/share requires the GitHub CLI (`gh`). Install it and run `gh auth login`, or use `/share FILE` for a local redacted copy");
+  }
+  const directory = await mkdtemp(join(tmpdir(), "rigyn-share-"));
+  const file = join(directory, "rigyn-session.html");
+  try {
+    await writeFile(file, html, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const outcome = await runProcess({
+      argv: [executable, "gist", "create", "--public=false", "--desc", "Rigyn redacted session", file],
+      cwd: workspace,
+      timeoutMs: 60_000,
+      outputLimitBytes: 64 * 1024,
+    }, signal);
+    if (outcome.cancelled) throw signal.reason ?? new Error("Session sharing cancelled");
+    if (outcome.timedOut) throw new Error("GitHub gist creation timed out after 60 seconds");
+    if (outcome.exitCode !== 0) {
+      const detail = defaultSecretRedactor.redact(outcome.stderr.toString("utf8").trim()).slice(0, 8 * 1024);
+      throw new Error(`GitHub gist creation failed${detail === "" ? "" : `: ${detail}`}`);
+    }
+    const url = outcome.stdout.toString("utf8").trim().split(/\s/u).find((value) => /^https:\/\/gist\.github\.com\//u.test(value));
+    if (url === undefined) throw new Error("GitHub CLI did not return a gist URL");
+    return url;
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 async function listModelsFlagCommand(argumentsValue: ParsedArguments): Promise<void> {
   const runtime = await loadRuntime({
     ...runtimeOptions(argumentsValue),
@@ -5099,7 +5403,7 @@ async function listModelsFlagCommand(argumentsValue: ParsedArguments): Promise<v
         && state.error === undefined
       )) available.push(adapter.id);
     }
-    const offline = flagBoolean(argumentsValue, "offline");
+    const offline = offlineRequested(argumentsValue);
     const catalogs = await Promise.all(available.map(async (provider) => {
       try {
         const signal = AbortSignal.timeout(30_000);
@@ -5191,8 +5495,9 @@ async function effectiveConfig(
     ...config,
     defaultProvider: config.defaultProvider ?? "openai",
     defaultModel: config.defaultModel ?? null,
-    theme: config.theme ?? "dark",
+    theme: config.theme ?? "light/dark",
     thinking: config.thinking ?? "off",
+    thinkingBudgets: config.thinkingBudgets ?? null,
     databasePath: expandPath(config.databasePath ?? paths.database, workspace),
     shellPath,
     npmCommand: config.npmCommand ?? ["npm"],

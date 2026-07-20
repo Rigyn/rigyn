@@ -258,6 +258,59 @@ test("extension session APIs bind namespaces, snapshot payloads, and reconstruct
   }), /expectedEventId/u);
 });
 
+test("extension message reads page backward with opaque namespace-bound cursors", async (t) => {
+  const { root, store, owner, foreign } = await fixture(t);
+  const thread = store.createThread({ threadId: "extension-message-pages", workspaceRoot: root });
+  for (let index = 1; index <= 5; index += 1) {
+    await owner.session.appendMessage({
+      threadId: thread.threadId,
+      schemaVersion: 1,
+      kind: "paged",
+      payload: { index },
+      modelContext: false,
+      transcript: false,
+    });
+  }
+  const latest = await owner.session.readMessages({
+    threadId: thread.threadId,
+    schemaVersion: 1,
+    kind: "paged",
+    limit: 2,
+  });
+  assert.deepEqual(latest.map((entry: any) => entry.payload.index), [4, 5]);
+  const middle = await owner.session.readMessages({
+    threadId: thread.threadId,
+    schemaVersion: 1,
+    kind: "paged",
+    limit: 2,
+    beforeEventId: latest[0].eventId,
+  });
+  assert.deepEqual(middle.map((entry: any) => entry.payload.index), [2, 3]);
+  const oldest = await owner.session.readMessages({
+    threadId: thread.threadId,
+    schemaVersion: 1,
+    kind: "paged",
+    limit: 2,
+    beforeEventId: middle[0].eventId,
+  });
+  assert.deepEqual(oldest.map((entry: any) => entry.payload.index), [1]);
+
+  const foreignMessage = await foreign.session.appendMessage({
+    threadId: thread.threadId,
+    schemaVersion: 1,
+    kind: "paged",
+    payload: null,
+    modelContext: false,
+    transcript: false,
+  });
+  await assert.rejects(owner.session.readMessages({
+    threadId: thread.threadId,
+    schemaVersion: 1,
+    kind: "paged",
+    beforeEventId: foreignMessage.eventId,
+  }), /cursor is not reachable/u);
+});
+
 test("extension state compare-and-append prevents cross-host lost updates and resolves canonical branches", async (t) => {
   const { root, storeA, apiA, apiB } = await crossHostFixture(t);
   const thread = storeA.createThread({ threadId: "extension-state-cas-thread", workspaceRoot: root });

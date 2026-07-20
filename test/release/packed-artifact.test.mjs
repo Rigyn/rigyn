@@ -43,6 +43,7 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/getting-started.md",
   "docs/install.md",
   "docs/live-provider-testing.md",
+  "docs/modes.md",
   "docs/packages.md",
   "docs/package-gallery.md",
   "docs/platforms.md",
@@ -51,6 +52,7 @@ const ALLOWED_DOCUMENTS = new Set([
   "docs/releasing.md",
   "docs/resource-catalog.md",
   "docs/rpc.md",
+  "docs/sdk.md",
   "docs/sessions.md",
   "docs/session-export.md",
   "docs/troubleshooting.md",
@@ -69,6 +71,7 @@ const PUBLIC_LAYER_DIRECTORIES = [
   "process",
   "prompts",
   "providers",
+  "sdk",
   "service",
   "storage",
   "testing",
@@ -397,6 +400,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     RIGYN_INSTALL_DIR: paths.installRoot,
     npm_config_bin_links: "false",
     npm_config_global: "true",
+    npm_config_offline: "true",
     npm_config_omit: "dev optional",
   };
   const installerEnvironment = {

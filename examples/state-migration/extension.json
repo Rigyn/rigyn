@@ -4,7 +4,7 @@
   "name": "State migration example",
   "version": "0.1.0",
   "description": "A compare-and-append migration from durable state schema 1 to schema 2.",
-  "compatibility": { "hostVersion": ">=0.1.0 <0.3.0" },
+  "compatibility": { "hostVersion": ">=0.1.0 <0.4.0" },
   "contributions": {
     "runtime": [{ "path": "runtime/index.mjs" }]
   }

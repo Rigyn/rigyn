@@ -18,6 +18,8 @@ export type SniffedImageMediaType =
   | "image/tiff";
 
 export interface ImagePreprocessOptions {
+  /** Preserve dimensions up to the compiled 16384-pixel edge guardrail. */
+  autoResize?: boolean;
   maxWidth?: number;
   maxHeight?: number;
   maxOutputBytes?: number;
@@ -109,9 +111,14 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 }
 
 function normalizeOptions(options: ImagePreprocessOptions | undefined): NormalizedOptions {
+  if (options?.autoResize !== undefined && typeof options.autoResize !== "boolean") {
+    throw new TypeError("autoResize must be a boolean");
+  }
+  const defaultMaxWidth = options?.autoResize === false ? 16_384 : DEFAULT_PREPROCESS_MAX_WIDTH;
+  const defaultMaxHeight = options?.autoResize === false ? 16_384 : DEFAULT_PREPROCESS_MAX_HEIGHT;
   return {
-    maxWidth: boundedInteger(options?.maxWidth, DEFAULT_PREPROCESS_MAX_WIDTH, 1, 16_384, "Maximum image width"),
-    maxHeight: boundedInteger(options?.maxHeight, DEFAULT_PREPROCESS_MAX_HEIGHT, 1, 16_384, "Maximum image height"),
+    maxWidth: boundedInteger(options?.maxWidth, defaultMaxWidth, 1, 16_384, "Maximum image width"),
+    maxHeight: boundedInteger(options?.maxHeight, defaultMaxHeight, 1, 16_384, "Maximum image height"),
     maxOutputBytes: boundedInteger(
       options?.maxOutputBytes,
       DEFAULT_PREPROCESS_OUTPUT_BYTES,

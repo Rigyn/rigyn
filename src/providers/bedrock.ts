@@ -1,5 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
-import type { JsonValue } from "../core/json.js";
+import { isJsonValue, type JsonValue } from "../core/json.js";
 import type {
   AdapterEvent,
   FinishReason,
@@ -19,6 +19,7 @@ import { stringifyProviderJson } from "./json.js";
 import { providerWireRequest } from "./messages.js";
 import { toolResultText } from "./tool-results.js";
 import { normalizeUsage } from "./usage.js";
+import type { ProviderWireOperation, ProviderWireTransportHost } from "./wire.js";
 import { baseModelCompatibility, modelEvidence, providerModalities } from "./model-metadata.js";
 import {
   asArray,
@@ -68,6 +69,7 @@ export interface BedrockConfig {
   controlEndpoint?: string;
   headers?: HeadersInit;
   fetch?: FetchLike;
+  wire?: ProviderWireTransportHost;
   now?: () => Date;
   promptCache?: "off" | "5m" | "1h";
 }
@@ -356,15 +358,16 @@ export class BedrockAdapter implements ProviderAdapter {
 
   async #signedFetch(request: Request, target: BedrockSignerContext["target"], signal: AbortSignal): Promise<Response> {
     const context: BedrockSignerContext = { region: this.#config.region, service: "bedrock", target };
+    const operation = this.#config.wire?.begin(this.id);
     let signed: Request;
     if (this.#config.signer !== undefined) {
-      signed = await this.#config.signer(request, context);
+      signed = await this.#config.signer(await prepareBedrockWireRequest(request, operation, signal), context);
     } else {
       const bearerToken = await resolveToken(this.#config.bearerToken, signal);
       if (bearerToken !== undefined) {
         const headers = new Headers(request.headers);
         headers.set("authorization", `Bearer ${bearerToken}`);
-        signed = new Request(request, { headers });
+        signed = await prepareBedrockWireRequest(new Request(request, { headers }), operation, signal);
       } else {
         const credentials = await resolveCredentials(this.#config.credentials, signal);
         if (credentials === undefined) {
@@ -373,11 +376,52 @@ export class BedrockAdapter implements ProviderAdapter {
             "authentication",
           );
         }
-        signed = await signAwsRequest(request, credentials, context, this.#config.now?.() ?? new Date());
+        const prepared = await prepareBedrockWireRequest(request, operation, signal);
+        signed = await signAwsRequest(prepared, credentials, context, this.#config.now?.() ?? new Date());
       }
     }
-    return await this.#fetch(new Request(signed, { redirect: "error" }));
+    const response = await this.#fetch(new Request(signed, { redirect: "error" }));
+    await operation?.observe({
+      url: response.url || signed.url,
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers),
+    }, signal);
+    return response;
   }
+}
+
+async function prepareBedrockWireRequest(
+  request: Request,
+  operation: ProviderWireOperation | undefined,
+  signal: AbortSignal,
+): Promise<Request> {
+  if (operation?.active !== true) return request;
+  let body: JsonValue | undefined;
+  if (request.body !== null) {
+    const text = await request.clone().text();
+    if (text !== "") {
+      const parsed: unknown = JSON.parse(text);
+      if (!isJsonValue(parsed)) throw new TypeError("Bedrock request body must be JSON");
+      body = parsed;
+    }
+  }
+  const prepared = await operation.intercept({
+    url: request.url,
+    method: request.method,
+    headers: request.headers,
+    ...(body === undefined ? {} : { body }),
+  }, signal);
+  if (!prepared.bodyChanged && !prepared.headersChanged && !prepared.urlChanged) return request;
+  if (prepared.bodyChanged) prepared.headers.delete("content-length");
+  return new Request(prepared.url, {
+    method: request.method,
+    headers: prepared.headers,
+    signal: request.signal,
+    redirect: request.redirect,
+    ...(prepared.bodyChanged ? { body: stringifyProviderJson(prepared.body!) } : {}),
+    ...(!prepared.bodyChanged && request.body !== null ? { body: request.body, duplex: "half" } : {}),
+  });
 }
 
 export async function signAwsRequest(

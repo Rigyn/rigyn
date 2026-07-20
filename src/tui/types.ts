@@ -2,7 +2,7 @@ import type { EventEnvelope, RunState } from "../core/events.js";
 import type { JsonValue } from "../core/json.js";
 import type { ImageBlock, ModelInfo, NormalizedUsage } from "../core/types.js";
 import type { ImageCoordinateMetadata } from "../images/preprocess.js";
-import type { RuntimeUiBlock, RuntimeUiOverlayOptions } from "./components.js";
+import type { RuntimeUiBlock, RuntimeUiKeyEvent, RuntimeUiOverlayOptions } from "./components.js";
 import type { Keybindings } from "./keybindings.js";
 import type { TerminalImagePlacement, TerminalImageProtocol, TranscriptImage } from "./terminal-image.js";
 
@@ -10,6 +10,14 @@ export type TuiMode = "full" | "classic" | "accessible";
 export type BuiltinThemeName = "dark" | "light" | "mono";
 export type ThemeName = BuiltinThemeName | (string & {});
 export type PickerKind = "command" | "model" | "provider" | "session" | "file" | "generic";
+export type TuiPersistentComponentSlot =
+  | "header"
+  | "footer"
+  | "widget"
+  | "widget-above"
+  | "widget-below"
+  | "header-replacement"
+  | "footer-replacement";
 
 export interface TuiInput extends NodeJS.ReadableStream {
   isTTY?: boolean;
@@ -244,11 +252,19 @@ export type TuiEditorMiddleware = (
   signal: AbortSignal,
 ) => TuiEditorMiddlewareResult | void;
 
+/** Receives sanitized, decoded key events without taking ownership of input. */
+export type TuiNormalizedKeyObserver = (event: Readonly<RuntimeUiKeyEvent>) => void;
+
+export interface TuiWorkingIndicatorOptions {
+  readonly frames: readonly string[];
+  readonly intervalMs: number;
+}
+
 export interface TuiThemeChange {
   previous: ThemeName;
   current: ThemeName;
   available: readonly string[];
-  reason: "selection" | "catalog";
+  reason: "selection" | "catalog" | "extension" | "terminal";
 }
 
 export type TuiCommandCompletionProvider = (
@@ -269,6 +285,22 @@ export interface TuiControllerOptions {
   handleSignals?: boolean;
   onAction?: (action: TuiAction) => void;
   doubleEscapeAction?: "tree" | "fork" | "none";
+  operatorPreferences?: Partial<TuiOperatorPreferences>;
+}
+
+export interface TuiOperatorPreferences {
+  hideThinkingBlock: boolean;
+  showCacheMissNotices: boolean;
+  externalEditor: string | undefined;
+  treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+  editorPaddingX: number;
+  outputPad: 0 | 1;
+  autocompleteMaxVisible: number | undefined;
+  showHardwareCursor: boolean;
+  showImages: boolean;
+  imageWidthCells: number;
+  clearOnShrink: boolean;
+  codeBlockIndent: string;
 }
 
 export interface TranscriptEntry {
@@ -328,6 +360,14 @@ export interface TuiViewState {
   queuedMessages?: readonly QueuedMessage[];
   inputImages?: readonly TuiInputImageSummary[];
   runtimeComponent?: RuntimeUiBlock;
+  runtimeHeaderComponents?: readonly RuntimeUiBlock[];
+  runtimeFooterComponents?: readonly RuntimeUiBlock[];
+  runtimeWidgetComponents?: readonly RuntimeUiBlock[];
+  runtimeWidgetBelowComponents?: readonly RuntimeUiBlock[];
+  runtimeHeaderReplacement?: RuntimeUiBlock;
+  runtimeFooterReplacement?: RuntimeUiBlock;
+  workingIndicator?: TuiWorkingIndicatorOptions;
+  hiddenReasoningLabel?: string;
   runtimeOverlay?: {
     block: RuntimeUiBlock;
     options: RuntimeUiOverlayOptions;
@@ -354,6 +394,7 @@ export interface TuiViewState {
     hints?: readonly string[];
     status?: string;
     emptyMessage?: string;
+    maxVisible?: number;
   };
 }
 

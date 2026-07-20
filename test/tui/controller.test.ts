@@ -33,6 +33,7 @@ function fullController(options: {
   alternateScreen?: boolean;
   semanticZones?: boolean;
   terminal?: "kitty" | "iterm2" | "vscode";
+  theme?: string;
   doubleEscapeAction?: "tree" | "fork" | "none";
 } = {}) {
   const input = new FakeInput();
@@ -54,6 +55,7 @@ function fullController(options: {
     handleSignals: options.signals !== undefined,
     ...(options.actions === undefined ? {} : { onAction: (action) => { options.actions?.push(action); } }),
     ...(options.doubleEscapeAction === undefined ? {} : { doubleEscapeAction: options.doubleEscapeAction }),
+    ...(options.theme === undefined ? {} : { theme: options.theme }),
   });
   return { input, output, controller };
 }
@@ -111,6 +113,28 @@ test("full TUI defaults to an inline surface with raw mode, Unicode editing, and
   assert.equal(input.isPaused(), true);
   assert.doesNotMatch(output.text, /\u001b\[\?1049l/u);
   assert.match(output.text, /\u001b\[\?2004l/u);
+});
+
+test("paired themes follow terminal color reports and disable notifications after a fixed selection", () => {
+  const { input, output, controller } = fullController({ theme: "light/dark" });
+  const changes: string[] = [];
+  controller.onThemeChange((change) => changes.push(`${change.reason}:${change.current}`));
+  controller.start();
+  assert.equal(controller.selectedThemeName(), "dark");
+  assert.match(output.text, /\u001b\[\?2031h/u);
+  assert.match(output.text, /\u001b\[\?996n/u);
+  assert.match(output.text, /\u001b\]11;\?\u0007/u);
+
+  input.write("\u001b[?997;2n");
+  assert.equal(controller.selectedThemeName(), "light");
+  assert.deepEqual(changes, ["terminal:light"]);
+
+  controller.setTheme("dark");
+  assert.equal(controller.selectedThemeSetting(), "dark");
+  assert.match(output.text, /\u001b\[\?2031l/u);
+  input.write("\u001b[?997;2n");
+  assert.equal(controller.selectedThemeName(), "dark");
+  controller.close();
 });
 
 test("startup content is present in the first full-screen frame", () => {

@@ -1,6 +1,6 @@
 import type { JsonValue } from "./json.js";
 import type { MessageId } from "./ids.js";
-import type { CanonicalMessage } from "./types.js";
+import type { CanonicalMessage, ImageBlock } from "./types.js";
 
 export const MAX_EXTENSION_ENTRY_PAYLOAD_BYTES = 256 * 1024;
 export const MAX_EXTENSION_ENTRY_TEXT_BYTES = 128 * 1024;
@@ -22,6 +22,7 @@ export interface ExtensionStateEvent {
 export type ExtensionMessageModelContext = false | {
   role: "system" | "user";
   text: string;
+  images?: ImageBlock[];
 };
 
 export type ExtensionMessageTranscript = false | {
@@ -217,11 +218,39 @@ export function snapshotExtensionPayload(value: unknown): JsonValue {
 function modelContext(value: unknown): ExtensionMessageModelContext {
   if (value === false) return false;
   const record = dataRecord(value, "Extension modelContext");
-  exact(record, ["role", "text"], "Extension modelContext");
+  exact(record, ["role", "text", "images"], "Extension modelContext");
   if (record.role !== "system" && record.role !== "user") throw new Error("Extension modelContext role is invalid");
+  let images: ImageBlock[] | undefined;
+  if (record.images !== undefined) {
+    if (!Array.isArray(record.images) || record.images.length < 1 || record.images.length > 8) {
+      throw new Error("Extension modelContext images must contain 1 to 8 images");
+    }
+    let aggregate = 0;
+    images = record.images.map((value, index): ImageBlock => {
+      const image = dataRecord(value, `Extension modelContext images[${index}]`);
+      exact(image, ["type", "mediaType", "data", "url"], `Extension modelContext images[${index}]`);
+      if (image.type !== "image" || typeof image.mediaType !== "string" || image.mediaType.trim() === "") {
+        throw new Error(`Extension modelContext images[${index}] is invalid`);
+      }
+      if ((image.data === undefined) === (image.url === undefined)) {
+        throw new Error(`Extension modelContext images[${index}] must contain exactly one of data or url`);
+      }
+      const mediaType = text(image.mediaType, `Extension modelContext images[${index}].mediaType`);
+      const data = image.data === undefined ? undefined : text(image.data, `Extension modelContext images[${index}].data`);
+      const url = image.url === undefined ? undefined : text(image.url, `Extension modelContext images[${index}].url`);
+      aggregate += Buffer.byteLength(data ?? url ?? "", "utf8");
+      if (aggregate > MAX_EXTENSION_ENTRY_PAYLOAD_BYTES) {
+        throw new Error(`Extension modelContext images exceed ${MAX_EXTENSION_ENTRY_PAYLOAD_BYTES} bytes`);
+      }
+      return { type: "image", mediaType, ...(data === undefined ? {} : { data }), ...(url === undefined ? {} : { url }) };
+    });
+  }
+  const selectedText = text(record.text, "Extension modelContext text");
+  if (selectedText === "" && images === undefined) throw new Error("Extension modelContext must contain text or images");
   return Object.assign(Object.create(null), {
     role: record.role,
-    text: text(record.text, "Extension modelContext text"),
+    text: selectedText,
+    ...(images === undefined ? {} : { images }),
   }) as ExtensionMessageModelContext;
 }
 
@@ -293,7 +322,10 @@ export function extensionMessageContext(
   return {
     id: event.messageId,
     role: event.modelContext.role,
-    content: [{ type: "text", text: event.modelContext.text }],
+    content: [
+      ...(event.modelContext.text === "" ? [] : [{ type: "text" as const, text: event.modelContext.text }]),
+      ...(event.modelContext.images?.map((image) => ({ ...image })) ?? []),
+    ],
     createdAt: timestamp,
   };
 }

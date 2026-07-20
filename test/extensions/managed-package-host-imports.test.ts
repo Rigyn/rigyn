@@ -101,18 +101,26 @@ export default function activate() {}
     return;
   }
   const imports = `
+import { estimateTextTokens } from "rigyn/context";
+import { isNormalizedUsage } from "rigyn/core";
 import { defineRuntimeTool } from "rigyn/extensions";
+import { sniffImageMediaType } from "rigyn/images";
+import { createNetworkTransport } from "rigyn/net";
+import { resolveExecutable } from "rigyn/process";
+import { instructionMessage } from "rigyn/prompts";
 import { defineProviderAdapter } from "rigyn/providers";
+import { createScriptedProvider } from "rigyn/testing";
+import { sha256 } from "rigyn/tools";
 import { uiText } from "rigyn/tui";
 `;
   await writeFile(join(source, "runtime", "esm.mjs"), `${imports}
-if ([defineRuntimeTool, defineProviderAdapter, uiText].some((value) => typeof value !== "function")) throw new Error("ESM host imports are invalid");
+if ([estimateTextTokens, isNormalizedUsage, defineRuntimeTool, sniffImageMediaType, createNetworkTransport, resolveExecutable, instructionMessage, defineProviderAdapter, createScriptedProvider, sha256, uiText].some((value) => typeof value !== "function")) throw new Error("ESM host imports are invalid");
 export default function activate(api) {
   api.registerCommand({ name: "host-import-esm", execute() {} });
 }
 `);
   await writeFile(join(source, "runtime", "typescript.ts"), `${imports}
-const imports: Array<unknown> = [defineRuntimeTool, defineProviderAdapter, uiText];
+const imports: Array<unknown> = [estimateTextTokens, isNormalizedUsage, defineRuntimeTool, sniffImageMediaType, createNetworkTransport, resolveExecutable, instructionMessage, defineProviderAdapter, createScriptedProvider, sha256, uiText];
 if (imports.some((value) => typeof value !== "function")) throw new Error("TypeScript host imports are invalid");
 export default function activate(api: { registerCommand(command: { name: string; execute(): void }): void }) {
   api.registerCommand({ name: "host-import-typescript", execute() {} });
@@ -120,10 +128,18 @@ export default function activate(api: { registerCommand(command: { name: string;
 `);
   await writeFile(join(source, "runtime", "commonjs", "package.json"), `${JSON.stringify({ type: "commonjs" })}\n`);
   await writeFile(join(source, "runtime", "commonjs", "index.js"), `
+const { estimateTextTokens } = require("rigyn/context");
+const { isNormalizedUsage } = require("rigyn/core");
 const { defineRuntimeTool } = require("rigyn/extensions");
+const { sniffImageMediaType } = require("rigyn/images");
+const { createNetworkTransport } = require("rigyn/net");
+const { resolveExecutable } = require("rigyn/process");
+const { instructionMessage } = require("rigyn/prompts");
 const { defineProviderAdapter } = require("rigyn/providers");
+const { createScriptedProvider } = require("rigyn/testing");
+const { sha256 } = require("rigyn/tools");
 const { uiText } = require("rigyn/tui");
-if ([defineRuntimeTool, defineProviderAdapter, uiText].some((value) => typeof value !== "function")) throw new Error("CommonJS host imports are invalid");
+if ([estimateTextTokens, isNormalizedUsage, defineRuntimeTool, sniffImageMediaType, createNetworkTransport, resolveExecutable, instructionMessage, defineProviderAdapter, createScriptedProvider, sha256, uiText].some((value) => typeof value !== "function")) throw new Error("CommonJS host imports are invalid");
 module.exports = function activate(api) {
   api.registerCommand({ name: "host-import-commonjs", execute() {} });
 };
@@ -287,9 +303,7 @@ test("external managed archives value-import bounded host subpaths across suppor
 test("external managed runtimes cannot use undeclared Rigyn internal subpaths", async (t) => {
   const root = await temporary(t);
   const source = join(root, "blocked-source");
-  const workspace = join(root, "workspace");
   await mkdir(source);
-  await mkdir(workspace);
   await writePackage(source, true);
   const archive = await pack(root, source);
   const manager = new LocalExtensionPackageManager(
@@ -298,13 +312,12 @@ test("external managed runtimes cannot use undeclared Rigyn internal subpaths", 
     {},
     { operationLeaseRoot: join(root, "leases") },
   );
-  await manager.install(`npm:${pathToFileURL(archive).href}`);
-  const catalog = await discoverExtensions(manager.sources(true));
   await assert.rejects(
-    loadRuntimeExtensions(catalog.bundle().runtime, { workspace, activationFailure: "throw" }),
+    manager.install(`npm:${pathToFileURL(archive).href}`),
     /Runtime extensions may import only documented host modules:.*rigyn\/extensions\/runtime is not exposed/su,
   );
-  await manager.remove("blocked-host-import");
+  assert.deepEqual(await manager.list(), []);
+  assert.equal((await discoverExtensions(manager.sources(true))).bundle().runtime.length, 0);
 });
 
 test("external Git and packed npm packages complete install, activate, reload, dependency, host-import, and remove lifecycles", async (t) => {

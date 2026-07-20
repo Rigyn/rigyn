@@ -1,4 +1,5 @@
 import type { ModelInfo, ProviderRequest } from "../core/types.js";
+import { isJsonValue } from "../core/json.js";
 import type { NetworkWebSocket, NetworkWebSocketFactory } from "../net/index.js";
 import {
   buildResponsesBody,
@@ -9,6 +10,7 @@ import {
 } from "./openai-responses.js";
 import { modelEvidence } from "./model-metadata.js";
 import { stringifyProviderJson } from "./json.js";
+import type { ProviderWireOperation, ProviderWireTransportHost } from "./wire.js";
 import {
   asRecord,
   asString,
@@ -28,6 +30,7 @@ export interface OpenAICodexResponsesConfig {
   headers?: HeadersInit;
   fetch?: FetchLike;
   webSocket?: NetworkWebSocketFactory;
+  wire?: ProviderWireTransportHost;
   transport?: OpenAICodexTransport;
   webSocketConnectTimeoutMs?: number;
   webSocketIdleTimeoutMs?: number;
@@ -372,11 +375,60 @@ function responseEventId(value: Record<string, unknown>): string | undefined {
   return asString(asRecord(value.response)?.id);
 }
 
+async function prepareCodexWebSocketFrame(
+  operation: ProviderWireOperation | undefined,
+  httpUrl: string,
+  headers: Headers,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (operation === undefined) return body;
+  if (!isJsonValue(body)) throw new TypeError("OpenAI Codex WebSocket request body must be JSON");
+  const prepared = await operation.intercept({
+    url: codexWebSocketUrl(httpUrl),
+    method: "SEND",
+    headers,
+    body,
+    transport: "websocket",
+    phase: "frame",
+  }, signal);
+  if (prepared.headersChanged) {
+    throw new TypeError("Provider wire WebSocket frame cannot modify handshake headers");
+  }
+  const selected = prepared.body ?? body;
+  const record = asRecord(selected);
+  if (record === undefined) throw new TypeError("OpenAI Codex WebSocket request body must be an object");
+  return record;
+}
+
+async function observeCodexWebSocketFrame(
+  operation: ProviderWireOperation | undefined,
+  httpUrl: string,
+  data: string,
+  type: string | undefined,
+  signal: AbortSignal,
+): Promise<void> {
+  await operation?.observe({
+    url: codexWebSocketUrl(httpUrl),
+    status: 101,
+    statusText: "WebSocket Message",
+    headers: {},
+    transport: "websocket",
+    phase: "frame",
+    frame: {
+      direction: "receive",
+      bytes: Buffer.byteLength(data, "utf8"),
+      ...(type === undefined ? {} : { type }),
+    },
+  }, signal);
+}
+
 class CodexWebSocketTransport {
   readonly #factory: NetworkWebSocketFactory;
   readonly #mode: Exclude<OpenAICodexTransport, "sse">;
   readonly #connectTimeoutMs: number;
   readonly #idleTimeoutMs: number;
+  readonly #wire: ProviderWireTransportHost | undefined;
   readonly #sessions = new Map<string, CachedCodexSocket>();
   readonly #fallbackUntil = new Map<string, number>();
   #closed = false;
@@ -384,12 +436,13 @@ class CodexWebSocketTransport {
   constructor(
     factory: NetworkWebSocketFactory,
     mode: Exclude<OpenAICodexTransport, "sse">,
-    options: { connectTimeoutMs: number; idleTimeoutMs: number },
+    options: { connectTimeoutMs: number; idleTimeoutMs: number; wire?: ProviderWireTransportHost },
   ) {
     this.#factory = factory;
     this.#mode = mode;
     this.#connectTimeoutMs = options.connectTimeoutMs;
     this.#idleTimeoutMs = options.idleTimeoutMs;
+    this.#wire = options.wire;
   }
 
   async *stream(input: ResponsesEventStreamInput): AsyncGenerator<ResponsesWireEvent> {
@@ -466,21 +519,31 @@ class CodexWebSocketTransport {
     delete outgoing.stream;
     delete outgoing.background;
 
+    const candidate = this.#wire?.begin("openai-codex");
+    const operation = candidate?.active === true ? candidate : undefined;
     let terminal = false;
     let keep = false;
     let responseId: string | undefined;
     try {
-      acquired.socket.send(stringifyProviderJson(outgoing));
+      const frame = await prepareCodexWebSocketFrame(operation, input.url, input.headers, outgoing, input.signal);
+      acquired.socket.send(stringifyProviderJson(frame));
+      const diagnostics = { status: 101, headers: {} };
+      input.onResponse?.(diagnostics);
       for await (const data of webSocketMessages(acquired.socket, input.signal, this.#idleTimeoutMs)) {
         let parsed: unknown;
         try {
           parsed = JSON.parse(data);
         } catch {
+          await observeCodexWebSocketFrame(operation, input.url, data, undefined, input.signal);
           throw new ProtocolError("Malformed OpenAI Codex WebSocket event", data.slice(0, 4096));
         }
         const event = asRecord(parsed);
-        if (event === undefined) throw new ProtocolError("OpenAI Codex WebSocket event was not an object");
+        if (event === undefined) {
+          await observeCodexWebSocketFrame(operation, input.url, data, undefined, input.signal);
+          throw new ProtocolError("OpenAI Codex WebSocket event was not an object");
+        }
         const type = asString(event.type);
+        await observeCodexWebSocketFrame(operation, input.url, data, type, input.signal);
         if (type === undefined) throw new ProtocolError("OpenAI Codex WebSocket event did not contain a type");
         const code = responseEventCode(event);
         if (type === "error" && (code === RESPONSE_NOT_FOUND || code === CONNECTION_LIMIT)) {
@@ -493,7 +556,7 @@ class CodexWebSocketTransport {
         } else if (type === "response.failed" || type === "error") {
           terminal = true;
         }
-        yield { data };
+        yield { data, diagnostics };
         if (terminal) break;
       }
       if (!terminal) throw new TypeError("OpenAI Codex WebSocket ended before a terminal event");
@@ -529,8 +592,35 @@ class CodexWebSocketTransport {
     const socketHeaders = new Headers(headers);
     socketHeaders.delete("accept");
     socketHeaders.delete("content-type");
-    const socket = this.#factory(codexWebSocketUrl(httpUrl), socketHeaders);
-    await waitForWebSocketOpen(socket, signal, this.#connectTimeoutMs);
+    const socketUrl = codexWebSocketUrl(httpUrl);
+    const handshakeCandidate = this.#wire?.begin("openai-codex");
+    const handshake = handshakeCandidate?.active === true ? handshakeCandidate : undefined;
+    const prepared = await handshake?.intercept({
+      url: socketUrl,
+      method: "GET",
+      headers: socketHeaders,
+      transport: "websocket",
+      phase: "handshake",
+    }, signal);
+    if (prepared?.bodyChanged === true) {
+      throw new TypeError("Provider wire WebSocket handshake cannot contain a body");
+    }
+    const effectiveSocketUrl = prepared?.url ?? socketUrl;
+    const socket = this.#factory(effectiveSocketUrl, prepared?.headers ?? socketHeaders);
+    try {
+      await waitForWebSocketOpen(socket, signal, this.#connectTimeoutMs);
+      await handshake?.observe({
+        url: effectiveSocketUrl,
+        status: 101,
+        statusText: "Switching Protocols",
+        headers: {},
+        transport: "websocket",
+        phase: "open",
+      }, signal);
+    } catch (error) {
+      closeSocket(socket, "handshake_failed");
+      throw error;
+    }
     if (sessionId === undefined || this.#sessions.has(sessionId)) {
       return {
         socket,
@@ -589,6 +679,7 @@ export class OpenAICodexResponsesAdapter extends ResponsesAdapter {
       : new CodexWebSocketTransport(config.webSocket!, mode, {
           connectTimeoutMs: transportTimeout(config.webSocketConnectTimeoutMs, DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS, "webSocketConnectTimeoutMs"),
           idleTimeoutMs: transportTimeout(config.webSocketIdleTimeoutMs, DEFAULT_WEBSOCKET_IDLE_TIMEOUT_MS, "webSocketIdleTimeoutMs"),
+          ...(config.wire === undefined ? {} : { wire: config.wire }),
         });
     super("openai-codex", {
       baseUrl,

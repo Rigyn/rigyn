@@ -1,11 +1,12 @@
 import type { Dir, Stats } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import {
   canonicalExistingPath,
   TrustStore,
   type DefaultProjectTrust,
 } from "../config/index.js";
+import type { RuntimeExtensionHost, RuntimeProjectTrustUi } from "../extensions/index.js";
 import type { TerminalPrompter } from "../interfaces/index.js";
 
 const PROJECT_FILES = [
@@ -89,6 +90,8 @@ export interface ProjectTrustResolverOptions {
   override?: ProjectTrustOverride;
   terminal?: TerminalPrompter;
   defaultProjectTrust?: DefaultProjectTrust;
+  cwd?: string;
+  preactivate?: (workspace: string) => Promise<RuntimeExtensionHost | undefined>;
 }
 
 /**
@@ -101,30 +104,115 @@ export class ProjectTrustResolver {
   readonly #override: ProjectTrustOverride | undefined;
   readonly #terminal: TerminalPrompter | undefined;
   readonly #defaultProjectTrust: DefaultProjectTrust;
+  readonly #cwd: Promise<string>;
+  readonly #preactivate: ProjectTrustResolverOptions["preactivate"];
   readonly #prompted = new Map<string, { decision: boolean; persisted: boolean }>();
   readonly #resources = new Map<string, readonly string[]>();
+  readonly #extensionEvaluated = new Set<string>();
+  readonly #preactivated = new Map<string, RuntimeExtensionHost>();
+  readonly #flights = new Map<string, Promise<boolean>>();
 
   constructor(store: TrustStore, options: ProjectTrustResolverOptions = {}) {
     this.#store = store;
     this.#override = options.override;
     this.#terminal = options.terminal;
     this.#defaultProjectTrust = options.defaultProjectTrust ?? "ask";
+    this.#cwd = canonicalExistingPath(resolve(options.cwd ?? process.cwd()));
+    this.#preactivate = options.preactivate;
   }
 
   async isTrusted(workspace: string): Promise<boolean> {
     const canonical = await canonicalExistingPath(workspace);
     if (this.#override !== undefined) return this.#override === "approve";
-    const stored = await this.#store.decision(canonical);
-    if (stored !== undefined) return stored;
-    const prompted = this.#prompted.get(canonical);
-    if (prompted !== undefined) return prompted.persisted ? false : prompted.decision;
+    const existing = this.#flights.get(canonical);
+    if (existing !== undefined) return await existing;
+    const flight = this.#resolve(canonical);
+    this.#flights.set(canonical, flight);
+    try {
+      return await flight;
+    } catch (error) {
+      const host = this.#preactivated.get(canonical);
+      this.#preactivated.delete(canonical);
+      if (host === undefined) throw error;
+      try {
+        await host.close();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Project trust and preactivated extension cleanup failed");
+      }
+      throw error;
+    } finally {
+      if (this.#flights.get(canonical) === flight) this.#flights.delete(canonical);
+    }
+  }
 
+  /** Transfers ownership of the pre-trust extension generation to the runtime loader. */
+  async takePreactivatedExtensions(workspace: string): Promise<RuntimeExtensionHost | undefined> {
+    const canonical = await canonicalExistingPath(workspace);
+    await this.#flights.get(canonical);
+    const host = this.#preactivated.get(canonical);
+    this.#preactivated.delete(canonical);
+    return host;
+  }
+
+  async close(): Promise<void> {
+    await Promise.allSettled(this.#flights.values());
+    const hosts = [...this.#preactivated.values()];
+    this.#preactivated.clear();
+    const results = await Promise.allSettled(hosts.map(async (host) => await host.close()));
+    const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "Pre-trust extension cleanup failed");
+  }
+
+  async #resolve(canonical: string): Promise<boolean> {
     let resources = this.#resources.get(canonical);
     if (resources === undefined) {
       resources = await discoverProjectTrustResources(canonical);
       this.#resources.set(canonical, resources);
     }
-    if (resources.length === 0) return false;
+    if (resources.length === 0) return await this.#store.decision(canonical) ?? false;
+
+    if (!this.#extensionEvaluated.has(canonical)) {
+      this.#extensionEvaluated.add(canonical);
+      const host = await this.#preactivate?.(canonical);
+      if (host !== undefined) {
+        this.#preactivated.set(canonical, host);
+        const cwd = await this.#cwd;
+        const terminal = this.#terminal;
+        const ui: RuntimeProjectTrustUi = terminal === undefined
+          ? {
+              hasUI: false,
+              async confirm(): Promise<boolean> {
+                throw new Error("Interactive project trust UI is unavailable");
+              },
+            }
+          : {
+              hasUI: true,
+              async confirm(title, message, signal): Promise<boolean> {
+                return await terminal.choose(`${title} · ${message}`, [
+                  { label: "Yes", value: true },
+                  { label: "No", value: false },
+                ], signal);
+              },
+            };
+        const result = await host.resolveProjectTrust({ workspace: canonical, cwd }, ui);
+        if (result.decision !== "undecided") {
+          const decision = result.decision === "yes";
+          if (result.remember === true) {
+            if (decision) await this.#store.trust(canonical);
+            else await this.#store.deny(canonical);
+          }
+          this.#prompted.set(canonical, { decision, persisted: result.remember === true });
+          return decision;
+        }
+      }
+    }
+
+    const prompted = this.#prompted.get(canonical);
+    if (prompted !== undefined && !prompted.persisted) return prompted.decision;
+    const stored = await this.#store.decision(canonical);
+    if (stored !== undefined) return stored;
+    if (prompted?.persisted === true) return false;
     if (this.#defaultProjectTrust !== "ask") {
       const decision = this.#defaultProjectTrust === "always";
       this.#prompted.set(canonical, { decision, persisted: false });

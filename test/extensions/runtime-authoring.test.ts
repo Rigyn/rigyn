@@ -35,7 +35,7 @@ const ui: RuntimeCommandContext["ui"] = {
   showOverlay(): never { throw new Error("not used"); },
 };
 
-function commandContext(): Omit<RuntimeCommandContext, "workspace" | "args"> {
+function commandContext(): Omit<RuntimeCommandContext, "workspace" | "args" | "mode" | "hasUI" | "isProjectTrusted"> {
   return {
     threadId: "thread-1",
     branch: "main",
@@ -113,8 +113,35 @@ test("runtime command catalogs are callback-free, owner-aware, dynamic, and gene
   assert.throws(() => api.getCommands(), /no longer active/u);
 });
 
-test("runtime tools receive generation-owned native UI and host mode context", async (context) => {
+test("runtime listeners, commands, shortcuts, and tools receive current host mode and trust context", async (context) => {
   const source = `export default (api) => {
+    api.on("session_start", (_event, context) => {
+      globalThis.__listenerHostContext = {
+        mode: context.mode,
+        hasUI: context.hasUI,
+        trusted: context.isProjectTrusted()
+      };
+    });
+    api.registerCommand({
+      name: "host-context",
+      execute(context) {
+        globalThis.__commandHostContext = {
+          mode: context.mode,
+          hasUI: context.hasUI,
+          trusted: context.isProjectTrusted()
+        };
+      }
+    });
+    api.registerShortcut({
+      shortcut: "ctrl+alt+h",
+      execute(context) {
+        globalThis.__shortcutHostContext = {
+          mode: context.mode,
+          hasUI: context.hasUI,
+          trusted: context.isProjectTrusted()
+        };
+      }
+    });
     api.registerTool({
       name: "native_context",
       description: "Inspect native extension tool context",
@@ -141,30 +168,54 @@ test("runtime tools receive generation-owned native UI and host mode context", a
     threadId: "native-context-thread",
   };
 
-  assert.equal((await tool.execute({}, executeContext)).content, "headless");
+  await host.dispatch("session_start", { reason: "startup", threadId: "thread-1" });
+  await host.runCommand("host-context", { ...commandContext(), args: "" });
+  await host.runShortcut("ctrl+alt+h", commandContext());
+  assert.equal((await tool.execute({}, executeContext)).content, "print");
   assert.deepEqual((globalThis as Record<string, unknown>).__nativeToolContext, {
     extensionId: "extension-0",
     sourcePath: join(root, "extension-0.mjs"),
     hasUI: false,
-    mode: "headless",
+    mode: "print",
   });
-  assert.equal(host.initialUi().some((entry) => entry.type === "notify" && entry.value === "tool context headless"), true);
+  assert.deepEqual((globalThis as Record<string, unknown>).__listenerHostContext, {
+    mode: "print", hasUI: false, trusted: false,
+  });
+  assert.deepEqual((globalThis as Record<string, unknown>).__commandHostContext, {
+    mode: "print", hasUI: false, trusted: false,
+  });
+  assert.deepEqual((globalThis as Record<string, unknown>).__shortcutHostContext, {
+    mode: "print", hasUI: false, trusted: false,
+  });
+  assert.equal(host.initialUi().some((entry) => entry.type === "notify" && entry.value === "tool context print"), true);
 
   const owners: string[] = [];
+  host.setHostContext({ mode: "tui", projectTrusted: true });
   host.setInteractiveUiHandler((extensionId) => {
     owners.push(extensionId);
     return ui;
   });
-  assert.equal((await tool.execute({}, executeContext)).content, "interactive");
+  await host.dispatch("session_start", { reason: "resume", threadId: "thread-1" });
+  await host.runCommand("host-context", { ...commandContext(), args: "" });
+  assert.equal((await tool.execute({}, executeContext)).content, "tui");
   assert.deepEqual((globalThis as Record<string, unknown>).__nativeToolContext, {
     extensionId: "extension-0",
     sourcePath: join(root, "extension-0.mjs"),
     hasUI: true,
-    mode: "interactive",
+    mode: "tui",
   });
-  assert.deepEqual(owners, ["extension-0"]);
+  assert.deepEqual((globalThis as Record<string, unknown>).__listenerHostContext, {
+    mode: "tui", hasUI: true, trusted: true,
+  });
+  assert.deepEqual((globalThis as Record<string, unknown>).__commandHostContext, {
+    mode: "tui", hasUI: true, trusted: true,
+  });
+  assert.deepEqual(owners, ["extension-0", "extension-0", "extension-0"]);
   await host.close();
   delete (globalThis as Record<string, unknown>).__nativeToolContext;
+  delete (globalThis as Record<string, unknown>).__listenerHostContext;
+  delete (globalThis as Record<string, unknown>).__commandHostContext;
+  delete (globalThis as Record<string, unknown>).__shortcutHostContext;
 });
 
 test("autocomplete and editor middleware compose within generation and output bounds", async (context) => {
@@ -861,8 +912,8 @@ test("input, prompt, context, and message reducers chain in load order and isola
   };\n`;
   const { host } = await fixture(context, [first, broken, last]);
 
-  assert.deepEqual(await host.reduceInput({ text: "go", source: "tui" }), { action: "transform", text: "go:one:two" });
-  assert.deepEqual(await host.reduceInput({ text: "stop", source: "rpc" }), { action: "handled" });
+  assert.deepEqual(await host.reduceInput({ threadId: "thread-input", branch: "main", text: "go", source: "tui" }), { action: "transform", text: "go:one:two" });
+  assert.deepEqual(await host.reduceInput({ threadId: "thread-input", branch: "main", text: "stop", source: "rpc" }), { action: "handled" });
   const runScope = { threadId: "thread-authoring", runId: "run-authoring", branch: "main" };
   const before = await host.reduceBeforeAgentStart({ ...runScope, prompt: "p", systemPrompt: "base" });
   assert.equal(before.systemPrompt, "base:one:two");
@@ -942,19 +993,81 @@ test("session and compaction reducers cancel deterministically and accept bounde
     api.on("session_before_switch", () => ({ cancel: true, reason: "stay here" }));
     api.on("session_before_switch", () => { globalThis.__authoringSwitchContinued = true; });
     api.on("session_before_fork", () => ({ cancel: false }));
-    api.on("session_before_tree", (event) => event.summarize ? { summary: { text: "tree summary", metadata: { count: event.sourceEventIds.length } } } : undefined);
+    api.on("session_before_tree", (event) => {
+      event.preparation.entriesToSummarize.push({ eventId: "listener-only" });
+      return event.summarize ? {
+        summary: { text: "tree summary", metadata: { count: event.sourceEventIds.length } },
+        customInstructions: "extension focus",
+        replaceInstructions: true,
+        label: "extension label",
+      } : undefined;
+    });
+    api.on("session_before_tree", (event) => {
+      globalThis.__authoringTreeCloneLength = event.preparation.entriesToSummarize.length;
+      return globalThis.__authoringTreeLabelOnly ? { label: "last label" } : undefined;
+    });
+    api.on("session_before_tree", () => globalThis.__authoringInvalidTree ? { replaceInstructions: "yes" } : undefined);
     api.on("session_before_compact", (event) => ({ compaction: { text: "compact:" + event.plan.reason, metadata: { source: event.plan.sourceMessageIds.length } } }));
   };\n`;
   const { host } = await fixture(context, [source]);
   assert.deepEqual(await host.reduceSessionBeforeSwitch({ reason: "new" }), { cancel: true, reason: "stay here" });
   assert.equal((globalThis as Record<string, unknown>).__authoringSwitchContinued, undefined);
-  assert.deepEqual(await host.reduceSessionBeforeFork({ sourceThreadId: "thread-1" }), { cancel: false });
+  assert.deepEqual(await host.reduceSessionBeforeFork({ sourceThreadId: "thread-1", position: "at" }), { cancel: false });
   assert.deepEqual(await host.reduceSessionBeforeTree({
     threadId: "thread-1",
+    preparation: {
+      targetId: "event-2",
+      oldLeafId: "event-1",
+      commonAncestorId: null,
+      entriesToSummarize: [],
+      userWantsSummary: true,
+    },
+    signal: new AbortController().signal,
     targetEventId: "event-2",
     summarize: true,
     sourceEventIds: ["event-1"],
-  }), { summary: { text: "tree summary", metadata: { count: 1 } } });
+  }), {
+    summary: { text: "tree summary", metadata: { count: 1 } },
+    customInstructions: "extension focus",
+    replaceInstructions: true,
+    label: "extension label",
+  });
+  assert.equal((globalThis as Record<string, unknown>).__authoringTreeCloneLength, 0);
+  (globalThis as Record<string, unknown>).__authoringTreeLabelOnly = true;
+  assert.deepEqual(await host.reduceSessionBeforeTree({
+    threadId: "thread-1",
+    preparation: {
+      targetId: "event-2",
+      oldLeafId: "event-1",
+      commonAncestorId: null,
+      entriesToSummarize: [],
+      userWantsSummary: true,
+    },
+    signal: new AbortController().signal,
+    targetEventId: "event-2",
+    summarize: true,
+    sourceEventIds: ["event-1"],
+  }), { label: "last label" });
+  delete (globalThis as Record<string, unknown>).__authoringTreeLabelOnly;
+  (globalThis as Record<string, unknown>).__authoringInvalidTree = true;
+  const validAfterInvalid = await host.reduceSessionBeforeTree({
+    threadId: "thread-1",
+    preparation: {
+      targetId: "event-2",
+      oldLeafId: "event-1",
+      commonAncestorId: null,
+      entriesToSummarize: [],
+      userWantsSummary: true,
+    },
+    signal: new AbortController().signal,
+    targetEventId: "event-2",
+    summarize: true,
+    sourceEventIds: ["event-1"],
+  });
+  delete (globalThis as Record<string, unknown>).__authoringInvalidTree;
+  delete (globalThis as Record<string, unknown>).__authoringTreeCloneLength;
+  assert.equal(validAfterInvalid.replaceInstructions, true);
+  assert.ok(host.diagnostics().some((entry) => entry.message.includes("replaceInstructions must be a boolean")));
   const compactionEvent = {
     threadId: "thread-1",
     runId: "run-1",

@@ -1,4 +1,9 @@
 import { TerminalInputBuffer, type TerminalInputToken } from "./input-buffer.js";
+import {
+  parseTerminalBackgroundReply,
+  parseTerminalColorSchemeReply,
+  type TerminalRgbColor,
+} from "./terminal-colors.js";
 
 export interface KeyEvent {
   key: string;
@@ -19,7 +24,9 @@ export interface KeyEvent {
 
 export type TerminalReply =
   | { type: "kitty_keyboard"; flags: number }
-  | { type: "primary_device_attributes" };
+  | { type: "primary_device_attributes" }
+  | { type: "background_color"; color: TerminalRgbColor }
+  | { type: "color_scheme"; scheme: "dark" | "light" };
 
 interface DecodedKey {
   event: KeyEvent;
@@ -174,6 +181,11 @@ function legacyNamedEvent(key: string | undefined, modifiers: KeyModifiers): Key
 function csiEvent(sequence: string, replies: TerminalReply[]): DecodedKey | undefined {
   const normalized = sequence.startsWith("\u009b") ? `\u001b[${sequence.slice(1)}` : sequence;
   const body = normalized.slice(2);
+  const scheme = parseTerminalColorSchemeReply(normalized);
+  if (scheme !== undefined) {
+    replies.push({ type: "color_scheme", scheme });
+    return undefined;
+  }
   if (/^\[[A-E]$/u.test(body)) {
     return { event: { key: `f${body.charCodeAt(1) - 64}` }, enhanced: false };
   }
@@ -278,6 +290,11 @@ function textEvent(value: string): KeyEvent | undefined {
 function sequenceEvent(token: Extract<TerminalInputToken, { type: "sequence" }>, replies: TerminalReply[]): DecodedKey | undefined {
   if (!token.complete) return undefined;
   const sequence = token.value;
+  const background = parseTerminalBackgroundReply(sequence);
+  if (background !== undefined) {
+    replies.push({ type: "background_color", color: background });
+    return undefined;
+  }
   if (sequence === "\u001b") return { event: { key: "escape" }, enhanced: false };
   if (sequence.startsWith("\u001b[") || sequence.startsWith("\u009b")) return csiEvent(sequence, replies);
   if (sequence.startsWith("\u001bO")) return ss3Event(sequence);

@@ -64,8 +64,17 @@ test("config show --effective expands defaults without returning credentials", a
   const output = JSON.parse(result.stdout) as Record<string, unknown>;
   assert.equal(output.defaultProvider, "openai-codex");
   assert.equal(output.defaultModel, null);
-  assert.equal(output.theme, "dark");
+  assert.equal(output.theme, "light/dark");
   assert.equal(output.thinking, "off");
+  assert.equal(output.thinkingBudgets, null);
+  assert.deepEqual(output.compaction, { reserveTokens: 16_384, keepRecentTokens: 20_000 });
+  assert.deepEqual(output.branchSummary, { reserveTokens: 16_384, skipPrompt: false });
+  assert.deepEqual(output.images, { autoResize: true });
+  assert.equal(output.enableSkillCommands, true);
+  assert.equal(output.showCacheMissNotices, false);
+  assert.deepEqual(output.warnings, { anthropicExtraUsage: true });
+  assert.deepEqual(output.promptRoots, []);
+  assert.deepEqual(output.themeRoots, []);
   assert.equal(output.maxSteps, 64);
   assert.deepEqual(output.childRuns, {
     maxConcurrent: 4,

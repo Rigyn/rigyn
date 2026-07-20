@@ -33,9 +33,15 @@ export class ShellTool implements HarnessTool {
   readonly definition;
   readonly executionMode = "sequential" as const;
   readonly #shellPath: string | undefined;
+  readonly #commandPrefix: string | undefined;
 
-  constructor(name: "shell" | "bash" = "shell", options: { shellPath?: string } = {}) {
+  constructor(name: "shell" | "bash" = "shell", options: { shellPath?: string; commandPrefix?: string } = {}) {
+    if (options.commandPrefix !== undefined && (
+      options.commandPrefix.includes("\0")
+      || Buffer.byteLength(options.commandPrefix, "utf8") > 16 * 1_024
+    )) throw new Error("Shell command prefix must contain at most 16384 bytes and no NUL");
     this.#shellPath = options.shellPath;
+    this.#commandPrefix = options.commandPrefix;
     this.definition = {
       name,
       description: `Execute a bash command in the current working directory. Output is limited to the final ${TOOL_MAX_LINES} lines or ${TOOL_MAX_BYTES / 1024}KB, with complete truncated output saved to a temporary file.`,
@@ -61,6 +67,7 @@ export class ShellTool implements HarnessTool {
     this.validate(input);
     const object = inputObject(input);
     const command = stringInput(object, "command");
+    const selectedCommand = this.#commandPrefix === undefined ? command : `${this.#commandPrefix}\n${command}`;
     const timeout = object.timeout === undefined ? undefined : numberInput(object, "timeout", 0);
     const output = new ToolOutputAccumulator({ prefix: "rigyn-bash" });
     const progress = context.reportProgress === undefined ? undefined : new CoalescedOutputProgress(context.reportProgress);
@@ -77,7 +84,7 @@ export class ShellTool implements HarnessTool {
     try {
       result = await context.runner.run(
         {
-          argv: await commandShellArgv(command, this.#shellPath === undefined ? {} : { configuredPath: this.#shellPath }),
+          argv: await commandShellArgv(selectedCommand, this.#shellPath === undefined ? {} : { configuredPath: this.#shellPath }),
           cwd: context.workspace.root,
           timeoutMs: timeoutMilliseconds(timeout),
           outputLimitBytes: 512 * 1024,

@@ -11,10 +11,12 @@ import * as embedding from "rigyn/embedding";
 import * as extensions from "rigyn/extensions";
 import * as images from "rigyn/images";
 import * as interfaces from "rigyn/interfaces";
+import * as modes from "rigyn/modes";
 import * as net from "rigyn/net";
 import * as processApi from "rigyn/process";
 import * as prompts from "rigyn/prompts";
 import * as providers from "rigyn/providers";
+import * as sdk from "rigyn/sdk";
 import * as service from "rigyn/service";
 import * as storage from "rigyn/storage";
 import * as testing from "rigyn/testing";
@@ -42,7 +44,8 @@ function scripted(id, text = "subpath ready") {
 test("every published subpath performs a representative runtime operation", async () => {
   assert.equal(packageMetadata.name, "rigyn");
   assert.equal(packageMetadata.version, root.RIGYN_VERSION);
-  assert.equal(Object.keys(packageMetadata.exports).length, 19);
+  assert.equal(Object.keys(packageMetadata.exports).length, 21);
+  assert.equal(typeof sdk.createRigynSdk, "function");
 
   const redactor = new auth.SecretRedactor();
   redactor.register("consumer-secret");
@@ -175,6 +178,34 @@ test("every published subpath performs a representative runtime operation", asyn
   } finally {
     await harness.close();
   }
+
+  let modeOutput = "";
+  const modeResult = await modes.runPrintMode({
+    threadId: "subpath-mode-thread",
+    branch: "main",
+    async run() {
+      return {
+        threadId: "subpath-mode-thread",
+        results: [{
+          runId: "subpath-mode-run",
+          finishReason: "stop",
+          finalText: "mode subpath ready",
+          steps: 1,
+          queuedFollowUps: [],
+          queuedMessages: [],
+        }],
+      };
+    },
+    steer() {},
+    followUp() {},
+    abort() {},
+    getModel() { return undefined; },
+  }, {
+    prompts: "probe",
+    write(chunk) { modeOutput += chunk; },
+  });
+  assert.equal(modeOutput, "mode subpath ready\n");
+  assert.equal(modeResult.threadId, "subpath-mode-thread");
 
   const serviceProvider = scripted("subpath-service", "service subpath ready");
   const serviceStore = new storage.SessionStore(":memory:");

@@ -12,6 +12,10 @@ import type {
 } from "./types.js";
 import type { ExtensionMessageEvent, ExtensionStateEvent } from "./extension-entries.js";
 
+export const MAX_TOOL_CALL_STREAM_ID_BYTES = 1_024;
+export const MAX_TOOL_CALL_STREAM_NAME_BYTES = 256;
+export const MAX_TOOL_CALL_STREAM_DELTA_BYTES = 4 * 1024 * 1024;
+
 export type RunState =
   | "preparing"
   | "streaming"
@@ -20,6 +24,24 @@ export type RunState =
   | "completed"
   | "failed"
   | "cancelled";
+
+export type AssistantResponseTransformationField =
+  | "message"
+  | "finishReason"
+  | "usage"
+  | "rawReason"
+  | "explanation";
+
+export interface AssistantResponseTransformationAudit {
+  actor: string;
+  fields: AssistantResponseTransformationField[];
+}
+
+/** Secret-free accounting snapshot recorded around an extension-owned final response transformation. */
+export interface AssistantResponseAuditSnapshot {
+  finishReason: FinishReason;
+  usage?: Omit<NormalizedUsage, "raw">;
+}
 
 /** Bounded process output produced while one tool invocation is running. */
 export interface ToolProgress {
@@ -72,7 +94,16 @@ export type RuntimeEvent =
     }
   | { type: "text_delta"; text: string; part: number }
   | { type: "reasoning_delta"; text: string; part: number; visibility: "summary" | "provider_trace" }
-  | { type: "assistant_completed"; finishReason: FinishReason; rawReason?: string }
+  | { type: "tool_call_started"; index: number; id?: string; name?: string }
+  | { type: "tool_call_delta"; index: number; jsonFragment: string }
+  | { type: "assistant_completed"; finishReason: FinishReason; rawReason?: string; explanation?: string }
+  | {
+      type: "assistant_response_transformed";
+      step: number;
+      transformations: AssistantResponseTransformationAudit[];
+      original: AssistantResponseAuditSnapshot;
+      final: AssistantResponseAuditSnapshot;
+    }
   | { type: "tool_input_transformed"; callId: string; name: string; index: number; actors: string[] }
   | { type: "tool_requested"; callId: string; name: string; input: JsonValue; index: number }
   | { type: "tool_started"; callId: string; name: string; index: number }

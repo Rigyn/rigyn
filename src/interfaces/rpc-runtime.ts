@@ -1,14 +1,25 @@
 import { randomBytes } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { LoadedRuntime } from "../cli/runtime.js";
 import type { AgentRunResult, QueueMode } from "../core/agent.js";
 import type { EventEnvelope } from "../core/events.js";
+import { createId } from "../core/ids.js";
 import type { NormalizedUsage, ProviderId } from "../core/types.js";
 import { normalizedContextTokens, normalizedTotalTokens } from "../core/usage.js";
-import type { RuntimeInputEvent, RuntimeInputResult } from "../extensions/runtime.js";
+import type {
+  RuntimeInputEvent,
+  RuntimeInputResult,
+  RuntimeModelSelection,
+  RuntimeUserShellResult,
+} from "../extensions/runtime.js";
+import { runShellShortcut } from "../process/user-shell.js";
 import type { HarnessRun } from "../service/harness.js";
+import { resolveModelsForScope } from "../providers/model-scope.js";
+import { modelReasoningEfforts } from "../providers/registry.js";
 import { exportThreadHtml, exportThreadMarkdown } from "../service/session-transfer.js";
 import { sessionExportEnvelope } from "../storage/session-export.js";
+import { WorkspaceBoundary } from "../tools/paths.js";
 import { RIGYN_VERSION } from "../version.js";
 import {
   RPC_EXTENSION_UI_LIMITS,
@@ -22,10 +33,16 @@ import {
   RPC_METHOD_NAMES,
   type RpcEventSubscriptionResult,
   type RpcExtensionCommandResult,
+  type RpcForkMessagePage,
+  type RpcModelCycleResult,
   type RpcMethod,
   type RpcMethodResult,
   type RpcOversizedEvent,
   type RpcQueueBlockedItem,
+  type RpcSessionCopyResult,
+  type RpcSessionForkResult,
+  type RpcThinkingCycleResult,
+  type RpcUserShellRunResult,
 } from "./rpc-protocol.js";
 import {
   optionalOutboundImages,
@@ -39,7 +56,14 @@ export const RIGYN_RPC_VERSION = RIGYN_VERSION;
 const RPC_MAX_TRANSFORMED_INPUT_BYTES = 1024 * 1024;
 const RPC_MAX_LAST_ASSISTANT_TEXT_BYTES = 8 * 1024 * 1024;
 const RPC_MAX_INLINE_EXPORT_BYTES = 2 * 1024 * 1024;
+const RPC_FORK_MESSAGE_DEFAULT_LIMIT = 100;
+const RPC_FORK_MESSAGE_MAX_LIMIT = 256;
+const RPC_FORK_MESSAGE_MAX_TEXT_BYTES = 4 * 1024;
 const RPC_MAX_QUEUE_RESPONSE_BYTES = DEFAULT_RPC_MAX_LINE_BYTES - 4 * 1024;
+export const RPC_USER_SHELL_MAX_CONCURRENT_GLOBAL = 16;
+export const RPC_USER_SHELL_MAX_CONCURRENT_PER_PEER = 4;
+export const RPC_USER_SHELL_MAX_TIMEOUT_MS = 600_000;
+export const RPC_USER_SHELL_MAX_COMMAND_BYTES = 128 * 1024;
 export const RPC_EVENT_PAGE_DEFAULT_LIMIT = 256;
 export const RPC_EVENT_PAGE_MAX_LIMIT = 1_024;
 export const RPC_EVENT_PAGE_MAX_SERIALIZED_BYTES = 8 * 1024 * 1024;
@@ -91,6 +115,18 @@ export const RIGYN_RPC_CAPABILITIES = {
   },
   reconnect: true,
   manualCompaction: true,
+  sessionConvenience: {
+    currentPointer: "per-client",
+    new: "session.new",
+    switch: "session.switch",
+    clone: "session.clone",
+    fork: "session.fork",
+    forkMessages: "thread.forkMessages",
+  },
+  retryControl: {
+    runtimeToggle: "retry.set",
+    cancelScheduled: "run.retry.cancel",
+  },
   runtimeExtensions: {
     commands: true,
     cancellation: true,
@@ -150,7 +186,24 @@ export const RIGYN_RPC_CAPABILITIES = {
     statistics: true,
     lastAssistantText: true,
     maxLastAssistantTextBytes: RPC_MAX_LAST_ASSISTANT_TEXT_BYTES,
-    runSelection: "durable-read-only",
+    runSelection: "durable-readable-and-idle-mutable",
+    setModel: "thread.model.set",
+    cycleModel: "thread.model.cycle",
+    setThinking: "thread.thinking.set",
+    cycleThinking: "thread.thinking.cycle",
+    setAutoCompaction: "thread.autoCompaction.set",
+  },
+  userShell: {
+    run: "shell.run",
+    cancel: "shell.cancel",
+    callerRunIds: true,
+    initialCwdWorkspaceBound: true,
+    durableVisibleResults: true,
+    maxConcurrentGlobal: RPC_USER_SHELL_MAX_CONCURRENT_GLOBAL,
+    maxConcurrentPerPeer: RPC_USER_SHELL_MAX_CONCURRENT_PER_PEER,
+    maxCommandBytes: RPC_USER_SHELL_MAX_COMMAND_BYTES,
+    maxTimeoutMs: RPC_USER_SHELL_MAX_TIMEOUT_MS,
+    maxRetainedOutputBytesPerStream: 512 * 1024,
   },
   commandDiscovery: {
     builtins: true,
@@ -194,12 +247,13 @@ export interface RpcThreadState {
   branch: string;
   name?: string;
   active: boolean;
-  operation: "run" | "compaction" | null;
+  operation: "run" | "compaction" | "shell" | null;
   pendingMessageCount: number;
   recoverableMessageCount?: number;
   provider?: ProviderId;
   model?: string;
   reasoningEffort?: string;
+  autoCompactionEnabled: boolean;
   queueModes?: { steeringMode: QueueMode; followUpMode: QueueMode };
 }
 
@@ -246,6 +300,14 @@ interface EventReplayPage {
 
 interface ExtensionCommandOperation {
   peerId: string;
+  controller: AbortController;
+  settled: Promise<void>;
+}
+
+interface UserShellOperation {
+  peerId: string;
+  threadId: string;
+  branch: string;
   controller: AbortController;
   settled: Promise<void>;
 }
@@ -490,8 +552,33 @@ function queueMode(value: unknown, label: string): QueueMode | undefined {
   return value;
 }
 
+function utf8Prefix(value: string, maximumBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return { text: value, truncated: false };
+  let text = "";
+  let bytes = 0;
+  for (const character of value) {
+    const next = Buffer.byteLength(character, "utf8");
+    if (bytes + next > maximumBytes) break;
+    text += character;
+    bytes += next;
+  }
+  return { text, truncated: true };
+}
+
+function userMessageText(envelope: EventEnvelope): { text: string; truncated: boolean } | undefined {
+  if (
+    envelope.event.type !== "message_appended" ||
+    envelope.event.message.role !== "user" ||
+    envelope.event.message.purpose !== undefined
+  ) return undefined;
+  const raw = envelope.event.message.displayText ?? envelope.event.message.content
+    .flatMap((block) => block.type === "text" ? [block.text] : [])
+    .join("\n");
+  return utf8Prefix(raw, RPC_FORK_MESSAGE_MAX_TEXT_BYTES);
+}
+
 export class RpcRuntimeDispatcher {
-  readonly #runtime: Pick<LoadedRuntime, "workspace" | "store" | "service" | "providers"> & Partial<Pick<LoadedRuntime, "extensions" | "runtimeExtensions" | "generationSignal" | "auth" | "network" | "setExtensionShutdownHandler">>;
+  readonly #runtime: Pick<LoadedRuntime, "workspace" | "store" | "service" | "providers"> & Partial<Pick<LoadedRuntime, "config" | "extensions" | "runtimeExtensions" | "generationSignal" | "auth" | "network" | "setExtensionShutdownHandler">>;
   readonly #requestShutdown: (() => void) | undefined;
   readonly #extensionUi: RpcExtensionUiBridge;
   readonly #peers = new Map<string, RpcRuntimePeer>();
@@ -500,8 +587,10 @@ export class RpcRuntimeDispatcher {
   readonly #subscriptions = new Map<string, Subscription>();
   readonly #extensionSessions = new Map<string, string>();
   readonly #extensionCommands = new Map<string, ExtensionCommandOperation>();
+  readonly #userShellRuns = new Map<string, UserShellOperation>();
   readonly #inputControllers = new Map<string, Set<AbortController>>();
   readonly #inputTails = new Map<string, Promise<void>>();
+  readonly #currentSessions = new Map<string, { threadId: string; branch: string }>();
   readonly #initialExtensionUiSent = new Set<string>();
   readonly #startedAt = Date.now();
   readonly #methodHandlers: RpcMethodHandlerRegistry;
@@ -509,10 +598,11 @@ export class RpcRuntimeDispatcher {
   #closing = false;
 
   constructor(options: {
-    runtime: Pick<LoadedRuntime, "workspace" | "store" | "service" | "providers"> & Partial<Pick<LoadedRuntime, "extensions" | "runtimeExtensions" | "generationSignal" | "auth" | "network" | "setExtensionShutdownHandler">>;
+    runtime: Pick<LoadedRuntime, "workspace" | "store" | "service" | "providers"> & Partial<Pick<LoadedRuntime, "config" | "extensions" | "runtimeExtensions" | "generationSignal" | "auth" | "network" | "setExtensionShutdownHandler">>;
     requestShutdown?: () => void;
   }) {
     this.#runtime = options.runtime;
+    this.#runtime.runtimeExtensions?.setHostContext({ mode: "rpc" });
     this.#requestShutdown = options.requestShutdown;
     const extensionShutdown = async (): Promise<{ accepted: boolean; message: string }> => {
       if (this.#requestShutdown === undefined) {
@@ -554,6 +644,7 @@ export class RpcRuntimeDispatcher {
 
   disconnect(peerId: string): void {
     this.#peers.delete(peerId);
+    this.#currentSessions.delete(peerId);
     this.#initialExtensionUiSent.delete(peerId);
     this.#extensionUi.disconnect(peerId);
     for (const [id, subscription] of this.#subscriptions) {
@@ -566,6 +657,9 @@ export class RpcRuntimeDispatcher {
       if (operation.ownerId === peerId) this.#runtime.service.cancel(threadId, "RPC client disconnected");
     }
     for (const operation of this.#extensionCommands.values()) {
+      if (operation.peerId === peerId) operation.controller.abort(new Error("RPC client disconnected"));
+    }
+    for (const operation of this.#userShellRuns.values()) {
       if (operation.peerId === peerId) operation.controller.abort(new Error("RPC client disconnected"));
     }
     for (const controller of this.#inputControllers.get(peerId) ?? []) {
@@ -675,6 +769,9 @@ export class RpcRuntimeDispatcher {
         if (result.branch === undefined) throw new Error("Branch navigation completed without a branch");
         return result.branch;
       },
+      "thread.forkMessages": ({ input }) => {
+        return this.#forkMessagePage(input);
+      },
       "thread.name": async ({ input }) => {
         return await this.#runtime.service.setSessionName({
           threadId: this.#workspaceThread(requiredString(input.threadId, "threadId")),
@@ -685,6 +782,9 @@ export class RpcRuntimeDispatcher {
         const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
         await this.#endExtensionSession(threadId);
         await this.#runtime.service.deleteSession(threadId);
+        for (const [peerId, current] of this.#currentSessions) {
+          if (current.threadId === threadId) this.#currentSessions.delete(peerId);
+        }
         return { deleted: true };
       },
       "thread.export": ({ input }) => {
@@ -704,9 +804,9 @@ export class RpcRuntimeDispatcher {
         return { format, ...exported };
       },
       "thread.compact": async ({ peer, input }) => {
-        const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
-        if (this.#running.has(threadId)) throw new Error(`Thread already has an RPC-owned run: ${threadId}`);
-        const branch = optionalString(input.branch, "branch") ?? this.#runtime.store.getThread(threadId).defaultBranch;
+        const target = this.#idleThreadTarget(input, "Thread compaction");
+        const threadId = target.threadId;
+        const branch = target.branch;
         const outboundImages = optionalOutboundImages(input.outboundImages);
         const provider = requiredString(input.provider, "provider");
         const model = requiredString(input.model, "model");
@@ -755,6 +855,47 @@ export class RpcRuntimeDispatcher {
         });
         return await operation;
       },
+      "thread.model.set": async ({ peer, input }) => {
+        return await this.#setThreadModel(peer, input);
+      },
+      "thread.model.cycle": async ({ peer, input }) => {
+        return await this.#cycleThreadModel(peer, input);
+      },
+      "thread.thinking.set": async ({ peer, input }) => {
+        return await this.#setThreadThinking(peer, input);
+      },
+      "thread.thinking.cycle": async ({ peer, input }) => {
+        return await this.#cycleThreadThinking(peer, input);
+      },
+      "thread.autoCompaction.set": ({ peer, input }) => {
+        const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+        const active = this.#running.get(threadId);
+        if (active !== undefined && active.ownerId !== peer.id) {
+          throw new Error(`No RPC-owned run for ${threadId}`);
+        }
+        const thread = this.#runtime.store.getThread(threadId);
+        const branch = optionalString(input.branch, "branch") ?? thread.defaultBranch;
+        if (!thread.branches.some((entry) => entry.name === branch)) throw new Error(`Unknown branch: ${branch}`);
+        const enabled = optionalBoolean(input.enabled, "enabled");
+        if (enabled === undefined) throw new Error("enabled is required");
+        this.#runtime.service.setSessionAutoCompaction({ threadId, branch, enabled });
+        return { threadId, branch, enabled };
+      },
+      "session.current": ({ peer }) => {
+        return this.#currentSessionResult(peer.id);
+      },
+      "session.new": async ({ peer, input }) => {
+        return await this.#newCurrentSession(peer.id, input);
+      },
+      "session.switch": ({ peer, input }) => {
+        return this.#switchCurrentSession(peer.id, input);
+      },
+      "session.clone": async ({ peer, input }) => {
+        return await this.#cloneCurrentSession(peer.id, input);
+      },
+      "session.fork": async ({ peer, input }) => {
+        return await this.#forkCurrentSession(peer.id, input);
+      },
       "events.subscribe": ({ peer, input }) => {
         return this.#subscribe(peer, input);
       },
@@ -784,6 +925,11 @@ export class RpcRuntimeDispatcher {
           optionalString(input.reason, "reason"),
         );
         return { accepted: true };
+      },
+      "run.retry.cancel": ({ peer, input }) => {
+        const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+        this.#ownedOperation(peer, threadId);
+        return { accepted: this.#runtime.service.cancelRetry(threadId) };
       },
       "run.steer": async ({ peer, input }) => {
         return await this.#queueRunInput(peer, input, "steer");
@@ -888,6 +1034,28 @@ export class RpcRuntimeDispatcher {
           ...(steeringMode === undefined ? {} : { steeringMode }),
           ...(followUpMode === undefined ? {} : { followUpMode }),
         });
+      },
+      "retry.get": () => ({ enabled: this.#runtime.service.autoRetryEnabled }),
+      "retry.set": ({ input }) => {
+        const enabled = optionalBoolean(input.enabled, "enabled");
+        if (enabled === undefined) throw new Error("enabled must be a boolean");
+        this.#runtime.service.setAutoRetryEnabled(enabled);
+        return { enabled };
+      },
+      "shell.run": async ({ peer, input }) => {
+        return await this.#runUserShell(peer, input);
+      },
+      "shell.cancel": ({ peer, input }) => {
+        const runId = boundedText(input.runId, "runId", 256, false);
+        const operation = this.#userShellRuns.get(runId);
+        if (operation === undefined || operation.peerId !== peer.id) {
+          throw new Error(`Unknown RPC user shell run ${runId}`);
+        }
+        const reason = input.reason === undefined
+          ? "User shell run cancelled by RPC client"
+          : boundedText(input.reason, "reason", 4 * 1024, false);
+        operation.controller.abort(new Error(reason));
+        return { accepted: true };
       },
       "models.list": async ({ input }) => {
         const provider = optionalString(input.provider, "provider");
@@ -994,7 +1162,7 @@ export class RpcRuntimeDispatcher {
           runtimeExtensions: catalog.commands.runtimeExtensions,
           extensionTemplates: catalog.commands.extensionTemplates.map(({ sha256: _sha256, ...command }) => command),
           prompts: catalog.prompts.map(({ sha256: _sha256, ...prompt }) => prompt),
-          skills: catalog.skills.map(({ metadataTruncated: _metadataTruncated, ...skill }) => ({
+          skills: this.#runtime.config?.enableSkillCommands === false ? [] : catalog.skills.map(({ metadataTruncated: _metadataTruncated, ...skill }) => ({
             name: skill.name,
             description: skill.description,
             scope: skill.scope,
@@ -1036,6 +1204,9 @@ export class RpcRuntimeDispatcher {
         for (const operation of this.#extensionCommands.values()) {
           operation.controller.abort(new Error("RPC shutdown"));
         }
+        for (const operation of this.#userShellRuns.values()) {
+          operation.controller.abort(new Error("RPC shutdown"));
+        }
         for (const controllers of this.#inputControllers.values()) {
           for (const controller of controllers) controller.abort(new Error("RPC shutdown"));
         }
@@ -1065,6 +1236,7 @@ export class RpcRuntimeDispatcher {
     this.#extensionSessionUnsubscribe?.();
     for (const threadId of this.#running.keys()) this.#runtime.service.cancel(threadId, reason);
     for (const operation of this.#extensionCommands.values()) operation.controller.abort(new Error(reason));
+    for (const operation of this.#userShellRuns.values()) operation.controller.abort(new Error(reason));
     for (const controllers of this.#inputControllers.values()) {
       for (const controller of controllers) controller.abort(new Error(reason));
     }
@@ -1072,6 +1244,7 @@ export class RpcRuntimeDispatcher {
     const operations = [
       ...[...this.#running.values()].map((entry) => entry.promise),
       ...[...this.#extensionCommands.values()].map((entry) => entry.settled),
+      ...[...this.#userShellRuns.values()].map((entry) => entry.settled),
       ...this.#inputTails.values(),
     ];
     if (operations.length > 0) {
@@ -1091,6 +1264,7 @@ export class RpcRuntimeDispatcher {
     this.#queueLeases.clear();
     this.#inputControllers.clear();
     this.#inputTails.clear();
+    this.#currentSessions.clear();
     this.#peers.clear();
     this.#initialExtensionUiSent.clear();
     for (const threadId of [...this.#extensionSessions.keys()]) await this.#endExtensionSession(threadId);
@@ -1108,9 +1282,462 @@ export class RpcRuntimeDispatcher {
     return threadId;
   }
 
+  #currentSessionResult(peerId: string): { thread: ReturnType<LoadedRuntime["store"]["getThread"]>; branch: string } | null {
+    const current = this.#currentSessions.get(peerId);
+    if (current === undefined) return null;
+    const threadId = this.#workspaceThread(current.threadId);
+    const thread = this.#runtime.store.getThread(threadId);
+    if (!thread.branches.some((entry) => entry.name === current.branch)) {
+      this.#currentSessions.delete(peerId);
+      return null;
+    }
+    return { thread, branch: current.branch };
+  }
+
+  #requireCurrentSession(peerId: string): { threadId: string; branch: string } {
+    const current = this.#currentSessions.get(peerId);
+    if (current === undefined) throw new Error("This RPC client has no current session; use session.new or session.switch first");
+    this.#workspaceThread(current.threadId);
+    return current;
+  }
+
+  #switchCurrentSession(peerId: string, input: Record<string, unknown>) {
+    const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+    const thread = this.#runtime.store.getThread(threadId);
+    const branch = optionalString(input.branch, "branch") ?? thread.defaultBranch;
+    if (!thread.branches.some((entry) => entry.name === branch)) throw new Error(`Unknown branch: ${branch}`);
+    this.#currentSessions.set(peerId, { threadId, branch });
+    return { thread, branch };
+  }
+
+  async #newCurrentSession(peerId: string, input: Record<string, unknown>) {
+    const parentCurrent = optionalBoolean(input.parentCurrent, "parentCurrent") ?? false;
+    const parent = parentCurrent ? this.#requireCurrentSession(peerId) : undefined;
+    const name = input.name === undefined ? undefined : boundedText(input.name, "name", 200, false);
+    const thread = await this.#runtime.service.createSession({
+      ...(name === undefined ? {} : { name }),
+      ...(parent === undefined ? {} : { parentThreadId: parent.threadId }),
+      ...(this.#runtime.generationSignal === undefined ? {} : { signal: this.#runtime.generationSignal }),
+    });
+    this.#currentSessions.set(peerId, { threadId: thread.threadId, branch: thread.defaultBranch });
+    return { thread, branch: thread.defaultBranch };
+  }
+
+  #copyResult(
+    sourceThreadId: string,
+    result: Awaited<ReturnType<LoadedRuntime["service"]["cloneSessionPath"]>>,
+  ): RpcSessionCopyResult {
+    return {
+      thread: result.thread,
+      branch: result.thread.defaultBranch,
+      sourceThreadId,
+      sourceBranch: result.sourceBranch,
+      ...(result.sourceEventId === undefined ? {} : { sourceEventId: result.sourceEventId }),
+      events: result.events,
+      artifacts: result.artifacts,
+    };
+  }
+
+  async #cloneCurrentSession(peerId: string, input: Record<string, unknown>): Promise<RpcSessionCopyResult> {
+    const current = this.#requireCurrentSession(peerId);
+    const target = this.#idleThreadTarget({ threadId: current.threadId, branch: current.branch }, "Session cloning");
+    const name = input.name === undefined ? undefined : boundedText(input.name, "name", 200, false);
+    const result = await this.#runtime.service.cloneSessionPath({
+      threadId: target.threadId,
+      branch: target.branch,
+      ...(name === undefined ? {} : { name }),
+      ...(this.#runtime.generationSignal === undefined ? {} : { signal: this.#runtime.generationSignal }),
+    });
+    this.#currentSessions.set(peerId, { threadId: result.thread.threadId, branch: result.thread.defaultBranch });
+    return this.#copyResult(target.threadId, result);
+  }
+
+  async #forkCurrentSession(peerId: string, input: Record<string, unknown>): Promise<RpcSessionForkResult> {
+    const current = this.#requireCurrentSession(peerId);
+    const target = this.#idleThreadTarget({ threadId: current.threadId, branch: current.branch }, "Session forking");
+    const eventId = boundedText(input.eventId, "eventId", 256, false);
+    const source = this.#runtime.store.listEvents(target.threadId, target.branch)
+      .find((entry) => entry.eventId === eventId);
+    const selected = source === undefined ? undefined : userMessageText(source);
+    if (source === undefined || selected === undefined) {
+      throw new Error(`Event ${eventId} is not a user-message fork candidate on the current session path`);
+    }
+    const name = input.name === undefined ? undefined : boundedText(input.name, "name", 200, false);
+    const result = await this.#runtime.service.cloneSessionPath({
+      threadId: target.threadId,
+      branch: target.branch,
+      beforeEventId: eventId,
+      ...(name === undefined ? {} : { name }),
+      ...(this.#runtime.generationSignal === undefined ? {} : { signal: this.#runtime.generationSignal }),
+    });
+    this.#currentSessions.set(peerId, { threadId: result.thread.threadId, branch: result.thread.defaultBranch });
+    return { ...this.#copyResult(target.threadId, result), selectedText: selected.text };
+  }
+
+  #forkMessagePage(input: Record<string, unknown>): RpcForkMessagePage {
+    const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+    const thread = this.#runtime.store.getThread(threadId);
+    const branch = optionalString(input.branch, "branch") ?? thread.defaultBranch;
+    if (!thread.branches.some((entry) => entry.name === branch)) throw new Error(`Unknown branch: ${branch}`);
+    const afterSequence = optionalCursor(input.afterSequence);
+    const limit = optionalNumber(input.limit, "limit") ?? RPC_FORK_MESSAGE_DEFAULT_LIMIT;
+    if (limit > RPC_FORK_MESSAGE_MAX_LIMIT) throw new Error(`limit must not exceed ${RPC_FORK_MESSAGE_MAX_LIMIT}`);
+    const page = this.#runtime.store.listEventPage(threadId, branch, {
+      afterSequence,
+      limit: Math.min(RPC_EVENT_PAGE_MAX_LIMIT, Math.max(64, limit * 8)),
+    });
+    const messages: RpcForkMessagePage["messages"] = [];
+    let nextCursor = afterSequence;
+    let consumed = 0;
+    for (const envelope of page.events) {
+      nextCursor = envelope.sequence;
+      consumed += 1;
+      const selected = userMessageText(envelope);
+      if (selected !== undefined) messages.push({
+        eventId: envelope.eventId,
+        sequence: envelope.sequence,
+        ...selected,
+      });
+      if (messages.length === limit) break;
+    }
+    return {
+      messages,
+      nextCursor,
+      hasMore: page.hasMore || consumed < page.events.length,
+    };
+  }
+
   #providerAuth(): LoadedRuntime["auth"] {
     if (this.#runtime.auth === undefined) throw new Error("Provider authentication is disabled");
     return this.#runtime.auth;
+  }
+
+  #idleThreadTarget(
+    input: Record<string, unknown>,
+    operation: string,
+    allowSerializedInput = false,
+  ): { threadId: string; branch: string } {
+    const threadId = this.#workspaceThread(requiredString(input.threadId, "threadId"));
+    if (this.#running.has(threadId)) throw new Error(`${operation} requires an idle thread`);
+    if (!allowSerializedInput && this.#inputTails.has(threadId)) {
+      throw new Error(`${operation} requires a thread without another pending input operation`);
+    }
+    if ([...this.#userShellRuns.values()].some((entry) => entry.threadId === threadId)) {
+      throw new Error(`${operation} requires a thread without an active user shell run`);
+    }
+    const thread = this.#runtime.store.getThread(threadId);
+    const branch = optionalString(input.branch, "branch") ?? thread.defaultBranch;
+    if (!thread.branches.some((entry) => entry.name === branch)) throw new Error(`Unknown branch: ${branch}`);
+    return { threadId, branch };
+  }
+
+  async #setThreadModel(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+  ): Promise<RuntimeModelSelection> {
+    const target = this.#idleThreadTarget(input, "Model selection");
+    return await this.#serializeThreadInput(peer.id, target.threadId, async (signal) => {
+      const selectedTarget = this.#idleThreadTarget(input, "Model selection", true);
+      const selected = await this.#runtime.service.resolveModelSelection(
+        boundedText(input.reference, "reference", 4 * 1024, false),
+        {
+          ...(input.provider === undefined
+            ? {}
+            : { provider: boundedText(input.provider, "provider", 512, false) }),
+          refresh: optionalBoolean(input.refresh, "refresh") ?? true,
+          ...(input.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: boundedText(input.reasoningEffort, "reasoningEffort", RPC_MAX_REASONING_EFFORT_BYTES, false) }),
+          signal,
+        },
+      );
+      return await this.#persistThreadSelection(selectedTarget, {
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+      }, signal);
+    });
+  }
+
+  async #cycleThreadModel(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+  ): Promise<RpcModelCycleResult | null> {
+    const target = this.#idleThreadTarget(input, "Model cycling");
+    const direction = input.direction === undefined ? "forward" : boundedText(input.direction, "direction", 16, false);
+    if (direction !== "forward" && direction !== "backward") throw new Error("direction must be forward or backward");
+    return await this.#serializeThreadInput(peer.id, target.threadId, async (signal) => {
+      const selectedTarget = this.#idleThreadTarget(input, "Model cycling", true);
+      const available = await this.#runtime.providers.listModels(
+        undefined,
+        signal,
+        { refresh: optionalBoolean(input.refresh, "refresh") ?? true },
+      );
+      const scoped = resolveModelsForScope(
+        available.map((info) => ({ provider: info.provider, model: info.id, info })),
+        this.#runtime.config?.scopedModels ?? [],
+        (entry) => modelReasoningEfforts(entry.info),
+      ).models;
+      if (scoped.length === 0) return null;
+      const current = this.#runtime.store.getModelSelection(selectedTarget.threadId, selectedTarget.branch);
+      const currentIndex = current === undefined ? -1 : scoped.findIndex((entry) =>
+        entry.provider === current.provider && entry.model === current.model);
+      const delta = direction === "backward" ? -1 : 1;
+      const index = currentIndex < 0
+        ? direction === "backward" ? scoped.length - 1 : 0
+        : (currentIndex + delta + scoped.length) % scoped.length;
+      const chosen = scoped[index]!;
+      const supported = modelReasoningEfforts(chosen.info);
+      const desiredThinking = chosen.reasoningEffort
+        ?? (current?.reasoningEffort !== undefined && supported.some((level) => level === current.reasoningEffort)
+          ? current.reasoningEffort
+          : supported[0]);
+      const resolved = await this.#runtime.service.resolveModelSelection(chosen.model, {
+        provider: chosen.provider,
+        refresh: false,
+        ...(desiredThinking === undefined ? {} : { reasoningEffort: desiredThinking }),
+        signal,
+      });
+      const selection = await this.#persistThreadSelection(selectedTarget, {
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+      }, signal, "cycle");
+      return {
+        selection,
+        model: chosen.info,
+        availableModels: scoped.length,
+        changed: current?.provider !== selection.provider ||
+          current?.model !== selection.model ||
+          current?.reasoningEffort !== selection.reasoningEffort,
+        wrapped: currentIndex >= 0 && (direction === "backward" ? currentIndex === 0 : currentIndex === scoped.length - 1),
+      };
+    });
+  }
+
+  async #setThreadThinking(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+  ): Promise<RuntimeModelSelection> {
+    const target = this.#idleThreadTarget(input, "Thinking selection");
+    const reasoningEffort = boundedText(
+      input.reasoningEffort,
+      "reasoningEffort",
+      RPC_MAX_REASONING_EFFORT_BYTES,
+      false,
+    );
+    return await this.#serializeThreadInput(peer.id, target.threadId, async (signal) => {
+      const selectedTarget = this.#idleThreadTarget(input, "Thinking selection", true);
+      const current = this.#runtime.store.getModelSelection(selectedTarget.threadId, selectedTarget.branch);
+      if (current === undefined) throw new Error("Thread has no selected model");
+      const selected = await this.#runtime.service.resolveModelSelection(current.model, {
+        provider: current.provider,
+        refresh: true,
+        reasoningEffort,
+        signal,
+      });
+      return await this.#persistThreadSelection(selectedTarget, {
+        provider: selected.provider,
+        model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+      }, signal);
+    });
+  }
+
+  async #cycleThreadThinking(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+  ): Promise<RpcThinkingCycleResult | null> {
+    const target = this.#idleThreadTarget(input, "Thinking selection");
+    return await this.#serializeThreadInput(peer.id, target.threadId, async (signal) => {
+      const selectedTarget = this.#idleThreadTarget(input, "Thinking selection", true);
+      const current = this.#runtime.store.getModelSelection(selectedTarget.threadId, selectedTarget.branch);
+      if (current === undefined) throw new Error("Thread has no selected model");
+      const model = (await this.#runtime.providers.listModels(current.provider, signal, { refresh: true }))
+        .find((entry) => entry.id === current.model);
+      if (model === undefined) throw new Error(`Selected model is not available: ${current.provider}/${current.model}`);
+      const levels = [...modelReasoningEfforts(model)];
+      if (levels.length <= 1) return null;
+      const currentLevel = current.reasoningEffort ?? "off";
+      const currentIndex = levels.findIndex((level) => level === currentLevel);
+      const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % levels.length;
+      const resolved = await this.#runtime.service.resolveModelSelection(current.model, {
+        provider: current.provider,
+        refresh: false,
+        reasoningEffort: levels[nextIndex]!,
+        signal,
+      });
+      const selection = await this.#persistThreadSelection(selectedTarget, {
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+      }, signal, "cycle");
+      return {
+        selection,
+        levels,
+        changed: current.reasoningEffort !== selection.reasoningEffort,
+        wrapped: currentIndex === levels.length - 1,
+      };
+    });
+  }
+
+  async #persistThreadSelection(
+    target: { threadId: string; branch: string },
+    selection: RuntimeModelSelection,
+    signal: AbortSignal,
+    source: "set" | "cycle" = "set",
+  ): Promise<RuntimeModelSelection> {
+    signal.throwIfAborted();
+    if (this.#runtime.auth?.has(selection.provider) === true) {
+      const state = await this.#runtime.auth.state(selection.provider);
+      signal.throwIfAborted();
+      if (state.status !== "connected") throw new Error(`Provider ${selection.provider} has no usable active credential`);
+    }
+    const previous = this.#runtime.store.getModelSelection(target.threadId, target.branch);
+    if (
+      previous?.provider === selection.provider &&
+      previous.model === selection.model &&
+      previous.reasoningEffort === selection.reasoningEffort
+    ) return selection;
+    const envelope = this.#runtime.store.appendEvent({
+      threadId: target.threadId,
+      branch: target.branch,
+      event: {
+        type: "model_selected",
+        provider: selection.provider,
+        model: selection.model,
+        ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+      },
+    });
+    this.#runtime.service.setRuntimeModelSelection({
+      threadId: target.threadId,
+      branch: target.branch,
+      selection,
+    });
+    await this.#runtime.service.publishRuntimeModelSelectionChange({
+      threadId: target.threadId,
+      branch: target.branch,
+      ...(previous === undefined ? {} : { previous }),
+      current: selection,
+      source,
+      signal,
+    });
+    this.#publishSubscriptions(target.branch, envelope);
+    return selection;
+  }
+
+  async #runUserShell(
+    peer: RpcRuntimePeer,
+    input: Record<string, unknown>,
+  ): Promise<RpcUserShellRunResult> {
+    const runId = boundedText(input.runId, "runId", 256, false);
+    if (this.#userShellRuns.has(runId)) throw new Error(`Duplicate RPC user shell run ${runId}`);
+    if (this.#userShellRuns.size >= RPC_USER_SHELL_MAX_CONCURRENT_GLOBAL) {
+      throw new Error(`RPC user shell concurrency exceeds ${RPC_USER_SHELL_MAX_CONCURRENT_GLOBAL}`);
+    }
+    if ([...this.#userShellRuns.values()].filter((entry) => entry.peerId === peer.id).length >= RPC_USER_SHELL_MAX_CONCURRENT_PER_PEER) {
+      throw new Error(`RPC peer user shell concurrency exceeds ${RPC_USER_SHELL_MAX_CONCURRENT_PER_PEER}`);
+    }
+    const target = this.#idleThreadTarget(input, "User shell execution");
+    const command = boundedText(input.command, "command", RPC_USER_SHELL_MAX_COMMAND_BYTES, false);
+    const requestedCwd = input.cwd === undefined
+      ? this.#runtime.workspace
+      : boundedText(input.cwd, "cwd", 16 * 1024, false);
+    const excludedFromContext = optionalBoolean(input.excludeFromContext, "excludeFromContext") ?? false;
+    const timeoutMs = optionalNumber(input.timeoutMs, "timeoutMs") ?? 120_000;
+    if (timeoutMs > RPC_USER_SHELL_MAX_TIMEOUT_MS) {
+      throw new Error(`timeoutMs must not exceed ${RPC_USER_SHELL_MAX_TIMEOUT_MS}`);
+    }
+    const controller = new AbortController();
+    const signals = [controller.signal, this.#runtime.generationSignal].filter(
+      (value): value is AbortSignal => value !== undefined,
+    );
+    const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+    let markSettled: () => void = () => {};
+    const settled = new Promise<void>((resolve) => { markSettled = resolve; });
+    const operation: UserShellOperation = {
+      peerId: peer.id,
+      threadId: target.threadId,
+      branch: target.branch,
+      controller,
+      settled,
+    };
+    this.#userShellRuns.set(runId, operation);
+    try {
+      signal.throwIfAborted();
+      await this.#ensureExtensionSession(peer, target.threadId, target.branch);
+      const reduction = this.#runtime.runtimeExtensions === undefined
+        ? { action: "execute" as const, command, cwd: requestedCwd }
+        : await this.#waitForAbort(this.#runtime.runtimeExtensions.reduceBeforeUserShell({
+            command,
+            cwd: requestedCwd,
+            hidden: excludedFromContext,
+          }, signal), signal);
+      signal.throwIfAborted();
+      const boundary = await WorkspaceBoundary.create(this.#runtime.workspace);
+      const cwd = await boundary.readable(reduction.cwd);
+      if (!(await stat(cwd)).isDirectory()) throw new Error(`User shell cwd is not a directory: ${reduction.cwd}`);
+      signal.throwIfAborted();
+      const rawResult = reduction.action === "handled"
+        ? reduction.result
+        : await runShellShortcut(
+            reduction.command,
+            cwd,
+            signal,
+            timeoutMs,
+            process.env,
+            undefined,
+            this.#runtime.config?.shellPath,
+            this.#runtime.config?.shellCommandPrefix,
+          );
+      signal.throwIfAborted();
+      const result: RuntimeUserShellResult = {
+        text: defaultSecretRedactor.redact(rawResult.text),
+        exitCode: rawResult.exitCode,
+        ...(rawResult.signal === undefined ? {} : { signal: rawResult.signal }),
+      };
+      if (!excludedFromContext) {
+        const envelope = this.#runtime.store.appendEvent({
+          threadId: target.threadId,
+          branch: target.branch,
+          event: {
+            type: "message_appended",
+            message: {
+              id: createId("msg"),
+              role: "user",
+              content: [{ type: "text", text: `[User shell command]\n${result.text}` }],
+              createdAt: new Date().toISOString(),
+            },
+          },
+        });
+        this.#publishSubscriptions(target.branch, envelope);
+      }
+      if (this.#runtime.runtimeExtensions !== undefined) {
+        await this.#runtime.runtimeExtensions.dispatch("event", {
+          type: "user_shell",
+          command: reduction.command,
+          hidden: excludedFromContext,
+          result,
+        }, signal).catch(async (cause) => {
+          if (signal.aborted) return;
+          await this.#notify(peer.id, "extension.warning", {
+            phase: "event",
+            message: defaultSecretRedactor.redact(cause instanceof Error ? cause.message : String(cause)),
+          });
+        });
+      }
+      return {
+        runId,
+        threadId: target.threadId,
+        branch: target.branch,
+        excludedFromContext,
+        result,
+      };
+    } finally {
+      if (this.#userShellRuns.get(runId) === operation) this.#userShellRuns.delete(runId);
+      if (!controller.signal.aborted) controller.abort(new Error("RPC user shell run finished"));
+      markSettled();
+    }
   }
 
   async #withPeerSignal<T>(peerId: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -1298,6 +1925,8 @@ export class RpcRuntimeDispatcher {
     return await this.#serializeThreadInput(peer.id, threadId, async (signal) => {
       this.#ownedOperation(peer, threadId);
       const reduced = await this.#reduceRpcInput({
+        threadId,
+        branch: this.#running.get(threadId)?.branch ?? this.#runtime.store.getThread(threadId).defaultBranch,
         text: queued.message,
         ...(queued.images === undefined ? {} : { images: queued.images }),
         source: "rpc",
@@ -1329,6 +1958,8 @@ export class RpcRuntimeDispatcher {
     const latestRun = runs.at(-1);
     const active = this.#running.get(threadId);
     const activeOnBranch = active?.branch === branch ? active : undefined;
+    const activeShell = [...this.#userShellRuns.values()].find((entry) =>
+      entry.threadId === threadId && entry.branch === branch);
     const durableSelection = this.#runtime.store.getModelSelection(threadId, branch);
     const selection = activeOnBranch?.selection ?? durableSelection ?? latestRun;
     const queueModes = activeOnBranch === undefined ? undefined : this.#runtime.service.queueModes(threadId);
@@ -1336,8 +1967,8 @@ export class RpcRuntimeDispatcher {
       threadId,
       branch,
       ...(thread.name === undefined ? {} : { name: thread.name }),
-      active: activeOnBranch !== undefined,
-      operation: activeOnBranch?.kind ?? null,
+      active: activeOnBranch !== undefined || activeShell !== undefined,
+      operation: activeOnBranch?.kind ?? (activeShell === undefined ? null : "shell"),
       pendingMessageCount: this.#runtime.service.queuedMessages(threadId, branch).length,
       ...(this.#runtime.service.recoverableMessageCount(threadId, branch) === 0
         ? {}
@@ -1347,6 +1978,7 @@ export class RpcRuntimeDispatcher {
       ...(selection !== undefined && "reasoningEffort" in selection && typeof selection.reasoningEffort === "string"
         ? { reasoningEffort: selection.reasoningEffort }
         : {}),
+      autoCompactionEnabled: this.#runtime.service.autoCompactionEnabled(threadId, branch),
       ...(queueModes === undefined ? {} : { queueModes }),
     };
   }
@@ -1472,6 +2104,7 @@ export class RpcRuntimeDispatcher {
         })).threadId;
         if (requestedThreadId !== undefined) this.#workspaceThread(threadId);
         const branch = requestedBranch ?? this.#runtime.store.getThread(threadId).defaultBranch;
+        this.#currentSessions.set(peer.id, { threadId, branch });
         await this.#waitForAbort(this.#ensureExtensionSession(peer, threadId, branch), retainedSelection.signal);
         retainedSelection.signal.throwIfAborted();
         return await this.#waitForAbort(this.#serializeThreadInput(peer.id, threadId, async (signal) => {
@@ -1480,6 +2113,8 @@ export class RpcRuntimeDispatcher {
           let selectedOptions = runOptions;
           if (runOptions.manualCompaction !== true) {
             const reduced = await this.#reduceRpcInput({
+              threadId,
+              branch,
               text: runOptions.prompt,
               ...(runOptions.images === undefined ? {} : { images: runOptions.images }),
               source: "rpc",
@@ -1500,6 +2135,9 @@ export class RpcRuntimeDispatcher {
             }
           }
           handoffSignal.throwIfAborted();
+          if ([...this.#userShellRuns.values()].some((entry) => entry.threadId === threadId)) {
+            throw new Error(`Thread has an active RPC user shell run: ${threadId}`);
+          }
           const operation = this.#runtime.service.run({
             ...selectedOptions,
             threadId,

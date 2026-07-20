@@ -23,12 +23,16 @@ import {
 import {
   EXTENSION_PACKAGE_LOCK,
   EXTENSION_PACKAGE_PROVENANCE,
+  DEFAULT_PACKAGE_ACTIVATION_TIMEOUT_MS,
   LocalExtensionPackageManager,
   parseExtensionPackageSource,
+  smokeStagedPackageRuntime,
   type ExtensionPackageCommands,
   type ExtensionPackageProvenance,
   type InstalledExtensionPackage,
 } from "./packages.js";
+import { discoverExtensions } from "./loader.js";
+import { filterExtensionResources } from "./resources.js";
 
 export const PROJECT_PACKAGE_DECLARATION = ".rigyn/packages.json";
 export const PROJECT_PACKAGE_LOCK = ".rigyn/packages.lock.json";
@@ -651,7 +655,10 @@ export class ProjectPackageManager {
     const installed = await manager.install(
       sourceSpecifier(declaration, localPath),
       "project",
-      signal === undefined ? {} : { signal },
+      {
+        disabledResources: declaration.disabledResources,
+        ...(signal === undefined ? {} : { signal }),
+      },
     );
     if (installed.id !== declaration.id) throw new Error(`Project package source contains ${installed.id}, expected ${declaration.id}`);
     const contentSha256 = await packageContentSha256(installed.packageRoot);
@@ -701,11 +708,22 @@ export class ProjectPackageManager {
         const installed = await manager.install(
           exactSourceSpecifier(entry, localPath),
           "project",
-          signal === undefined ? {} : { signal },
+          {
+            disabledResources: entry.declaration.disabledResources,
+            ...(signal === undefined ? {} : { signal }),
+          },
         );
         if (installed.id !== entry.id) throw new Error(`Locked source contains ${installed.id}, expected ${entry.id}`);
         await this.#assertInstalledEntry(installed, entry);
       }
+      signal?.throwIfAborted();
+      const catalog = await discoverExtensions([{ path: stageRoot, scope: "project", trusted: true }]);
+      if (!catalog.doctor().healthy) {
+        const diagnostic = catalog.doctor().diagnostics.find((entry) => entry.severity === "error");
+        throw new Error(diagnostic?.message ?? "Project package candidate set did not pass extension validation");
+      }
+      const filtered = filterExtensionResources(catalog, projectPackageResourceFilters(catalogEntries(lock)));
+      await smokeStagedPackageRuntime(filtered.bundle().runtime, DEFAULT_PACKAGE_ACTIVATION_TIMEOUT_MS, signal);
       signal?.throwIfAborted();
     } catch (error) {
       await rm(stageRoot, { recursive: true, force: true });

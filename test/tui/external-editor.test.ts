@@ -57,6 +57,18 @@ test("external editor round-trips a private temporary prompt and cleans it up", 
   await assert.rejects(access(editedPath), /ENOENT/u);
 });
 
+test("configured external editor overrides VISUAL", async (context) => {
+  const fixture = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "external-editor.mjs");
+  const root = await mkdtemp(join(tmpdir(), "harness-editor-config-test-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const marker = join(root, "path.txt");
+  const result = await editTextExternally("initial", {
+    command: `"${process.execPath}" "${fixture}"`,
+    environment: { ...process.env, VISUAL: "missing-editor", HARNESS_EDITOR_MARKER: marker },
+  });
+  assert.equal(result, "edited by fixture\n");
+});
+
 test("the external-editor fixture rejects a missing target without rewriting itself", async () => {
   const fixture = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "external-editor.mjs");
   const before = await readFile(fixture, "utf8");

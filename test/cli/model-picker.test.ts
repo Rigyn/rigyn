@@ -65,6 +65,17 @@ test("post-login defaults are provider-specific and never replace a real active 
     provider: "anthropic",
     model: "already-selected",
   }), undefined);
+  assert.deepEqual(selectDefaultModelAfterLogin("opencode", [model("kimi-k2.6", "opencode")]), {
+    provider: "opencode",
+    model: "kimi-k2.6",
+  });
+  assert.deepEqual(selectDefaultModelAfterLogin(
+    "cloudflare-workers-ai",
+    [model("@cf/moonshotai/kimi-k2.6", "cloudflare-workers-ai")],
+  ), {
+    provider: "cloudflare-workers-ai",
+    model: "@cf/moonshotai/kimi-k2.6",
+  });
 });
 
 test("OpenAI model picker excludes obvious non-agent catalog entries", () => {

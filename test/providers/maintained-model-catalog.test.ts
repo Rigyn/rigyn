@@ -20,6 +20,11 @@ test("maintained model catalog includes selectable defaults for major built-in p
     "kimi-coding/kimi-for-coding",
     "minimax/MiniMax-M3",
     "minimax-cn/MiniMax-M3",
+    "moonshotai/kimi-k2.7-code",
+    "moonshotai-cn/kimi-k2.6",
+    "xiaomi-token-plan-cn/mimo-v2.5-pro",
+    "xiaomi-token-plan-ams/mimo-v2.5-pro",
+    "xiaomi-token-plan-sgp/mimo-v2.5-pro",
   ]) assert.equal(ids.has(expected), true, expected);
 });
 
@@ -58,6 +63,14 @@ test("maintained metadata is exact for documented models and conservative for fa
   assert.equal(minimax?.contextTokens, 1_000_000);
   assert.equal(minimax?.reasoning, undefined);
   assert.equal(minimax?.reasoningEfforts, undefined);
+
+  const moonshot = byReference.get("moonshotai/kimi-k2.7-code");
+  assert.deepEqual(moonshot?.reasoningEffortMap, { off: null });
+
+  const tokenPlan = byReference.get("xiaomi-token-plan-cn/mimo-v2.5-pro");
+  assert.equal(tokenPlan?.contextTokens, 1_000_000);
+  assert.equal(tokenPlan?.maxOutputTokens, 128_000);
+  assert.deepEqual(tokenPlan?.reasoningEfforts, ["off", "high"]);
 });
 
 test("user configured model metadata overrides the maintained entry without duplicates", () => {

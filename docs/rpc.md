@@ -40,7 +40,24 @@ await client.close();
 
 `spawnRigynRpcClient()` resolves the CLI shipped in the same package and launches it through the current Node.js executable. It does not depend on `PATH`, a shell, or the platform-specific `rigyn`/`rigyn.cmd` command shim. Its `args` are appended after the `rpc` subcommand, so the example above should pass only RPC flags: `args: ["--workspace", process.cwd()]`. Use the lower-level `spawnRpcClient()` only for an explicit executable-plus-argument transport that you own.
 
-`RpcClient.request()` is typed by `RpcMethodMap`; `onNotification()` is typed by `RpcNotificationMap`. Aborting a request signal stops only the local wait because JSON-RPC has no generic cancellation method. Use `run.cancel` or `extension.command.cancel` to cancel corresponding server work. Closing an owned spawned client terminates its child process and rejects every pending request.
+`RpcClient.request()` is typed by `RpcMethodMap`; `onNotification()` is typed by `RpcNotificationMap`. Aborting a request signal stops only the local wait because JSON-RPC has no generic cancellation method. Use `run.cancel`, `shell.cancel`, or `extension.command.cancel` to cancel corresponding server work. Closing an owned spawned client terminates its child process and rejects every pending request.
+
+Standalone user-shell work has an explicit cancellation handle and does not start an agent run:
+
+```ts
+const thread = await client.request("thread.create", { name: "automation" });
+const shell = client.runShell({
+  threadId: thread.threadId,
+  command: "npm test",
+});
+
+// The run ID is available before the command settles.
+console.log(shell.runId);
+// From another callback: await shell.cancel("superseded");
+const shellResult = await shell.result;
+```
+
+`runShell()` generates a bounded caller-known run ID unless one is supplied. Its request remains pending until the command settles, while `shell.cancel` can be sent concurrently. Locally aborting only the result wait does not cancel the command; call `cancel()` explicitly. The initial `cwd` must resolve inside the server workspace, but this is path scoping rather than process isolation: the command still runs with the Rigyn process user's permissions. Visible results are appended to the selected thread as user-shell context. Set `excludeFromContext: true` for an execution whose redacted result must not enter the transcript.
 
 Call `initialize` first when writing a long-lived client. Its capability object is the source of truth for optional limits and surfaces. `health`, `version`, and `capabilities` are also available before initialization. The server does not silently emulate a capability that is absent.
 
@@ -94,15 +111,17 @@ The server intentionally uses `-32602` for both malformed parameters and invalid
 
 ## Ownership, cancellation, and shutdown
 
-Runs, queue leases, extension commands, and blocking extension UI requests are owned by the peer that created them. Another peer cannot wait, cancel, acknowledge, or answer them. Disconnect cancels peer-owned active work, releases its queue leases, and cancels its UI requests; durable thread events and recoverable queued input remain.
+Runs, user-shell commands, queue leases, extension commands, and blocking extension UI requests are owned by the peer that created them. Another peer cannot wait, cancel, acknowledge, or answer them. Disconnect cancels peer-owned active work, releases its queue leases, and cancels its UI requests; durable thread events and recoverable queued input remain.
 
-`run.cancel` and `extension.command.cancel` acknowledge a cancellation request; final settlement is observed through `run.wait`, notifications, or command completion. `shutdown` enters draining state, cancels active work, acknowledges `{ shuttingDown: true }`, then asks the stdio host to close input. During drain, only `health` and `run.wait` remain accepted.
+`run.cancel`, `shell.cancel`, and `extension.command.cancel` acknowledge a cancellation request; final settlement is observed through `run.wait`, the pending `shell.run` response, notifications, or command completion. `run.retry.cancel` is narrower: it returns `{ accepted: true }` only while a retry delay is scheduled and leaves the run itself open to settle with the original provider failure. `retry.get` and `retry.set` inspect or change the process-local automatic retry toggle; persist `providerRetry.enabled` in `config.jsonc` when the choice must survive a restart. `shutdown` enters draining state, cancels active work, acknowledges `{ shuttingDown: true }`, then asks the stdio host to close input. During drain, only `health` and `run.wait` remain accepted.
 
 ## Sessions, branches, and exports
 
-Thread methods are scoped to the server workspace. A branch argument defaults to the thread default branch. `thread.events` always returns `{ events, nextCursor, hasMore, blocked? }`; the cursor is exclusive, the default page is 256 events, and the hard maximum is 1024. Results also stay below the advertised serialized-byte ceiling. Count and byte limits may therefore produce fewer events than requested while setting `hasMore`. If one event alone exceeds `maxSerializedEventBytes`, the page excludes it, leaves `nextCursor` before it, and reports the same bounded `blocked` metadata described above. Advancing to `blocked.resumeAfterSequence` is an explicit decision to skip that event. Event pages, durable subscription notifications, and live `run.event` notifications use the same portable projection: provider continuation state, opaque provider blocks, provider-private reasoning text, raw usage/error payloads, response identifiers, and arbitrary warning details are omitted before byte accounting or delivery. `thread.fork` creates a branch inside a thread, while extension session cloning is a separate in-process API. `thread.export` returns inline data only within the advertised byte limit; use the CLI export command for larger sessions.
+Thread methods are scoped to the server workspace. A branch argument defaults to the thread default branch. `thread.events` always returns `{ events, nextCursor, hasMore, blocked? }`; the cursor is exclusive, the default page is 256 events, and the hard maximum is 1024. Results also stay below the advertised serialized-byte ceiling. Count and byte limits may therefore produce fewer events than requested while setting `hasMore`. If one event alone exceeds `maxSerializedEventBytes`, the page excludes it, leaves `nextCursor` before it, and reports the same bounded `blocked` metadata described above. Advancing to `blocked.resumeAfterSequence` is an explicit decision to skip that event. Event pages, durable subscription notifications, and live `run.event` notifications use the same portable projection: provider continuation state, opaque provider blocks, provider-private reasoning text, raw usage/error payloads, response identifiers, and arbitrary warning details are omitted before byte accounting or delivery. `thread.fork` creates a branch inside a thread. `thread.forkMessages` provides exclusive-cursor pages of visible user-message candidates for clients that implement a fork picker; each preview is UTF-8 bounded and reports truncation. `thread.export` returns inline data only within the advertised byte limit; use the CLI export command for larger sessions.
 
-`thread.state` reports activity, queue counts, and current selection. `thread.stats` reports bounded aggregate counts and normalized usage. `thread.lastAssistantText` returns visible assistant text only and rejects an over-limit result rather than returning a silent partial.
+`thread.state` reports activity (including `operation: "shell"`), queue counts, current selection, and the effective automatic-compaction policy. `thread.model.set` and `thread.thinking.set` validate and durably update an idle thread without creating an agent run; both reject active agent or user-shell work instead of racing it. `thread.model.cycle` follows the configured scoped-model order in either direction and preserves a compatible thinking level. `thread.thinking.cycle` follows the selected model's declared levels. Either cycle returns `null` when there is nothing meaningful to select. `thread.autoCompaction.set` is a process-local branch override: an active run observes it before subsequent compaction decisions, `/reload` preserves it, and a process restart returns to the configured default. `thread.stats` reports bounded aggregate counts and normalized usage. `thread.lastAssistantText` returns visible assistant text only and rejects an over-limit result rather than returning a silent partial.
+
+The `session.*` methods are ergonomic helpers over the multi-thread protocol. Each connected client has an independent, non-durable current thread-and-branch pointer; `run.start`, `session.new`, `session.switch`, `session.clone`, and `session.fork` update it. Disconnect clears only that pointer, never the durable session. Clone copies and selects the complete current branch path. Fork validates a user-message candidate, copies only the path before that message, and returns its bounded display text so a client can put it back in an editor. Both copy operations require the source thread to be idle. Clients that do not want current-session state can continue using the lower-level `thread.*` methods exclusively.
 
 ## Runs and durable input queues
 
@@ -112,7 +131,7 @@ Steering and follow-up input are persisted before acceptance. Queue inspection i
 
 ## Models and authentication
 
-Model operations separate durable catalog status, listing, refresh, and reference resolution. Resolution rejects ambiguous references. Authentication reads return secret-free state. `auth.set` is the only method whose request intentionally carries a reusable secret; it is appropriate only over this trusted local stdio channel. `auth.delete` may optionally attempt remote revocation, and cancellation does not silently delete a credential whose requested revocation did not complete.
+Model operations separate durable catalog status, listing, refresh, reference resolution, and idle-thread selection. Resolution rejects ambiguous references, and selection rejects a registered provider without usable active authentication. Authentication reads return secret-free state. `auth.set` is the only method whose request intentionally carries a reusable secret; it is appropriate only over this trusted local stdio channel. `auth.delete` may optionally attempt remote revocation, and cancellation does not silently delete a credential whose requested revocation did not complete.
 
 ## Resources, commands, and extension UI
 
@@ -139,15 +158,27 @@ This table is rendered from `RPC_METHOD_REFERENCE`. A conformance test compares 
 | `thread.stats` | threadId, branch? | RpcThreadStatistics | Read message, run, usage, and context statistics. |
 | `thread.lastAssistantText` | threadId, branch? | { text } | Read bounded text from the latest assistant message. |
 | `thread.fork` | threadId, newBranch, fromBranch?, atEventId? | BranchRecord or cancelled | Fork a branch at a durable event. |
+| `thread.forkMessages` | threadId, branch?, afterSequence?, limit? | RpcForkMessagePage | Read a bounded cursor page of user-message fork candidates. |
 | `thread.name` | threadId, name | ThreadRecord | Set a thread name. |
 | `thread.delete` | threadId | { deleted } | Delete a workspace thread. |
 | `thread.export` | threadId, format?, branch? | RpcThreadExportResult | Export bounded JSONL, Markdown, or HTML. |
 | `thread.compact` | threadId, provider, model, branch?, budgets? | AgentRunResult | Run manual context compaction. |
+| `thread.model.set` | threadId, reference, branch?, provider?, reasoningEffort?, refresh? | RuntimeModelSelection | Persist an idle thread model selection without starting a run. |
+| `thread.model.cycle` | threadId, branch?, direction?, refresh? | RpcModelCycleResult or null | Cycle an idle thread through its configured model scope. |
+| `thread.thinking.set` | threadId, reasoningEffort, branch? | RuntimeModelSelection | Persist an idle thread thinking level without starting a run. |
+| `thread.thinking.cycle` | threadId, branch? | RpcThinkingCycleResult or null | Cycle an idle thread through levels supported by its selected model. |
+| `thread.autoCompaction.set` | threadId, branch?, enabled | { threadId, branch, enabled } | Set the automatic-compaction policy for subsequent RPC runs on a thread branch. |
+| `session.current` | none | RpcCurrentSession or null | Read this client's current-session pointer. |
+| `session.new` | name?, parentCurrent? | RpcCurrentSession | Create and select a new current session for this client. |
+| `session.switch` | threadId, branch? | RpcCurrentSession | Select a workspace session as this client's current session. |
+| `session.clone` | name? | RpcSessionCopyResult | Clone and select the complete current session path. |
+| `session.fork` | eventId, name? | RpcSessionForkResult | Fork before a current-path user message and select the new session. |
 | `events.subscribe` | threadId, branch?, afterSequence?, limit? | RpcEventSubscriptionResult | Start bounded-batch replayable durable-event delivery. |
 | `events.unsubscribe` | subscriptionId | { unsubscribed } | Stop an event subscription. |
 | `run.start` | RpcRunStartParams | { threadId, handled? } | Start a caller-owned agent run. |
 | `run.wait` | threadId | HarnessRun or AgentRunResult | Wait for a caller-owned run or compaction. |
 | `run.cancel` | threadId, reason? | { accepted } | Cancel a caller-owned run. |
+| `run.retry.cancel` | threadId | { accepted } | Cancel only a caller-owned scheduled retry delay. |
 | `run.steer` | threadId, message, images? | { accepted, handled? } | Queue steering input for an active run. |
 | `run.followUp` | threadId, message, images? | { accepted, handled? } | Queue follow-up input for an active run. |
 | `run.queue` | threadId, branch?, offset?, limit? | RpcQueueResult | Inspect bounded durable queued input. |
@@ -156,6 +187,10 @@ This table is rendered from `RPC_METHOD_REFERENCE`. A conformance test compares 
 | `run.dequeue.release` | leaseId | { accepted } | Release a queue lease without removing it. |
 | `run.queueModes.get` | threadId | queue modes | Read active run queue modes. |
 | `run.queueModes.set` | threadId, steeringMode?, followUpMode? | queue modes | Change active run queue modes. |
+| `retry.get` | none | { enabled } | Read the process-local automatic retry toggle. |
+| `retry.set` | enabled | { enabled } | Change the process-local automatic retry toggle. |
+| `shell.run` | runId, threadId, command, branch?, cwd?, excludeFromContext?, timeoutMs? | RpcUserShellRunResult | Run a bounded caller-owned user shell command. |
+| `shell.cancel` | runId, reason? | { accepted } | Cancel a caller-owned user shell command. |
 | `models.list` | provider?, refresh? | ModelInfo[] | List configured or discovered models. |
 | `models.status` | provider? | ModelCatalogStatus[] | Inspect durable model-catalog status. |
 | `models.refresh` | provider? | ModelCatalogRefreshResult or [] | Refresh one or all model catalogs. |

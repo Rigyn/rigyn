@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   BedrockAdapter,
@@ -7,6 +8,7 @@ import {
   type AwsEventStreamMessage,
 } from "../../src/providers/bedrock.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
+import { ProviderWireInterceptorRegistry } from "../../src/providers/wire.js";
 import { byteChunks, collect, fakeFetch, readable, request, streamResponse, terminalCount } from "./helpers.js";
 
 test("AWS event-stream decoder validates and reconstructs arbitrarily split frames", async () => {
@@ -118,6 +120,59 @@ test("local SigV4 signer is deterministic and retains the request body", async (
   assert.match(signed.headers.get("authorization") ?? "", /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
   assert.match(signed.headers.get("authorization") ?? "", /\/us-east-1\/bedrock\/aws4_request/);
   assert.equal(await signed.text(), '{"messages":[]}');
+});
+
+test("Bedrock wire mutations are applied before SigV4 signing and responses are observed", async () => {
+  const bytes = concat(
+    awsFrame({ ":message-type": "event", ":event-type": "messageStart" }, { role: "assistant" }),
+    awsFrame({ ":message-type": "event", ":event-type": "messageStop" }, { stopReason: "end_turn" }),
+    awsFrame({ ":message-type": "event", ":event-type": "metadata" }, { usage: { inputTokens: 1, outputTokens: 1 } }),
+  );
+  const wire = new ProviderWireInterceptorRegistry();
+  let responseStatus: number | undefined;
+  wire.register("bedrock", {
+    interceptRequest(observed) {
+      assert.equal(observed.headers.authorization, undefined);
+      assert.equal(observed.headers["x-amz-date"], undefined);
+      return {
+        body: { ...(observed.body as Record<string, unknown>), requestMetadata: { wire: "patched" } },
+        headers: { "x-wire-signed": "yes" },
+      };
+    },
+    observeResponse(observed) {
+      responseStatus = observed.status;
+    },
+  });
+  let transported: Request | undefined;
+  const adapter = new BedrockAdapter({
+    region: "us-east-1",
+    credentials: { accessKeyId: "AKIDEXAMPLE", secretAccessKey: "secret" },
+    now: () => new Date("2026-07-09T12:34:56.000Z"),
+    wire,
+    fetch: fakeFetch((incoming) => {
+      transported = incoming;
+      return streamResponse(byteChunks(bytes), {
+        "content-type": "application/vnd.amazon.eventstream",
+        "x-amzn-requestid": "bedrock-request",
+      });
+    }),
+  });
+
+  const events = await collect(adapter.stream(request("bedrock"), new AbortController().signal));
+
+  assert.equal(terminalCount(events), 1);
+  const bodyText = await transported!.clone().text();
+  assert.deepEqual(JSON.parse(bodyText), {
+    messages: [{ role: "user", content: [{ text: "hello" }] }],
+    requestMetadata: { wire: "patched" },
+  });
+  assert.equal(transported!.headers.get("x-wire-signed"), "yes");
+  assert.equal(
+    transported!.headers.get("x-amz-content-sha256"),
+    createHash("sha256").update(bodyText).digest("hex"),
+  );
+  assert.match(transported!.headers.get("authorization") ?? "", /SignedHeaders=[^,]*x-wire-signed/u);
+  assert.equal(responseStatus, 200);
 });
 
 test("provider registry rejects duplicate adapters", () => {

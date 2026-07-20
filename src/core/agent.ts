@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { abortableAsyncIterable } from "./abortable-async-iterable.js";
 import { createId } from "./ids.js";
 import type { RunId, ThreadId } from "./ids.js";
-import type { EventSink } from "./events.js";
+import {
+  MAX_TOOL_CALL_STREAM_DELTA_BYTES,
+  MAX_TOOL_CALL_STREAM_ID_BYTES,
+  MAX_TOOL_CALL_STREAM_NAME_BYTES,
+  type AssistantResponseTransformationAudit,
+  type AssistantResponseTransformationField,
+  type EventSink,
+} from "./events.js";
 import type {
   AdapterError,
   AdapterEvent,
@@ -67,6 +74,18 @@ export interface AgentExtensionRunScope {
   readonly step?: number;
 }
 
+export interface AgentFinalizedAssistantResponse {
+  message: CanonicalMessage;
+  finishReason: FinishReason;
+  usage?: NormalizedUsage;
+  rawReason?: string;
+  explanation?: string;
+}
+
+export interface AgentFinalizedAssistantReduction extends AgentFinalizedAssistantResponse {
+  transformations?: AssistantResponseTransformationAudit[];
+}
+
 export interface AgentExtensionReducers {
   beforeAgentStart?(event: AgentExtensionRunScope & {
     prompt: string;
@@ -84,6 +103,11 @@ export interface AgentExtensionReducers {
     signal: AbortSignal,
     scope: AgentExtensionRunScope,
   ): Promise<CanonicalMessage>;
+  finalizedAssistantEnd?(
+    response: AgentFinalizedAssistantResponse,
+    signal: AbortSignal,
+    scope: AgentExtensionRunScope,
+  ): Promise<AgentFinalizedAssistantReduction>;
   beforeProviderRequest?(
     event: AgentBeforeProviderRequestEvent,
     signal: AbortSignal,
@@ -135,8 +159,13 @@ export interface AgentRunRequest {
   contextTriggerTokens?: number;
   summaryTokenBudget?: number;
   autoCompaction?: boolean;
+  /** Host-owned live policy lookup for session-scoped compaction toggles. */
+  autoCompactionEnabled?: () => boolean;
+  compactionReserveTokens?: number;
+  compactionKeepRecentTokens?: number;
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
+  thinkingBudgets?: ProviderRequest["thinkingBudgets"];
   manualCompaction?: boolean;
   compactionInstructions?: string;
   queuedPrompts?: string[];
@@ -178,6 +207,7 @@ export interface AgentRunResult {
   runId: RunId;
   finishReason: FinishReason;
   rawReason?: string;
+  explanation?: string;
   finalText: string;
   steps: number;
   queuedFollowUps: string[];
@@ -369,6 +399,7 @@ export interface AgentLifecycleObserver {
     responseId?: string;
     requestId?: string;
     rawReason?: string;
+    explanation?: string;
     usage?: NormalizedUsage;
     diagnostics?: ProviderResponseDiagnostics;
   }, signal: AbortSignal): Promise<void> | void;
@@ -401,6 +432,9 @@ export interface AgentLifecycleObserver {
 export class RunControl {
   readonly abortController = new AbortController();
   readonly #queue: QueuedRunMessage[] = [];
+  #retryAbortController: AbortController | undefined;
+  #autoRetryEnabled = true;
+  #autoRetryConfigured = false;
   #steeringMode: QueueMode;
   #followUpMode: QueueMode;
   #queuedBytes = 0;
@@ -423,6 +457,35 @@ export class RunControl {
   setQueueModes(options: { steeringMode?: QueueMode; followUpMode?: QueueMode }): void {
     if (options.steeringMode !== undefined) this.#steeringMode = queueMode(options.steeringMode, "Steering");
     if (options.followUpMode !== undefined) this.#followUpMode = queueMode(options.followUpMode, "Follow-up");
+  }
+
+  get autoRetryEnabled(): boolean {
+    return this.#autoRetryEnabled;
+  }
+
+  setAutoRetryEnabled(enabled: boolean): void {
+    this.#autoRetryEnabled = enabled;
+    this.#autoRetryConfigured = true;
+  }
+
+  initializeAutoRetryEnabled(enabled: boolean): void {
+    if (!this.#autoRetryConfigured) this.setAutoRetryEnabled(enabled);
+  }
+
+  beginRetryDelay(): AbortSignal {
+    if (this.#retryAbortController !== undefined) throw new Error("A retry delay is already active");
+    this.#retryAbortController = new AbortController();
+    return AbortSignal.any([this.abortController.signal, this.#retryAbortController.signal]);
+  }
+
+  finishRetryDelay(): void {
+    this.#retryAbortController = undefined;
+  }
+
+  cancelRetry(): boolean {
+    if (this.#retryAbortController === undefined || this.#retryAbortController.signal.aborted) return false;
+    this.#retryAbortController.abort(new Error("Automatic retry cancelled"));
+    return true;
   }
 
   steer(message: string, images?: ImageBlock[], receipt?: QueuedRunDeliveryReceipt): void {
@@ -616,6 +679,7 @@ interface StepResult {
   finishReason: FinishReason;
   attempt: number;
   rawReason?: string;
+  explanation?: string;
   responseId?: string;
   requestId?: string;
   state: ProviderState;
@@ -703,6 +767,85 @@ function assertMessageReplacement(original: CanonicalMessage, replacement: Canon
   }
 }
 
+const FINALIZED_RESPONSE_FINISH_REASONS = new Set<FinishReason>([
+  "stop", "tool_calls", "length", "context_limit", "content_filter", "refusal",
+  "pause", "cancelled", "error", "incomplete", "unknown",
+]);
+const SAFE_EXTENSION_FINISH_REASONS = new Set<FinishReason>([
+  "stop", "length", "content_filter", "refusal", "pause", "unknown",
+]);
+const FINALIZED_RESPONSE_FIELDS = new Set<AssistantResponseTransformationField>([
+  "message", "finishReason", "usage", "rawReason", "explanation",
+]);
+
+function finalizedResponseChangedFields(
+  original: AgentFinalizedAssistantResponse,
+  replacement: AgentFinalizedAssistantResponse,
+): AssistantResponseTransformationField[] {
+  const fields: AssistantResponseTransformationField[] = [];
+  if (!sameValue(original.message, replacement.message)) fields.push("message");
+  if (original.finishReason !== replacement.finishReason) fields.push("finishReason");
+  if (!sameValue(original.usage, replacement.usage)) fields.push("usage");
+  if (original.rawReason !== replacement.rawReason) fields.push("rawReason");
+  if (original.explanation !== replacement.explanation) fields.push("explanation");
+  return fields;
+}
+
+function assertFinalizedAssistantReplacement(
+  original: AgentFinalizedAssistantResponse,
+  replacement: AgentFinalizedAssistantReduction,
+): void {
+  assertMessageReplacement(original.message, replacement.message);
+  if (!FINALIZED_RESPONSE_FINISH_REASONS.has(replacement.finishReason)) {
+    throw new HarnessError("EXTENSION_FINAL_RESPONSE", "A finalized assistant extension returned an invalid finish reason");
+  }
+  if (replacement.usage !== undefined && !isNormalizedUsage(replacement.usage)) {
+    throw new HarnessError("EXTENSION_FINAL_RESPONSE", "A finalized assistant extension returned invalid normalized usage");
+  }
+  if (!sameValue(original.usage, replacement.usage) && replacement.usage?.raw !== undefined) {
+    throw new HarnessError("EXTENSION_FINAL_RESPONSE", "A finalized assistant extension cannot replace provider-raw usage");
+  }
+  for (const [label, value] of [["raw reason", replacement.rawReason], ["explanation", replacement.explanation]] as const) {
+    if (value !== undefined && (value.includes("\0") || Buffer.byteLength(value, "utf8") > 16 * 1024)) {
+      throw new HarnessError("EXTENSION_FINAL_RESPONSE", `A finalized assistant extension returned an invalid ${label}`);
+    }
+  }
+  const toolCalls = original.message.content.some((block) => block.type === "tool_call");
+  if (replacement.finishReason !== original.finishReason && (
+    toolCalls || !SAFE_EXTENSION_FINISH_REASONS.has(replacement.finishReason)
+  )) {
+    throw new HarnessError(
+      "EXTENSION_FINAL_RESPONSE",
+      "A finalized assistant extension cannot change tool-control or internal terminal finish semantics",
+    );
+  }
+  const changed = finalizedResponseChangedFields(original, replacement);
+  const transformations = replacement.transformations ?? [];
+  if (transformations.length > 128) {
+    throw new HarnessError("EXTENSION_FINAL_RESPONSE", "Finalized assistant transformation provenance exceeds its bound");
+  }
+  const audited = new Set<AssistantResponseTransformationField>();
+  for (const transformation of transformations) {
+    if (
+      transformation.actor === "" || transformation.actor.includes("\0") ||
+      Buffer.byteLength(transformation.actor, "utf8") > 256 ||
+      transformation.fields.length === 0 || transformation.fields.length > FINALIZED_RESPONSE_FIELDS.size ||
+      new Set(transformation.fields).size !== transformation.fields.length
+    ) {
+      throw new HarnessError("EXTENSION_FINAL_RESPONSE", "Finalized assistant transformation provenance is invalid");
+    }
+    for (const field of transformation.fields) {
+      if (!FINALIZED_RESPONSE_FIELDS.has(field)) {
+        throw new HarnessError("EXTENSION_FINAL_RESPONSE", "Finalized assistant transformation provenance is invalid");
+      }
+      audited.add(field);
+    }
+  }
+  if (changed.some((field) => !audited.has(field))) {
+    throw new HarnessError("EXTENSION_FINAL_RESPONSE", "Finalized assistant transformation provenance is incomplete");
+  }
+}
+
 async function reduceMessage(
   reducers: AgentExtensionReducers | undefined,
   value: CanonicalMessage,
@@ -714,6 +857,22 @@ async function reduceMessage(
   const reduced = await reducers.messageEnd(value, signal, scope);
   signal.throwIfAborted();
   assertMessageReplacement(value, reduced);
+  return reduced;
+}
+
+async function reduceFinalizedAssistant(
+  reducers: AgentExtensionReducers | undefined,
+  value: AgentFinalizedAssistantResponse,
+  signal: AbortSignal,
+  scope: AgentExtensionRunScope,
+): Promise<AgentFinalizedAssistantReduction> {
+  if (reducers?.finalizedAssistantEnd === undefined) {
+    return { ...value, message: await reduceMessage(reducers, value.message, signal, scope) };
+  }
+  signal.throwIfAborted();
+  const reduced = await reducers.finalizedAssistantEnd(value, signal, scope);
+  signal.throwIfAborted();
+  assertFinalizedAssistantReplacement(value, reduced);
   return reduced;
 }
 
@@ -930,12 +1089,46 @@ function boundedProviderIdentity(value: string, label: string, maxBytes: number)
   return value;
 }
 
+function providerToolCallStreamIndex(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ProviderFailure({
+      category: "protocol",
+      message: "Provider returned an invalid streaming tool call index",
+      retryable: false,
+      partial: true,
+      bodyStarted: true,
+    });
+  }
+  return value;
+}
+
+function boundedProviderToolCallStreamValue(value: string, label: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) {
+    throw new ProviderFailure({
+      category: "protocol",
+      message: `Provider returned an oversized streaming tool call ${label}`,
+      retryable: false,
+      partial: true,
+      bodyStarted: true,
+    });
+  }
+  return value;
+}
+
 function abortedError(reason: unknown): AdapterError {
   return {
     category: "cancelled",
     message: reason instanceof Error ? reason.message : "Run cancelled",
     retryable: false,
     partial: false,
+  };
+}
+
+function retryCancelledError(error: AdapterError): AdapterError {
+  return {
+    ...error,
+    message: `Automatic retry cancelled: ${error.message}`,
+    retryable: false,
   };
 }
 
@@ -1096,6 +1289,10 @@ function toolDefinitionFingerprint(definitions: ProviderRequest["tools"]): strin
   return createHash("sha256").update(JSON.stringify(definitions)).digest("hex");
 }
 
+function automaticCompactionEnabled(request: AgentRunRequest): boolean {
+  return request.autoCompactionEnabled?.() ?? request.autoCompaction !== false;
+}
+
 export class AgentRunner {
   readonly #conversation: ConversationPort;
   readonly #events: (threadId: ThreadId, runId: RunId, branch: string | undefined, signal: AbortSignal) => EventSink;
@@ -1124,6 +1321,7 @@ export class AgentRunner {
       ...(request.followUpMode === undefined ? {} : { followUpMode: request.followUpMode }),
     }),
   ): Promise<AgentRunResult> {
+    control.initializeAutoRetryEnabled(request.retry?.enabled ?? this.#retry.enabled ?? true);
     if (request.outboundImages !== undefined && request.outboundImages !== "allow" && request.outboundImages !== "block") {
       throw new RangeError("outboundImages must be allow or block");
     }
@@ -1131,6 +1329,14 @@ export class AgentRunner {
       throw new RangeError("maxSteps must be a positive safe integer when configured");
     }
     cappedMaxOutputTokens(request.maxOutputTokens, request.maxOutputTokenLimit);
+    if (
+      request.compactionReserveTokens !== undefined &&
+      (!Number.isSafeInteger(request.compactionReserveTokens) || request.compactionReserveTokens < 1)
+    ) throw new RangeError("compactionReserveTokens must be a positive safe integer");
+    if (
+      request.compactionKeepRecentTokens !== undefined &&
+      (!Number.isSafeInteger(request.compactionKeepRecentTokens) || request.compactionKeepRecentTokens < 1)
+    ) throw new RangeError("compactionKeepRecentTokens must be a positive safe integer");
     if (
       request.compactionRetainRecentTurns !== undefined &&
       (!Number.isSafeInteger(request.compactionRetainRecentTurns) || request.compactionRetainRecentTurns < 0 || request.compactionRetainRecentTurns > 1_000)
@@ -1200,6 +1406,8 @@ export class AgentRunner {
           provider: request.provider.id,
           maxTokens: request.contextTokenBudget,
           ...(request.summaryTokenBudget === undefined ? {} : { maxSummaryTokens: request.summaryTokenBudget }),
+          ...(request.compactionReserveTokens === undefined ? {} : { reserveTokens: request.compactionReserveTokens }),
+          ...(request.compactionKeepRecentTokens === undefined ? {} : { keepRecentTokens: request.compactionKeepRecentTokens }),
           ...(request.compactionRetainRecentTurns === undefined ? {} : { retainRecentTurns: request.compactionRetainRecentTurns }),
           ...(request.compactionToolResultBytes === undefined ? {} : { oldToolResultBytes: request.compactionToolResultBytes }),
           model: request.model,
@@ -1210,7 +1418,7 @@ export class AgentRunner {
         });
         let finalText: string;
         if (selection.kind === "compact") {
-          const compacted = await this.#compact(selection, request, runId, sink, signal);
+          const compacted = await this.#compact(selection, request, runId, sink, signal, control);
           finalText = `Compacted ${selection.sourceMessageIds.length} messages into ${compacted.summary.message.id}`;
         } else {
           finalText = `No compaction performed: ${selection.reason}`;
@@ -1387,7 +1595,7 @@ export class AgentRunner {
           providerState = undefined;
           providerStateMessageId = undefined;
         }
-        if (turnRequest.contextTokenBudget !== undefined && request.autoCompaction === false) {
+        if (turnRequest.contextTokenBudget !== undefined && !automaticCompactionEnabled(request)) {
           const uncompacted = buildContextProjection(context, turnRequest.provider.id, {
             model: turnRequest.model,
             ...(request.outboundImages === undefined ? {} : { outboundImages: request.outboundImages }),
@@ -1410,6 +1618,8 @@ export class AgentRunner {
             maxTokens: turnRequest.contextTokenBudget,
             ...(turnRequest.contextTriggerTokens === undefined ? {} : { triggerTokens: turnRequest.contextTriggerTokens }),
             ...(request.summaryTokenBudget === undefined ? {} : { maxSummaryTokens: request.summaryTokenBudget }),
+            ...(request.compactionReserveTokens === undefined ? {} : { reserveTokens: request.compactionReserveTokens }),
+            ...(request.compactionKeepRecentTokens === undefined ? {} : { keepRecentTokens: request.compactionKeepRecentTokens }),
             ...(request.compactionRetainRecentTurns === undefined ? {} : { retainRecentTurns: request.compactionRetainRecentTurns }),
             ...(request.compactionToolResultBytes === undefined ? {} : { oldToolResultBytes: request.compactionToolResultBytes }),
             model: turnRequest.model,
@@ -1419,7 +1629,7 @@ export class AgentRunner {
             additionalTokens: toolDefinitionTokens,
           });
           if (selection.kind === "compact") {
-            const compacted = await this.#compact(selection, turnRequest, runId, sink, signal);
+            const compacted = await this.#compact(selection, turnRequest, runId, sink, signal, control);
             context = compacted.projection.messages;
             if (providerStateMessageId !== undefined && selection.sourceMessageIds.includes(providerStateMessageId)) {
               providerState = undefined;
@@ -1483,6 +1693,7 @@ export class AgentRunner {
           ...(providerState === undefined ? {} : { providerState }),
           ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
           ...(turnRequest.reasoningEffort === undefined ? {} : { reasoningEffort: turnRequest.reasoningEffort }),
+          ...(request.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...request.thinkingBudgets } }),
           ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
         };
         if (request.extensions?.beforeProviderRequest !== undefined) {
@@ -1525,6 +1736,7 @@ export class AgentRunner {
             ...(!mutated && providerState !== undefined ? { providerState } : {}),
             ...(reduced.maxOutputTokens === undefined ? {} : { maxOutputTokens: reduced.maxOutputTokens }),
             ...(reduced.reasoningEffort === undefined ? {} : { reasoningEffort: reduced.reasoningEffort }),
+            ...(request.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...request.thinkingBudgets } }),
             ...(reduced.metadata === undefined ? {} : { metadata: reduced.metadata }),
           };
         }
@@ -1532,17 +1744,17 @@ export class AgentRunner {
           await sink.emit({
             type: "warning",
             code: "provider_context_limit",
-            message: request.autoCompaction === false
+            message: !automaticCompactionEnabled(request)
               ? `Provider ${source === "error" ? "error indicates" : "reported"} a context limit; automatic compaction is disabled`
               : overflowRecoveryUsed
                 ? "Provider context limit persisted after the bounded compaction retry"
                 : `Provider ${source === "error" ? "error indicates" : "reported"} a context limit; attempting one bounded compaction retry`,
             details: { step, source },
           });
-          if (overflowRecoveryUsed || turnRequest.contextTokenBudget === undefined || request.autoCompaction === false) {
+          if (overflowRecoveryUsed || turnRequest.contextTokenBudget === undefined || !automaticCompactionEnabled(request)) {
             throw new ProviderFailure({
               category: "invalid_request",
-              message: request.autoCompaction === false
+              message: !automaticCompactionEnabled(request)
                 ? "Provider reported a context limit while automatic compaction is disabled"
                 : overflowRecoveryUsed
                   ? "Provider context limit persisted after one compaction retry"
@@ -1557,6 +1769,8 @@ export class AgentRunner {
             maxTokens: turnRequest.contextTokenBudget,
             ...(turnRequest.contextTriggerTokens === undefined ? {} : { triggerTokens: turnRequest.contextTriggerTokens }),
             ...(request.summaryTokenBudget === undefined ? {} : { maxSummaryTokens: request.summaryTokenBudget }),
+            ...(request.compactionReserveTokens === undefined ? {} : { reserveTokens: request.compactionReserveTokens }),
+            ...(request.compactionKeepRecentTokens === undefined ? {} : { keepRecentTokens: request.compactionKeepRecentTokens }),
             ...(request.compactionRetainRecentTurns === undefined ? {} : { retainRecentTurns: request.compactionRetainRecentTurns }),
             ...(request.compactionToolResultBytes === undefined ? {} : { oldToolResultBytes: request.compactionToolResultBytes }),
             model: turnRequest.model,
@@ -1575,7 +1789,7 @@ export class AgentRunner {
             });
           }
           overflowRecoveryUsed = true;
-          await this.#compact(recovery, turnRequest, runId, sink, signal);
+          await this.#compact(recovery, turnRequest, runId, sink, signal, control);
           if (providerStateMessageId !== undefined && recovery.sourceMessageIds.includes(providerStateMessageId)) {
             providerState = undefined;
             providerStateMessageId = undefined;
@@ -1603,6 +1817,7 @@ export class AgentRunner {
             signal,
             step,
             request.retry ?? this.#retry,
+            control,
           );
           acceptToolCallIds(response.toolCalls, usedToolCallIds, response.text !== "");
         } catch (error) {
@@ -1663,6 +1878,7 @@ export class AgentRunner {
             ...(response.responseId === undefined ? {} : { responseId: response.responseId }),
             ...(response.requestId === undefined ? {} : { requestId: response.requestId }),
             ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
+            ...(response.explanation === undefined ? {} : { explanation: response.explanation }),
             ...(response.usage === undefined ? {} : { usage: response.usage }),
             ...(response.diagnostics === undefined ? {} : { diagnostics: response.diagnostics }),
           }, signal),
@@ -1691,7 +1907,52 @@ export class AgentRunner {
           continue;
         }
         const originalAssistant = response.message;
-        response.message = await reduceMessage(request.extensions, originalAssistant, signal, extensionScope(step));
+        const originalFinalized: AgentFinalizedAssistantResponse = {
+          message: originalAssistant,
+          finishReason: response.finishReason,
+          ...(response.usage === undefined ? {} : { usage: response.usage }),
+          ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
+          ...(response.explanation === undefined ? {} : { explanation: response.explanation }),
+        };
+        const finalized = await reduceFinalizedAssistant(
+          request.extensions,
+          originalFinalized,
+          signal,
+          extensionScope(step),
+        );
+        response.message = finalized.message;
+        response.finishReason = finalized.finishReason;
+        if (finalized.usage === undefined) delete response.usage;
+        else response.usage = finalized.usage;
+        if (finalized.rawReason === undefined) delete response.rawReason;
+        else response.rawReason = finalized.rawReason;
+        if (finalized.explanation === undefined) delete response.explanation;
+        else response.explanation = finalized.explanation;
+        if (finalized.transformations !== undefined && finalized.transformations.length > 0) {
+          const auditUsage = (usage: NormalizedUsage | undefined): Omit<NormalizedUsage, "raw"> | undefined => {
+            if (usage === undefined) return undefined;
+            const { raw: _raw, ...safe } = usage;
+            return safe;
+          };
+          const originalUsage = auditUsage(originalFinalized.usage);
+          const finalUsage = auditUsage(finalized.usage);
+          await sink.emit({
+            type: "assistant_response_transformed",
+            step,
+            transformations: finalized.transformations,
+            original: {
+              finishReason: originalFinalized.finishReason,
+              ...(originalUsage === undefined ? {} : { usage: originalUsage }),
+            },
+            final: {
+              finishReason: finalized.finishReason,
+              ...(finalUsage === undefined ? {} : { usage: finalUsage }),
+            },
+          });
+          if (!sameValue(originalFinalized.usage, finalized.usage) && finalized.usage !== undefined) {
+            await sink.emit({ type: "usage", usage: finalized.usage, semantics: "final" });
+          }
+        }
         response.text = textOf(response.message);
         const continuationSafe = sameValue(
           { role: originalAssistant.role, content: originalAssistant.content, provider: originalAssistant.provider },
@@ -1719,6 +1980,7 @@ export class AgentRunner {
           type: "assistant_completed",
           finishReason: response.finishReason,
           ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
+          ...(response.explanation === undefined ? {} : { explanation: response.explanation }),
         });
 
         const steering = control.takeSteeringMessages();
@@ -1751,6 +2013,8 @@ export class AgentRunner {
           return {
             runId,
             finishReason: response.finishReason,
+            ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
+            ...(response.explanation === undefined ? {} : { explanation: response.explanation }),
             finalText,
             steps: step,
             // Steering that arrives after the final model request becomes a next
@@ -1983,6 +2247,7 @@ export class AgentRunner {
     runId: RunId,
     sink: EventSink,
     signal: AbortSignal,
+    control: RunControl,
   ): Promise<{ summary: CompactionSummary; projection: ReturnType<typeof applyCompaction> }> {
     const willRetry = plan.reason === "overflow";
     const directive = await this.#lifecycle.beforeCompaction?.({
@@ -2015,6 +2280,7 @@ export class AgentRunner {
           signal,
           activity,
           request.retry ?? this.#retry,
+          control,
           request.maxOutputTokenLimit,
           request.compactionInstructions,
         )
@@ -2079,6 +2345,7 @@ export class AgentRunner {
     signal: AbortSignal,
     step: number,
     retry: RetryPolicy,
+    control: RunControl,
   ): Promise<StepResult> {
     for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
       let bodyStarted = false;
@@ -2095,7 +2362,9 @@ export class AgentRunner {
         for await (const event of abortableAsyncIterable(provider.stream(request, signal), signal)) {
           if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
           if (terminal !== undefined) throw new Error("Provider emitted data after its terminal event");
-          if (event.type !== "error") bodyStarted = true;
+          // A response_start carries transport metadata only. Retrying remains
+          // replay-safe until the provider emits substantive output.
+          if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
           switch (event.type) {
             case "response_start":
               if (responseStarted) {
@@ -2143,17 +2412,38 @@ export class AgentRunner {
             case "reasoning_delta":
               await sink.emit({ type: "reasoning_delta", text: event.text, part: event.part, visibility: event.visibility });
               break;
-            case "tool_call_start":
-              calls.set(event.index, {
-                ...(event.id === undefined ? {} : { id: event.id }),
-                ...(event.name === undefined ? {} : { name: event.name }),
+            case "tool_call_start": {
+              const index = providerToolCallStreamIndex(event.index);
+              const id = event.id === undefined
+                ? undefined
+                : boundedProviderToolCallStreamValue(event.id, "ID", MAX_TOOL_CALL_STREAM_ID_BYTES);
+              const name = event.name === undefined
+                ? undefined
+                : boundedProviderToolCallStreamValue(event.name, "name", MAX_TOOL_CALL_STREAM_NAME_BYTES);
+              calls.set(index, {
+                ...(id === undefined ? {} : { id }),
+                ...(name === undefined ? {} : { name }),
                 raw: "",
               });
+              await sink.emit({
+                type: "tool_call_started",
+                index,
+                ...(id === undefined ? {} : { id }),
+                ...(name === undefined ? {} : { name }),
+              });
               break;
+            }
             case "tool_call_delta": {
-              const call = calls.get(event.index) ?? { raw: "" };
-              call.raw += event.jsonFragment;
-              calls.set(event.index, call);
+              const index = providerToolCallStreamIndex(event.index);
+              const jsonFragment = boundedProviderToolCallStreamValue(
+                event.jsonFragment,
+                "JSON delta",
+                MAX_TOOL_CALL_STREAM_DELTA_BYTES,
+              );
+              const call = calls.get(index) ?? { raw: "" };
+              call.raw += jsonFragment;
+              calls.set(index, call);
+              await sink.emit({ type: "tool_call_delta", index, jsonFragment });
               break;
             }
             case "tool_call_end": {
@@ -2187,7 +2477,11 @@ export class AgentRunner {
           partial: bodyStarted,
           bodyStarted,
         });
-        const text = [...textParts.entries()].sort(([left], [right]) => left - right).map(([, value]) => value).join("");
+        const explanation = terminal.explanation === undefined
+          ? undefined
+          : boundedProviderTelemetryText(terminal.explanation);
+        let text = [...textParts.entries()].sort(([left], [right]) => left - right).map(([, value]) => value).join("");
+        if (text === "" && explanation !== undefined) text = explanation;
         if (text !== "") blocks.push({ type: "text", text });
         const toolCalls: ToolCallBlock[] = [...calls.entries()].sort(([left], [right]) => left - right).map(([index, call]) => {
           const ended = call.ended;
@@ -2212,6 +2506,7 @@ export class AgentRunner {
           ...(responseId === undefined ? {} : { responseId }),
           ...(requestId === undefined ? {} : { requestId }),
           ...(terminal.rawReason === undefined ? {} : { rawReason: terminal.rawReason }),
+          ...(explanation === undefined ? {} : { explanation }),
           state: terminal.state,
           toolCalls,
           ...(usage === undefined ? {} : { usage }),
@@ -2233,7 +2528,8 @@ export class AgentRunner {
           detail = { ...detail, diagnostics: responseDiagnostics };
         }
         if (detail.requestId === undefined && requestId !== undefined) detail = { ...detail, requestId };
-        const willRetry = detail.category !== "cancelled" && mayRetry(detail, attempt, retry, bodyStarted);
+        const activeRetry = { ...retry, enabled: control.autoRetryEnabled };
+        const willRetry = detail.category !== "cancelled" && mayRetry(detail, attempt, activeRetry, bodyStarted);
         const diagnostics = detail.diagnostics;
         if (diagnostics !== undefined) {
           const failure = providerResponseFailureMetadata(detail);
@@ -2259,12 +2555,17 @@ export class AgentRunner {
         if (detail.category === "cancelled") throw new ProviderFailure(detail);
         if (!willRetry) throw new ProviderFailure(detail);
         const milliseconds = retryDelay(detail, attempt, retry, this.#random);
-        await sink.emit({ type: "retry_scheduled", attempt: attempt + 1, delayMs: milliseconds, category: detail.category });
+        const retrySignal = control.beginRetryDelay();
         try {
-          await waitForRetry(milliseconds, signal);
-        } catch {
-          if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
-          throw new ProviderFailure(detail);
+          await sink.emit({ type: "retry_scheduled", attempt: attempt + 1, delayMs: milliseconds, category: detail.category });
+          try {
+            await waitForRetry(milliseconds, retrySignal);
+          } catch {
+            if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
+            throw new ProviderFailure(retryCancelledError(detail));
+          }
+        } finally {
+          control.finishRetryDelay();
         }
       }
     }
@@ -2279,6 +2580,7 @@ export class AgentRunner {
     signal: AbortSignal,
     activity: ReturnType<typeof renderCompactionFileActivity>,
     retry: RetryPolicy,
+    control: RunControl,
     maxOutputTokenLimit?: number,
     customInstructions?: string,
   ) {
@@ -2384,16 +2686,22 @@ export class AgentRunner {
                 partial: bodyStarted,
                 bodyStarted,
               };
-        if (detail.category === "cancelled" || !mayRetry(detail, attempt, retry, bodyStarted)) {
+        const activeRetry = { ...retry, enabled: control.autoRetryEnabled };
+        if (detail.category === "cancelled" || !mayRetry(detail, attempt, activeRetry, bodyStarted)) {
           throw new ProviderFailure(detail);
         }
         const milliseconds = retryDelay(detail, attempt, retry, this.#random);
-        await sink.emit({ type: "retry_scheduled", attempt: attempt + 1, delayMs: milliseconds, category: detail.category });
+        const retrySignal = control.beginRetryDelay();
         try {
-          await waitForRetry(milliseconds, signal);
-        } catch {
-          if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
-          throw new ProviderFailure(detail);
+          await sink.emit({ type: "retry_scheduled", attempt: attempt + 1, delayMs: milliseconds, category: detail.category });
+          try {
+            await waitForRetry(milliseconds, retrySignal);
+          } catch {
+            if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
+            throw new ProviderFailure(retryCancelledError(detail));
+          }
+        } finally {
+          control.finishRetryDelay();
         }
       }
     }

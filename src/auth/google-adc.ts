@@ -1,6 +1,6 @@
 import { sign } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import {
   CloudAuthIoError,
@@ -30,6 +30,16 @@ export interface GoogleAccessToken {
   serviceAccountEmail?: string;
 }
 
+export interface GoogleExternalSubjectTokenInput {
+  credential: Readonly<Record<string, unknown>>;
+  scopes: readonly string[];
+  signal?: AbortSignal;
+}
+
+export type GoogleExternalSubjectTokenResolver = (
+  input: GoogleExternalSubjectTokenInput,
+) => Promise<string>;
+
 export interface GoogleAdcOptions {
   environment?: NodeJS.ProcessEnv;
   homeDirectory?: string;
@@ -38,6 +48,7 @@ export interface GoogleAdcOptions {
   timeoutMs?: number;
   metadataTimeoutMs?: number;
   maxResponseBytes?: number;
+  externalSubjectTokenResolver?: GoogleExternalSubjectTokenResolver;
   signal?: AbortSignal;
   now?: () => number;
   redactor?: SecretRedactor;
@@ -51,6 +62,7 @@ interface GoogleContext {
   timeoutMs: number;
   metadataTimeoutMs: number;
   maxResponseBytes: number;
+  externalSubjectTokenResolver: GoogleExternalSubjectTokenResolver;
   signal?: AbortSignal;
   now: () => number;
   redactor: SecretRedactor;
@@ -69,10 +81,29 @@ function context(options: GoogleAdcOptions): GoogleContext {
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     metadataTimeoutMs: options.metadataTimeoutMs ?? DEFAULT_METADATA_TIMEOUT_MS,
     maxResponseBytes: options.maxResponseBytes ?? DEFAULT_RESPONSE_LIMIT,
+    externalSubjectTokenResolver: options.externalSubjectTokenResolver ?? resolveOfficialExternalSubjectToken,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     now: options.now ?? Date.now,
     redactor: options.redactor ?? defaultSecretRedactor,
   };
+}
+
+async function resolveOfficialExternalSubjectToken(
+  input: GoogleExternalSubjectTokenInput,
+): Promise<string> {
+  input.signal?.throwIfAborted();
+  const { ExternalAccountClient } = await import("google-auth-library");
+  const client = ExternalAccountClient.fromJSON({
+    ...input.credential,
+    scopes: [...input.scopes],
+  } as Parameters<typeof ExternalAccountClient.fromJSON>[0]);
+  if (client === null || !("retrieveSubjectToken" in client)
+    || typeof client.retrieveSubjectToken !== "function") {
+    throw new Error("Google external-account credential source was unsupported by the official resolver");
+  }
+  const token = await client.retrieveSubjectToken();
+  input.signal?.throwIfAborted();
+  return token;
 }
 
 function requiredString(record: Record<string, unknown>, name: string, label: string): string {
@@ -327,6 +358,7 @@ function parseSubjectToken(text: string, format: ReturnType<typeof sourceFormat>
 }
 
 async function externalSubjectToken(
+  credential: Record<string, unknown>,
   source: Record<string, unknown>,
   ctx: GoogleContext,
 ): Promise<string> {
@@ -381,15 +413,118 @@ async function externalSubjectToken(
     return token;
   }
   if (source.environment_id !== undefined) {
-    throw new Error("Google external-account AWS credential sources are not supported by this resolver");
+    validateAwsExternalSource(source);
+    return officialExternalSubjectToken(credential, ctx);
   }
   if (source.executable !== undefined) {
-    throw new Error("Google external-account executable credential sources are not supported by this resolver");
+    validateExecutableExternalSource(source.executable, ctx);
+    return officialExternalSubjectToken(credential, ctx);
   }
   if (source.certificate !== undefined || source.cert !== undefined) {
-    throw new Error("Google external-account X.509 credential sources are not supported by this resolver");
+    if (source.cert !== undefined) throw new Error("Google external-account X.509 credential source used an unsupported cert alias");
+    validateCertificateExternalSource(source.certificate);
+    return officialExternalSubjectToken(credential, ctx);
   }
   throw new Error("Google external-account credential source was unsupported");
+}
+
+function awsMetadataUrl(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${label} was invalid`);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${label} was invalid`);
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/u, "$1");
+  if (url.protocol !== "http:" || (host !== "169.254.169.254" && host !== "fd00:ec2::254")
+    || url.username !== "" || url.password !== "" || url.hash !== "") {
+    throw new Error(`${label} must use the AWS instance metadata host`);
+  }
+}
+
+function validateAwsExternalSource(source: Record<string, unknown>): void {
+  if (source.environment_id !== "aws1") {
+    throw new Error("Google external-account AWS environment_id must be aws1");
+  }
+  awsMetadataUrl(source.region_url, "Google external-account AWS region_url");
+  awsMetadataUrl(source.url, "Google external-account AWS credential URL");
+  awsMetadataUrl(source.imdsv2_session_token_url, "Google external-account AWS IMDSv2 URL");
+  const rawVerification = source.regional_cred_verification_url;
+  if (typeof rawVerification !== "string" || rawVerification.length === 0) {
+    throw new Error("Google external-account AWS regional credential verification URL was invalid");
+  }
+  let verification: URL;
+  try {
+    verification = new URL(rawVerification.replaceAll("{region}", "us-east-1"));
+  } catch {
+    throw new Error("Google external-account AWS regional credential verification URL was invalid");
+  }
+  if (verification.protocol !== "https:" || verification.port !== ""
+    || !/^sts\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?$/u.test(verification.hostname)
+    || verification.username !== "" || verification.password !== "" || verification.hash !== ""
+    || verification.searchParams.get("Action") !== "GetCallerIdentity") {
+    throw new Error("Google external-account AWS regional credential verification URL was invalid");
+  }
+}
+
+function validateExecutableExternalSource(value: unknown, ctx: GoogleContext): void {
+  if (ctx.environment.GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES !== "1") {
+    throw new Error("Google external-account executable credentials require GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Google external-account executable credential source was invalid");
+  }
+  const executable = value as Record<string, unknown>;
+  const command = requiredString(executable, "command", "Google external-account executable credential source");
+  const program = /^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s|$)/u.exec(command)?.slice(1).find((part) => part !== undefined);
+  if (program === undefined || !isAbsolute(program)) {
+    throw new Error("Google external-account executable command must start with an absolute path");
+  }
+  const timeout = executable.timeout_millis;
+  if (timeout !== undefined && (!Number.isSafeInteger(timeout) || (timeout as number) < 5_000 || (timeout as number) > 120_000)) {
+    throw new Error("Google external-account executable timeout_millis was invalid");
+  }
+  const outputFile = executable.output_file;
+  if (outputFile !== undefined && (typeof outputFile !== "string" || !isAbsolute(outputFile))) {
+    throw new Error("Google external-account executable output_file must be an absolute path");
+  }
+}
+
+function validateCertificateExternalSource(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Google external-account X.509 credential source was invalid");
+  }
+  const certificate = value as Record<string, unknown>;
+  const useDefault = certificate.use_default_certificate_config;
+  const location = certificate.certificate_config_location;
+  if ((useDefault !== undefined && typeof useDefault !== "boolean")
+    || (location !== undefined && (typeof location !== "string" || !isAbsolute(location)))
+    || (useDefault !== true && location === undefined)
+    || (useDefault === true && location !== undefined)) {
+    throw new Error("Google external-account X.509 certificate configuration was invalid");
+  }
+  const trustChain = certificate.trust_chain_path;
+  if (trustChain !== undefined && (typeof trustChain !== "string" || !isAbsolute(trustChain))) {
+    throw new Error("Google external-account X.509 trust_chain_path must be an absolute path");
+  }
+}
+
+async function officialExternalSubjectToken(
+  credential: Record<string, unknown>,
+  ctx: GoogleContext,
+): Promise<string> {
+  const token = await ctx.externalSubjectTokenResolver({
+    credential,
+    scopes: ctx.scopes,
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+  });
+  if (typeof token !== "string" || token === "" || Buffer.byteLength(token, "utf8") > SUBJECT_TOKEN_LIMIT) {
+    throw new Error("Google external-account official resolver returned an invalid subject token");
+  }
+  ctx.redactor.register(token);
+  return token;
 }
 
 async function impersonateServiceAccount(
@@ -464,7 +599,7 @@ async function externalAccountToken(
   if (rawSource === null || typeof rawSource !== "object" || Array.isArray(rawSource)) {
     throw new Error("Google external_account ADC omitted credential_source");
   }
-  const subjectToken = await externalSubjectToken(rawSource as Record<string, unknown>, ctx);
+  const subjectToken = await externalSubjectToken(record, rawSource as Record<string, unknown>, ctx);
   const body = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
     audience,

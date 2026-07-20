@@ -1,6 +1,10 @@
 import {
   defineRuntimeTool,
+  type ExtensionManifestPermissions,
+  type RuntimeAdvancedUiApi,
   type RuntimeExtensionApi,
+  type RuntimeTreePreparation,
+  type RuntimeTreeResult,
 } from "rigyn/extensions";
 import {
   defineProviderAdapter,
@@ -9,6 +13,19 @@ import {
 } from "rigyn/providers";
 
 declare const api: RuntimeExtensionApi;
+
+const advancedUiPermission = {
+  advancedUi: true,
+  nativeUi: false,
+  unsafeTerminal: false,
+  providerOverride: false,
+  providerWire: false,
+  credentialAccess: false,
+  sessionRaw: false,
+  hostConfiguration: false,
+} satisfies ExtensionManifestPermissions;
+const advancedUiSurfaceMatchesApi: RuntimeExtensionApi["ui"]["advanced"] extends RuntimeAdvancedUiApi ? true : false = true;
+void [advancedUiPermission, advancedUiSurfaceMatchesApi];
 
 api.registerEditorRenderer({
   render(view) {
@@ -20,6 +37,17 @@ api.registerEditorRenderer({
 });
 
 api.on("tool_call", (event) => ({ input: event.input }));
+
+api.on("session_before_tree", (event): RuntimeTreeResult | undefined => {
+  const preparation: RuntimeTreePreparation = event.preparation;
+  event.signal.throwIfAborted();
+  if (!preparation.userWantsSummary) return undefined;
+  return {
+    ...(preparation.customInstructions === undefined ? {} : { customInstructions: preparation.customInstructions }),
+    ...(preparation.replaceInstructions === undefined ? {} : { replaceInstructions: preparation.replaceInstructions }),
+    ...(preparation.label === undefined ? {} : { label: preparation.label }),
+  };
+});
 
 api.registerTool(defineRuntimeTool<{ text: string }>({
   name: "consumer_typed_tool",
@@ -46,7 +74,7 @@ const providerDefinition = {
 } satisfies ProviderAdapterDefinition;
 
 const authoredProvider = defineProviderAdapter(providerDefinition);
-api.registerProvider(defineRoutedProviderAdapter({
+const disposeProvider = api.registerProvider(defineRoutedProviderAdapter({
   id: "consumer-routed-provider",
   delegateOwnership: "owned",
   routes: [{
@@ -55,3 +83,4 @@ api.registerProvider(defineRoutedProviderAdapter({
     adapter: authoredProvider,
   }],
 }));
+void disposeProvider();

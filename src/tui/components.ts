@@ -118,7 +118,9 @@ export interface RuntimeSessionRendererBinding {
   ): RuntimeUiBlock | undefined;
 }
 
-export type RuntimeUiComponentFactory<T = void> = (host: RuntimeUiComponentHost<T>) => RuntimeUiComponent;
+export type RuntimeUiComponentFactory<T = void> = (
+  host: RuntimeUiComponentHost<T>,
+) => RuntimeUiComponent | Promise<RuntimeUiComponent>;
 
 export type RuntimeUiOverlayAnchor =
   | "top-left"
@@ -323,7 +325,7 @@ export function runtimeUiKeyEvent(value: KeyEvent): RuntimeUiKeyEvent {
 
 /** Owns one generation-bound component without exposing terminal resources. */
 export class RuntimeUiComponentMount<T = void> {
-  readonly #component: RuntimeUiComponent;
+  #component: RuntimeUiComponent | undefined;
   readonly #signal: AbortSignal;
   readonly #generationSignal: AbortSignal;
   readonly #closeController: AbortController;
@@ -334,7 +336,7 @@ export class RuntimeUiComponentMount<T = void> {
   #disposed = false;
 
   private constructor(
-    component: RuntimeUiComponent,
+    component: RuntimeUiComponent | undefined,
     closeController: AbortController,
     signal: AbortSignal,
     generationSignal: AbortSignal,
@@ -377,20 +379,47 @@ export class RuntimeUiComponentMount<T = void> {
         } else mount.#finish(value, "component");
       },
     });
-    let component: RuntimeUiComponent;
+    let result: RuntimeUiComponent | Promise<RuntimeUiComponent>;
     try {
-      component = factory(host);
-      if (component === null || typeof component !== "object" || typeof component.render !== "function") {
-        throw new TypeError("Runtime UI component factory must return a component with render()");
-      }
+      result = factory(host);
     } catch (cause) {
       closeController.abort(error(cause));
       throw cause;
     }
-    mount = new RuntimeUiComponentMount(component, closeController, signal, options.signal, options, onGenerationAbort);
+    const pending = result instanceof Promise || (
+      result !== null && typeof result === "object" && typeof (result as unknown as PromiseLike<unknown>).then === "function"
+    );
+    if (!pending && !runtimeUiComponent(result)) {
+      closeController.abort(new TypeError("Runtime UI component factory must return a component with render()"));
+      throw new TypeError("Runtime UI component factory must return a component with render()");
+    }
+    mount = new RuntimeUiComponentMount(
+      pending ? undefined : result as RuntimeUiComponent,
+      closeController,
+      signal,
+      options.signal,
+      options,
+      onGenerationAbort,
+    );
     options.signal.addEventListener("abort", onGenerationAbort, { once: true });
     if (options.signal.aborted) onGenerationAbort();
     else if (closeRequested) mount.#finish(pendingClose, "component");
+    if (pending) {
+      void Promise.resolve(result).then((component) => {
+        if (!runtimeUiComponent(component)) {
+          throw new TypeError("Runtime UI component factory must return a component with render()");
+        }
+        if (mount!.#closed) {
+          try { component.dispose?.(); } catch (cause) { reportError(options.onError, cause); }
+          return;
+        }
+        mount!.#component = component;
+        try { options.requestRender(); } catch (cause) { reportError(options.onError, cause); }
+      }).catch((cause: unknown) => {
+        reportError(options.onError, cause);
+        if (mount !== undefined) mount.#finish(undefined, "owner");
+      });
+    }
     return mount;
   }
 
@@ -404,6 +433,7 @@ export class RuntimeUiComponentMount<T = void> {
 
   render(context: RuntimeUiRenderContext, limits: Omit<RuntimeUiBlockLimits, "width"> = {}): RuntimeUiRenderResult {
     if (this.#closed) return { ok: false, error: new Error("Runtime UI component is closed") };
+    if (this.#component === undefined) return { ok: true, block: Object.freeze({ lines: Object.freeze([]) }) };
     try {
       const selected = sanitizeRuntimeUiRenderContext(context);
       const block = sanitizeRuntimeUiBlock(this.#component.render(selected), { ...limits, width: selected.width });
@@ -416,7 +446,7 @@ export class RuntimeUiComponentMount<T = void> {
   }
 
   handleKey(event: KeyEvent): boolean {
-    if (this.#closed || this.#component.handleKey === undefined) return false;
+    if (this.#closed || this.#component?.handleKey === undefined) return false;
     try {
       return this.#component.handleKey(runtimeUiKeyEvent(event)) === true;
     } catch (cause) {
@@ -426,7 +456,7 @@ export class RuntimeUiComponentMount<T = void> {
   }
 
   invalidate(): void {
-    if (this.#closed || this.#component.invalidate === undefined) return;
+    if (this.#closed || this.#component?.invalidate === undefined) return;
     try {
       this.#component.invalidate();
     } catch (cause) {
@@ -455,9 +485,13 @@ export class RuntimeUiComponentMount<T = void> {
     if (this.#disposed) return;
     this.#disposed = true;
     try {
-      this.#component.dispose?.();
+      this.#component?.dispose?.();
     } catch (cause) {
       reportError(this.#onError, cause);
     }
   }
+}
+
+function runtimeUiComponent(value: unknown): value is RuntimeUiComponent {
+  return value !== null && typeof value === "object" && typeof (value as RuntimeUiComponent).render === "function";
 }

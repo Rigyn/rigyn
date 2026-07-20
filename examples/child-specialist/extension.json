@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "child-specialist-example",
+  "name": "Child specialist example",
+  "version": "1.0.0",
+  "description": "One bounded in-process specialist with explicit tools and child-only instructions.",
+  "contributions": {
+    "runtime": [
+      {
+        "path": "runtime/index.mjs"
+      }
+    ]
+  }
+}

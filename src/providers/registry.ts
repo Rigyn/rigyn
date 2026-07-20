@@ -8,14 +8,20 @@ import type {
   ModelCompatibility,
   ModelEvidence,
   ModelInfo,
+  ModelChatTemplateValue,
   ModelMetadataSource,
   ModelModality,
+  ModelOpenRouterRouting,
   ModelPricing,
   ModelPricingTier,
   ModelProtocolFamily,
+  ModelRequestCompatibility,
   ModelSessionAffinity,
+  ModelVercelGatewayRouting,
+  ProviderModelRequestSettings,
   ProviderAdapter,
   ProviderId,
+  ProviderRequest,
 } from "../core/types.js";
 import type { ModelCatalogStore } from "./model-catalog-store.js";
 import { withUsagePricing } from "./pricing.js";
@@ -39,6 +45,15 @@ const MAX_PRICING_TIER_NAME_BYTES = 128;
 const MAX_LIVE_MODEL_METADATA_BYTES = 1024 * 1024;
 const MAX_CONFIGURED_MODELS = 1_024;
 const MAX_CONFIGURED_MODEL_TOKENS = 2_147_483_647;
+const MAX_MODEL_HEADERS = 32;
+const MAX_MODEL_HEADER_NAME_BYTES = 256;
+const MAX_MODEL_HEADER_VALUE_BYTES = 4 * 1_024;
+const MAX_MODEL_HEADER_AGGREGATE_BYTES = 16 * 1_024;
+const MAX_ROUTING_VALUES = 64;
+const MAX_ROUTING_VALUE_BYTES = 256;
+const MAX_TEMPLATE_DEPTH = 8;
+const MAX_TEMPLATE_ENTRIES = 256;
+const MAX_TEMPLATE_BYTES = 32 * 1_024;
 const SNAPSHOT_VERSION = 1;
 
 const MODEL_SOURCES = ["provider", "configuration", "maintained", "observed"] as const satisfies readonly ModelMetadataSource[];
@@ -51,6 +66,7 @@ const PROTOCOL_FAMILIES = [
   "bedrock-converse",
   "mistral-conversations",
   "ollama-chat",
+  "gateway-messages",
 ] as const satisfies readonly ModelProtocolFamily[];
 const MODALITIES = ["text", "image", "audio", "video", "file"] as const satisfies readonly ModelModality[];
 const CACHE_MODES = ["none", "automatic", "explicit"] as const satisfies readonly ModelCacheMode[];
@@ -147,6 +163,12 @@ export interface ConfiguredModel {
   reasoning?: boolean;
   images?: boolean;
   reasoningEfforts?: ModelReasoningEffort[];
+  /** Non-secret request headers applied only when this exact model is selected. */
+  headers?: Record<string, string>;
+  /** Maps canonical Rigyn reasoning levels to provider values; null disables a level. */
+  reasoningEffortMap?: Partial<Record<ModelReasoningEffort, string | null>>;
+  /** Explicit Chat Completions wire behavior for this exact model. */
+  requestCompatibility?: ModelRequestCompatibility;
   pricing?: ConfiguredModelPricing;
   /** Internal provenance used by the bundled fallback catalog. */
   metadataSource?: "maintained";
@@ -178,6 +200,22 @@ interface ActiveRefresh {
   waiters: Set<symbol>;
   settled: boolean;
 }
+
+export interface ProviderAdapterOverlay {
+  readonly id: ProviderId;
+  stream?: ProviderAdapter["stream"];
+  listModels?: ProviderAdapter["listModels"];
+}
+
+type ProviderOverrideLayer = {
+  token: symbol;
+  kind: "replace";
+  adapter: ProviderAdapter;
+} | {
+  token: symbol;
+  kind: "overlay";
+  overlay: ProviderAdapterOverlay;
+};
 
 interface PersistedSnapshot {
   version: 1;
@@ -250,6 +288,322 @@ function configuredBoolean(value: unknown, label: string): boolean | undefined {
   return value;
 }
 
+function configuredHeaders(value: unknown, label: string): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > MAX_MODEL_HEADERS) {
+    throw new CatalogValidationError(`${label} must contain 1 to ${MAX_MODEL_HEADERS} headers`);
+  }
+  const result: Record<string, string> = {};
+  let aggregate = 0;
+  for (const [name, raw] of entries) {
+    if (
+      !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) ||
+      Buffer.byteLength(name, "utf8") > MAX_MODEL_HEADER_NAME_BYTES
+    ) {
+      throw new CatalogValidationError(`${label}.${name} has an invalid header name`);
+    }
+    const folded = name.toLocaleLowerCase("en-US");
+    if (
+      [
+        "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key",
+        "apikey", "x-auth-token", "x-access-token", "x-goog-api-key", "host", "content-length",
+        "transfer-encoding", "connection",
+      ].includes(folded) || /(?:^|-)(?:authorization|cookie|token|secret|credential|api-key)(?:-|$)/u.test(folded)
+    ) {
+      throw new CatalogValidationError(`${label}.${name} is reserved; credentials must use provider authentication`);
+    }
+    if (typeof raw !== "string" || raw.includes("\0") || /[\u0001-\u001f\u007f]/u.test(raw)) {
+      throw new CatalogValidationError(`${label}.${name} must be a valid header value`);
+    }
+    const valueBytes = Buffer.byteLength(raw, "utf8");
+    if (valueBytes > MAX_MODEL_HEADER_VALUE_BYTES) {
+      throw new CatalogValidationError(`${label}.${name} is too long`);
+    }
+    aggregate += Buffer.byteLength(name, "utf8") + valueBytes;
+    result[name] = raw;
+  }
+  if (aggregate > MAX_MODEL_HEADER_AGGREGATE_BYTES) throw new CatalogValidationError(`${label} is too large`);
+  return result;
+}
+
+function configuredReasoningEffortMap(
+  value: unknown,
+  label: string,
+): Partial<Record<ModelReasoningEffort, string | null>> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  const input = value as Record<string, unknown>;
+  exactKeys(input, MODEL_REASONING_EFFORTS, label);
+  const entries = Object.entries(input);
+  if (entries.length === 0) throw new CatalogValidationError(`${label} must not be empty`);
+  const result: Partial<Record<ModelReasoningEffort, string | null>> = {};
+  for (const [effort, raw] of entries) {
+    result[effort as ModelReasoningEffort] = raw === null
+      ? null
+      : boundedString(raw, MAX_REASONING_EFFORT_BYTES, `${label}.${effort}`);
+  }
+  return result;
+}
+
+function configuredRoutingValues(value: unknown, label: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ROUTING_VALUES) {
+    throw new CatalogValidationError(`${label} must contain 1 to ${MAX_ROUTING_VALUES} values`);
+  }
+  const result = value.map((entry, index) => boundedString(entry, MAX_ROUTING_VALUE_BYTES, `${label}[${index}]`));
+  if (new Set(result).size !== result.length) throw new CatalogValidationError(`${label} contains duplicates`);
+  return result;
+}
+
+function configuredNonNegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw new CatalogValidationError(`${label} must be a finite non-negative number`);
+  }
+  return value;
+}
+
+function configuredRoutingPrice(value: unknown, label: string): number | string {
+  if (typeof value === "number") return configuredNonNegativeNumber(value, label);
+  if (
+    typeof value !== "string" || value.length > 64 ||
+    !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)
+  ) {
+    throw new CatalogValidationError(`${label} must be a non-negative decimal number or string`);
+  }
+  return value;
+}
+
+function configuredPercentiles(
+  value: unknown,
+  label: string,
+): number | { p50?: number; p75?: number; p90?: number; p99?: number } | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") return configuredNonNegativeNumber(value, label);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be a number or percentile object`);
+  }
+  const input = value as Record<string, unknown>;
+  exactKeys(input, ["p50", "p75", "p90", "p99"], label);
+  if (Object.keys(input).length === 0) throw new CatalogValidationError(`${label} must not be empty`);
+  const result: { p50?: number; p75?: number; p90?: number; p99?: number } = {};
+  for (const percentile of ["p50", "p75", "p90", "p99"] as const) {
+    if (input[percentile] !== undefined) {
+      result[percentile] = configuredNonNegativeNumber(input[percentile], `${label}.${percentile}`);
+    }
+  }
+  return result;
+}
+
+function configuredOpenRouterRouting(value: unknown, label: string): ModelOpenRouterRouting | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  const input = value as Record<string, unknown>;
+  exactKeys(input, [
+    "allow_fallbacks", "require_parameters", "data_collection", "zdr", "enforce_distillable_text",
+    "order", "only", "ignore", "quantizations", "sort", "max_price", "preferred_min_throughput",
+    "preferred_max_latency",
+  ], label);
+  if (Object.keys(input).length === 0) throw new CatalogValidationError(`${label} must not be empty`);
+  const result: ModelOpenRouterRouting = {};
+  for (const key of ["allow_fallbacks", "require_parameters", "zdr", "enforce_distillable_text"] as const) {
+    const selected = configuredBoolean(input[key], `${label}.${key}`);
+    if (selected !== undefined) result[key] = selected;
+  }
+  if (input.data_collection !== undefined) {
+    result.data_collection = enumValue(["allow", "deny"] as const, input.data_collection, `${label}.data_collection`);
+  }
+  for (const key of ["order", "only", "ignore", "quantizations"] as const) {
+    const selected = configuredRoutingValues(input[key], `${label}.${key}`);
+    if (selected !== undefined) result[key] = selected;
+  }
+  if (input.sort !== undefined) {
+    if (typeof input.sort === "string") {
+      result.sort = boundedString(input.sort, MAX_ROUTING_VALUE_BYTES, `${label}.sort`);
+    } else {
+      if (input.sort === null || typeof input.sort !== "object" || Array.isArray(input.sort)) {
+        throw new CatalogValidationError(`${label}.sort must be a string or object`);
+      }
+      const sort = input.sort as Record<string, unknown>;
+      exactKeys(sort, ["by", "partition"], `${label}.sort`);
+      if (Object.keys(sort).length === 0) throw new CatalogValidationError(`${label}.sort must not be empty`);
+      const by = boundedOptionalString(sort.by, MAX_ROUTING_VALUE_BYTES, `${label}.sort.by`);
+      const partition = sort.partition === null
+        ? null
+        : boundedOptionalString(sort.partition, MAX_ROUTING_VALUE_BYTES, `${label}.sort.partition`);
+      result.sort = {
+        ...(by === undefined ? {} : { by }),
+        ...(partition === undefined ? {} : { partition }),
+      };
+    }
+  }
+  if (input.max_price !== undefined) {
+    if (input.max_price === null || typeof input.max_price !== "object" || Array.isArray(input.max_price)) {
+      throw new CatalogValidationError(`${label}.max_price must be an object`);
+    }
+    const prices = input.max_price as Record<string, unknown>;
+    exactKeys(prices, ["prompt", "completion", "image", "audio", "request"], `${label}.max_price`);
+    if (Object.keys(prices).length === 0) throw new CatalogValidationError(`${label}.max_price must not be empty`);
+    result.max_price = Object.fromEntries(Object.entries(prices).map(([key, entry]) => [
+      key,
+      configuredRoutingPrice(entry, `${label}.max_price.${key}`),
+    ])) as NonNullable<ModelOpenRouterRouting["max_price"]>;
+  }
+  const throughput = configuredPercentiles(input.preferred_min_throughput, `${label}.preferred_min_throughput`);
+  const latency = configuredPercentiles(input.preferred_max_latency, `${label}.preferred_max_latency`);
+  if (throughput !== undefined) result.preferred_min_throughput = throughput;
+  if (latency !== undefined) result.preferred_max_latency = latency;
+  return result;
+}
+
+function configuredVercelRouting(value: unknown, label: string): ModelVercelGatewayRouting | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  const input = value as Record<string, unknown>;
+  exactKeys(input, ["only", "order"], label);
+  const only = configuredRoutingValues(input.only, `${label}.only`);
+  const order = configuredRoutingValues(input.order, `${label}.order`);
+  if (only === undefined && order === undefined) throw new CatalogValidationError(`${label} must not be empty`);
+  return {
+    ...(only === undefined ? {} : { only }),
+    ...(order === undefined ? {} : { order }),
+  };
+}
+
+function configuredChatTemplateParameters(
+  value: unknown,
+  label: string,
+): Record<string, ModelChatTemplateValue> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  let entries = 0;
+  const visit = (entry: unknown, child: string, depth: number): void => {
+    if (depth > MAX_TEMPLATE_DEPTH) throw new CatalogValidationError(`${child} is nested too deeply`);
+    if (entry === null || typeof entry === "string" || typeof entry === "boolean") return;
+    if (typeof entry === "number") {
+      if (!Number.isFinite(entry)) throw new CatalogValidationError(`${child} must contain finite JSON values`);
+      return;
+    }
+    if (Array.isArray(entry)) {
+      entries += entry.length;
+      if (entries > MAX_TEMPLATE_ENTRIES) throw new CatalogValidationError(`${label} contains too many entries`);
+      entry.forEach((item, index) => visit(item, `${child}[${index}]`, depth + 1));
+      return;
+    }
+    if (typeof entry !== "object") throw new CatalogValidationError(`${child} must contain JSON values`);
+    const objectEntry = entry as Record<string, unknown>;
+    if (Object.hasOwn(objectEntry, "$var")) {
+      exactKeys(objectEntry, ["$var", "omitWhenOff"], child);
+      enumValue(["thinking.enabled", "thinking.effort"] as const, objectEntry.$var, `${child}.$var`);
+      configuredBoolean(objectEntry.omitWhenOff, `${child}.omitWhenOff`);
+      return;
+    }
+    const children = Object.entries(objectEntry);
+    entries += children.length;
+    if (entries > MAX_TEMPLATE_ENTRIES) throw new CatalogValidationError(`${label} contains too many entries`);
+    for (const [key, item] of children) {
+      if (["__proto__", "prototype", "constructor"].includes(key)) {
+        throw new CatalogValidationError(`${child}.${key} is reserved`);
+      }
+      boundedString(key, MAX_ROUTING_VALUE_BYTES, `${child} key`);
+      visit(item, `${child}.${key}`, depth + 1);
+    }
+  };
+  visit(value, label, 0);
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > MAX_TEMPLATE_BYTES) {
+    throw new CatalogValidationError(`${label} is too large`);
+  }
+  if (Object.keys(value as Record<string, unknown>).length === 0) {
+    throw new CatalogValidationError(`${label} must not be empty`);
+  }
+  return structuredClone(value) as Record<string, ModelChatTemplateValue>;
+}
+
+function configuredRequestCompatibility(value: unknown, label: string): ModelRequestCompatibility | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CatalogValidationError(`${label} must be an object`);
+  }
+  const input = value as Record<string, unknown>;
+  exactKeys(input, [
+    "supportsUsageInStreaming", "maxTokensField", "supportsReasoningEffort", "reasoningFormat",
+    "chatTemplateParameters", "cacheControlFormat", "cacheControlTtl", "sendSessionAffinityHeaders",
+    "sessionAffinityFormat", "openRouterRouting", "vercelGatewayRouting",
+  ], label);
+  if (Object.keys(input).length === 0) throw new CatalogValidationError(`${label} must not be empty`);
+  const supportsUsageInStreaming = configuredBoolean(input.supportsUsageInStreaming, `${label}.supportsUsageInStreaming`);
+  const supportsReasoningEffort = configuredBoolean(input.supportsReasoningEffort, `${label}.supportsReasoningEffort`);
+  const sendSessionAffinityHeaders = configuredBoolean(
+    input.sendSessionAffinityHeaders,
+    `${label}.sendSessionAffinityHeaders`,
+  );
+  const maxTokensField = input.maxTokensField === undefined
+    ? undefined
+    : enumValue(["max_completion_tokens", "max_tokens"] as const, input.maxTokensField, `${label}.maxTokensField`);
+  const reasoningFormat = input.reasoningFormat === undefined
+    ? undefined
+    : enumValue([
+        "openai", "openrouter", "deepseek", "together", "zai", "qwen", "qwen-chat-template",
+        "chat-template", "string-thinking", "ant-ling",
+      ] as const, input.reasoningFormat, `${label}.reasoningFormat`);
+  const chatTemplateParameters = configuredChatTemplateParameters(
+    input.chatTemplateParameters,
+    `${label}.chatTemplateParameters`,
+  );
+  if (chatTemplateParameters !== undefined && reasoningFormat !== "chat-template") {
+    throw new CatalogValidationError(`${label}.chatTemplateParameters requires reasoningFormat chat-template`);
+  }
+  if (reasoningFormat === "chat-template" && chatTemplateParameters === undefined) {
+    throw new CatalogValidationError(`${label}.reasoningFormat chat-template requires chatTemplateParameters`);
+  }
+  const cacheControlFormat = input.cacheControlFormat === undefined
+    ? undefined
+    : enumValue(["anthropic"] as const, input.cacheControlFormat, `${label}.cacheControlFormat`);
+  const cacheControlTtl = input.cacheControlTtl === undefined
+    ? undefined
+    : enumValue(["5m", "1h"] as const, input.cacheControlTtl, `${label}.cacheControlTtl`);
+  if (cacheControlTtl !== undefined && cacheControlFormat !== "anthropic") {
+    throw new CatalogValidationError(`${label}.cacheControlTtl requires cacheControlFormat anthropic`);
+  }
+  const sessionAffinityFormat = input.sessionAffinityFormat === undefined
+    ? undefined
+    : enumValue(
+        ["openai", "openai-nosession", "openrouter"] as const,
+        input.sessionAffinityFormat,
+        `${label}.sessionAffinityFormat`,
+      );
+  const openRouterRouting = configuredOpenRouterRouting(input.openRouterRouting, `${label}.openRouterRouting`);
+  const vercelGatewayRouting = configuredVercelRouting(input.vercelGatewayRouting, `${label}.vercelGatewayRouting`);
+  if (openRouterRouting !== undefined && vercelGatewayRouting !== undefined) {
+    throw new CatalogValidationError(`${label} cannot configure both OpenRouter and Vercel routing`);
+  }
+  return {
+    ...(supportsUsageInStreaming === undefined ? {} : { supportsUsageInStreaming }),
+    ...(maxTokensField === undefined ? {} : { maxTokensField }),
+    ...(supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort }),
+    ...(reasoningFormat === undefined ? {} : { reasoningFormat }),
+    ...(chatTemplateParameters === undefined ? {} : { chatTemplateParameters }),
+    ...(cacheControlFormat === undefined ? {} : { cacheControlFormat }),
+    ...(cacheControlTtl === undefined ? {} : { cacheControlTtl }),
+    ...(sendSessionAffinityHeaders === undefined ? {} : { sendSessionAffinityHeaders }),
+    ...(sessionAffinityFormat === undefined ? {} : { sessionAffinityFormat }),
+    ...(openRouterRouting === undefined ? {} : { openRouterRouting }),
+    ...(vercelGatewayRouting === undefined ? {} : { vercelGatewayRouting }),
+  };
+}
+
 function configuredTokenLimit(value: unknown, label: string): number | undefined {
   const result = positiveOptionalInteger(value, label);
   if (result !== undefined && result > MAX_CONFIGURED_MODEL_TOKENS) {
@@ -307,7 +661,8 @@ export function parseConfiguredModels(value: unknown): ConfiguredModel[] {
     const input = entry as Record<string, unknown>;
     exactKeys(input, [
       "provider", "id", "displayName", "description", "contextTokens", "maxOutputTokens",
-      "tools", "reasoning", "images", "reasoningEfforts", "pricing", "metadataSource",
+      "tools", "reasoning", "images", "reasoningEfforts", "headers", "reasoningEffortMap",
+      "requestCompatibility", "pricing", "metadataSource",
     ], label);
     const provider = configuredId(input.provider, MAX_PROVIDER_ID_BYTES, `${label}.provider`) as ProviderId;
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(provider)) {
@@ -335,6 +690,41 @@ export function parseConfiguredModels(value: unknown): ConfiguredModel[] {
     if (reasoning === false && reasoningEfforts !== undefined) {
       throw new CatalogValidationError(`${label}.reasoningEfforts cannot be set when reasoning is false`);
     }
+    const headers = configuredHeaders(input.headers, `${label}.headers`);
+    const reasoningEffortMap = configuredReasoningEffortMap(input.reasoningEffortMap, `${label}.reasoningEffortMap`);
+    if (reasoning === false && reasoningEffortMap !== undefined) {
+      throw new CatalogValidationError(`${label}.reasoningEffortMap cannot be set when reasoning is false`);
+    }
+    if (
+      reasoningEffortMap !== undefined &&
+      MODEL_REASONING_EFFORTS.every((effort) => reasoningEffortMap[effort] === null)
+    ) {
+      throw new CatalogValidationError(`${label}.reasoningEffortMap must leave at least one reasoning level available`);
+    }
+    if (reasoningEfforts !== undefined && reasoningEffortMap !== undefined) {
+      for (const effort of reasoningEfforts) {
+        if (reasoningEffortMap[effort] === null) {
+          throw new CatalogValidationError(`${label}.reasoningEffortMap.${effort} conflicts with reasoningEfforts`);
+        }
+      }
+    }
+    const requestCompatibility = configuredRequestCompatibility(
+      input.requestCompatibility,
+      `${label}.requestCompatibility`,
+    );
+    if (
+      reasoning === false &&
+      (
+        requestCompatibility?.reasoningFormat !== undefined ||
+        requestCompatibility?.supportsReasoningEffort !== undefined ||
+        requestCompatibility?.chatTemplateParameters !== undefined
+      )
+    ) {
+      throw new CatalogValidationError(`${label}.requestCompatibility reasoning fields cannot be set when reasoning is false`);
+    }
+    if (requestCompatibility?.reasoningFormat === "ant-ling" && reasoningEffortMap === undefined) {
+      throw new CatalogValidationError(`${label}.requestCompatibility reasoningFormat ant-ling requires reasoningEffortMap`);
+    }
     const normalizedPricing = configuredPricing(input.pricing, `${label}.pricing`);
     if (input.metadataSource !== undefined && input.metadataSource !== "maintained") {
       throw new CatalogValidationError(`${label}.metadataSource is invalid`);
@@ -350,6 +740,9 @@ export function parseConfiguredModels(value: unknown): ConfiguredModel[] {
       ...(reasoning === undefined ? {} : { reasoning }),
       ...(images === undefined ? {} : { images }),
       ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
+      ...(headers === undefined ? {} : { headers }),
+      ...(reasoningEffortMap === undefined ? {} : { reasoningEffortMap }),
+      ...(requestCompatibility === undefined ? {} : { requestCompatibility }),
       ...(normalizedPricing === undefined ? {} : { pricing: normalizedPricing }),
       ...(input.metadataSource === "maintained" ? { metadataSource: "maintained" as const } : {}),
     };
@@ -747,18 +1140,40 @@ function applyConfiguredModel(
         },
       }
     : detachedModel(existing);
-  const reasoning = configuration.reasoning ?? (configuration.reasoningEfforts === undefined ? undefined : true);
+  const reasoning = configuration.reasoning ?? (
+    configuration.reasoningEfforts === undefined &&
+    configuration.reasoningEffortMap === undefined &&
+    configuration.requestCompatibility?.reasoningFormat === undefined
+      ? undefined
+      : true
+  );
   const capability = (current: ModelCapability, value: boolean | undefined): ModelCapability => {
     if (value === undefined || (source === "maintained" && current.value !== "unknown")) return current;
     return { ...configuredCapability(value, observedAt), source };
   };
   const maintainedFallback = <T>(current: T | undefined, value: T | undefined): T | undefined =>
     source === "maintained" && current !== undefined ? current : value ?? current;
+  const reasoningEffortBaseline =
+    configuration.requestCompatibility?.reasoningFormat === "ant-ling" &&
+    configuration.reasoningEfforts === undefined &&
+    base.compatibility?.reasoningEfforts?.value === undefined
+      ? MODEL_REASONING_EFFORTS.filter((effort) => Object.hasOwn(configuration.reasoningEffortMap ?? {}, effort))
+      : configuration.reasoningEfforts ?? base.compatibility?.reasoningEfforts?.value ?? MODEL_REASONING_EFFORTS;
+  const mappedReasoningEfforts = configuration.reasoningEffortMap === undefined
+    ? undefined
+    : reasoningEffortBaseline
+        .filter((effort) => {
+          const normalized = effort.trim().toLocaleLowerCase("en-US") === "none"
+            ? "off"
+            : effort.trim().toLocaleLowerCase("en-US");
+          return configuration.reasoningEffortMap?.[normalized as ModelReasoningEffort] !== null;
+        });
+  const configuredReasoningEfforts = mappedReasoningEfforts ?? configuration.reasoningEfforts;
   const reasoningEfforts = source === "maintained" && base.compatibility?.reasoningEfforts !== undefined
     ? base.compatibility.reasoningEfforts
-    : configuration.reasoningEfforts === undefined
+    : configuredReasoningEfforts === undefined
       ? base.compatibility?.reasoningEfforts
-      : { value: [...configuration.reasoningEfforts], source, observedAt };
+      : { value: [...configuredReasoningEfforts], source, observedAt };
   const compatibility = reasoningEfforts === undefined
     ? base.compatibility
     : { ...(base.compatibility ?? {}), reasoningEfforts };
@@ -796,6 +1211,46 @@ function applyConfiguredModel(
     },
     ...(compatibility === undefined ? {} : { compatibility }),
     ...(pricing === undefined ? {} : { pricing }),
+  };
+}
+
+function configuredModelRequestSettings(configuration: ConfiguredModel | undefined): ProviderModelRequestSettings | undefined {
+  if (
+    configuration?.headers === undefined &&
+    configuration?.reasoningEffortMap === undefined &&
+    configuration?.requestCompatibility === undefined
+  ) return undefined;
+  return {
+    ...(configuration.headers === undefined ? {} : { headers: structuredClone(configuration.headers) }),
+    ...(configuration.reasoningEffortMap === undefined
+      ? {}
+      : { reasoningEffortMap: structuredClone(configuration.reasoningEffortMap) }),
+    ...(configuration.requestCompatibility === undefined
+      ? {}
+      : { compatibility: structuredClone(configuration.requestCompatibility) }),
+  };
+}
+
+function withConfiguredModelSettings(
+  adapter: ProviderAdapter,
+  model: (id: string) => ConfiguredModel | undefined,
+  includeDispose = true,
+): ProviderAdapter {
+  return {
+    id: adapter.id,
+    stream(request: ProviderRequest, signal: AbortSignal) {
+      const cleanRequest = { ...request };
+      delete cleanRequest.modelSettings;
+      const settings = configuredModelRequestSettings(model(request.model));
+      return adapter.stream(
+        settings === undefined ? cleanRequest : { ...cleanRequest, modelSettings: settings },
+        signal,
+      );
+    },
+    async listModels(signal: AbortSignal): Promise<ModelInfo[]> {
+      return await adapter.listModels(signal);
+    },
+    ...(includeDispose && adapter.dispose !== undefined ? { dispose: async () => await adapter.dispose!() } : {}),
   };
 }
 
@@ -906,6 +1361,8 @@ export function modelReferenceFailureMessage(resolution: ModelReferenceResolutio
 
 export class ProviderRegistry {
   readonly #adapters = new Map<ProviderId, ProviderAdapter>();
+  readonly #registeredAdapters = new Map<ProviderId, ProviderAdapter>();
+  readonly #overrides = new Map<ProviderId, ProviderOverrideLayer[]>();
   readonly #runtimeAdapters = new Map<ProviderId, ProviderAdapter>();
   readonly #catalogs = new Map<ProviderId, CatalogRecord>();
   #configuredModels = new Map<ProviderId, Map<string, ConfiguredModel>>();
@@ -949,9 +1406,81 @@ export class ProviderRegistry {
     boundedString(adapter.id, MAX_PROVIDER_ID_BYTES, "Provider adapter ID");
     if (this.#adapters.has(adapter.id)) throw new Error(`Provider adapter already registered: ${adapter.id}`);
     if (this.#adapters.size >= this.#maxProviders) throw new Error(`Provider registry cannot exceed ${this.#maxProviders} adapters`);
+    this.#registeredAdapters.set(adapter.id, adapter);
     this.#adapters.set(adapter.id, adapter);
-    this.#runtimeAdapters.set(adapter.id, withUsagePricing(adapter, (model) =>
-      this.#effectiveModels(adapter.id).find((entry) => entry.id === model)));
+    this.#runtimeAdapters.set(adapter.id, withUsagePricing(
+      withConfiguredModelSettings(adapter, (model) => this.#configuredModels.get(adapter.id)?.get(model)),
+      (model) => this.#effectiveModels(adapter.id).find((entry) => entry.id === model),
+    ));
+  }
+
+  /**
+   * Temporarily replaces an existing provider. Overrides compose as a stack;
+   * disposing any layer removes only that registration and restores the next
+   * active layer when necessary.
+   */
+  override(adapter: ProviderAdapter): () => void {
+    boundedString(adapter.id, MAX_PROVIDER_ID_BYTES, "Provider adapter ID");
+    const id = adapter.id;
+    if (!this.#adapters.has(id)) {
+      throw new Error(`Provider adapter is not registered: ${id}`);
+    }
+    const token = Symbol(id);
+    const layer = { token, kind: "replace", adapter } satisfies ProviderOverrideLayer;
+    const overrides = this.#overrides.get(id) ?? [];
+    overrides.push(layer);
+    this.#overrides.set(id, overrides);
+    this.#activateOverride(id, adapter);
+
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      const current = this.#overrides.get(id);
+      if (current === undefined) return;
+      const index = current.findIndex((entry) => entry.token === token);
+      if (index < 0) return;
+      const affectsComposition = !current.slice(index + 1).some((entry) => entry.kind === "replace");
+      current.splice(index, 1);
+      if (current.length === 0) this.#overrides.delete(id);
+      if (affectsComposition) this.#activateComposedProvider(id);
+    };
+  }
+
+  /** Temporarily replaces selected adapter functions while retaining all unspecified behavior. */
+  overlay(overlay: ProviderAdapterOverlay): () => void {
+    boundedString(overlay.id, MAX_PROVIDER_ID_BYTES, "Provider adapter ID");
+    if (!this.#adapters.has(overlay.id)) {
+      throw new Error(`Provider adapter is not registered: ${overlay.id}`);
+    }
+    if (overlay.stream === undefined && overlay.listModels === undefined) {
+      throw new TypeError("Provider adapter overlay must replace stream or listModels");
+    }
+    if (overlay.stream !== undefined && typeof overlay.stream !== "function") {
+      throw new TypeError("Provider adapter overlay stream must be a function");
+    }
+    if (overlay.listModels !== undefined && typeof overlay.listModels !== "function") {
+      throw new TypeError("Provider adapter overlay listModels must be a function");
+    }
+    const id = overlay.id;
+    const token = Symbol(id);
+    const layers = this.#overrides.get(id) ?? [];
+    layers.push({ token, kind: "overlay", overlay });
+    this.#overrides.set(id, layers);
+    this.#activateComposedProvider(id);
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      const current = this.#overrides.get(id);
+      if (current === undefined) return;
+      const index = current.findIndex((entry) => entry.token === token);
+      if (index < 0) return;
+      const affectsComposition = !current.slice(index + 1).some((entry) => entry.kind === "replace");
+      current.splice(index, 1);
+      if (current.length === 0) this.#overrides.delete(id);
+      if (affectsComposition) this.#activateComposedProvider(id);
+    };
   }
 
   unregister(
@@ -961,16 +1490,7 @@ export class ProviderRegistry {
   ): boolean {
     const current = this.#adapters.get(id);
     if (current === undefined || (adapter !== undefined && current !== adapter)) return false;
-    this.#adapters.delete(id);
-    this.#runtimeAdapters.delete(id);
-    this.#active.get(id)?.controller.abort(new Error(`Provider adapter was unregistered: ${id}`));
-    this.#catalogs.delete(id);
-    this.#errors.delete(id);
-    this.#forceRefresh.delete(id);
-    this.#retained.delete(id);
-    if (options.preservePersistedCatalog !== true) {
-      void this.#ready.then(async () => await this.#persist()).catch(() => undefined);
-    }
+    this.#removeProvider(id, options.preservePersistedCatalog === true);
     return true;
   }
 
@@ -980,7 +1500,13 @@ export class ProviderRegistry {
     return adapter;
   }
 
-  /** Adapter facade used for runs; it adds deterministic catalog-based costs when providers omit them. */
+  /** Non-owning adapter view that applies exact configured-model request settings. */
+  configuredAdapter(id: ProviderId): ProviderAdapter {
+    const adapter = this.get(id);
+    return withConfiguredModelSettings(adapter, (model) => this.#configuredModels.get(id)?.get(model), false);
+  }
+
+  /** Adapter facade used for runs; it applies model settings and deterministic costs. */
   runtimeAdapter(id: ProviderId): ProviderAdapter {
     const adapter = this.#runtimeAdapters.get(id);
     if (adapter === undefined) throw new Error(`Provider adapter is not registered: ${id}`);
@@ -993,6 +1519,61 @@ export class ProviderRegistry {
 
   list(): ProviderAdapter[] {
     return [...this.#adapters.values()];
+  }
+
+  #activateOverride(id: ProviderId, adapter: ProviderAdapter): void {
+    const active = this.#active.get(id);
+    active?.controller.abort(new Error(`Provider adapter changed: ${id}`));
+    if (active !== undefined && this.#active.get(id) === active) this.#active.delete(id);
+    this.#adapters.set(id, adapter);
+    this.#runtimeAdapters.set(id, withUsagePricing(
+      withConfiguredModelSettings(adapter, (model) => this.#configuredModels.get(id)?.get(model)),
+      (model) => this.#effectiveModels(id).find((entry) => entry.id === model),
+    ));
+    this.#catalogs.delete(id);
+    this.#errors.delete(id);
+    this.#forceRefresh.add(id);
+  }
+
+  #activateComposedProvider(id: ProviderId): void {
+    let adapter = this.#registeredAdapters.get(id);
+    if (adapter === undefined) {
+      this.#removeProvider(id, false);
+      return;
+    }
+    for (const layer of this.#overrides.get(id) ?? []) {
+      if (layer.kind === "replace") {
+        adapter = layer.adapter;
+        continue;
+      }
+      const underlying: ProviderAdapter = adapter;
+      const selected: ProviderAdapter = {
+        id,
+        stream: layer.overlay.stream === undefined
+          ? underlying.stream.bind(underlying)
+          : (request, signal) => layer.overlay.stream!(request, signal),
+        listModels: layer.overlay.listModels === undefined
+          ? underlying.listModels.bind(underlying)
+          : (signal) => layer.overlay.listModels!(signal),
+      };
+      adapter = selected;
+    }
+    this.#activateOverride(id, adapter);
+  }
+
+  #removeProvider(id: ProviderId, preservePersistedCatalog: boolean): void {
+    this.#registeredAdapters.delete(id);
+    this.#overrides.delete(id);
+    this.#adapters.delete(id);
+    this.#runtimeAdapters.delete(id);
+    this.#active.get(id)?.controller.abort(new Error(`Provider adapter was unregistered: ${id}`));
+    this.#catalogs.delete(id);
+    this.#errors.delete(id);
+    this.#forceRefresh.delete(id);
+    this.#retained.delete(id);
+    if (!preservePersistedCatalog) {
+      void this.#ready.then(async () => await this.#persist()).catch(() => undefined);
+    }
   }
 
   configureModels(value: readonly ConfiguredModel[]): void {
@@ -1300,7 +1881,7 @@ export class ProviderRegistry {
       active = { controller, promise: Promise.resolve(), waiters: new Set(), settled: false };
       const operation = this.#runRefresh(provider, controller.signal).finally(() => {
         active!.settled = true;
-        this.#active.delete(provider);
+        if (this.#active.get(provider) === active) this.#active.delete(provider);
       });
       active.promise = operation;
       this.#active.set(provider, active);

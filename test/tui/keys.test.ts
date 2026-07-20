@@ -75,6 +75,11 @@ test("key decoder consumes fragmented protocol replies instead of exposing them 
   assert.deepEqual(decoder.takeReplies(), [{ type: "kitty_keyboard", flags: 5 }]);
   assert.deepEqual(decoder.push("2c"), []);
   assert.deepEqual(decoder.takeReplies(), [{ type: "primary_device_attributes" }]);
+  assert.deepEqual(decoder.push("\u001b[?997;2n\u001b]11;rgb:0000/0000/0000\u0007"), []);
+  assert.deepEqual(decoder.takeReplies(), [
+    { type: "color_scheme", scheme: "light" },
+    { type: "background_color", color: { red: 0, green: 0, blue: 0 } },
+  ]);
   assert.deepEqual(decoder.push("ok"), [{ key: "text", text: "o" }, { key: "text", text: "k" }]);
 });
 

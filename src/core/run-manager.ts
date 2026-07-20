@@ -141,6 +141,14 @@ export class ThreadRunManager {
     active.control.cancel(reason);
   }
 
+  cancelRetry(threadId: string): boolean {
+    return this.#active.get(threadId)?.control.cancelRetry() ?? false;
+  }
+
+  setAutoRetryEnabled(enabled: boolean): void {
+    for (const active of this.#active.values()) active.control.setAutoRetryEnabled(enabled);
+  }
+
   active(threadId: string): boolean {
     return this.#active.has(threadId);
   }

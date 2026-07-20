@@ -69,6 +69,82 @@ test("AWS merges profile files and credentials-file static keys take precedence"
   });
 });
 
+test("AWS delegates source-profile role assumption to the official profile chain", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const credentialsPath = join(directory, "credentials");
+  const configPath = join(directory, "config");
+  await writeFile(credentialsPath, "[source]\naws_access_key_id = source-access\naws_secret_access_key = source-secret\n");
+  await writeFile(
+    configPath,
+    "[profile delegated]\nrole_arn = arn:aws:iam::123456789012:role/Delegated\nsource_profile = source\nregion = ca-central-1\n",
+  );
+  let received: Record<string, unknown> | undefined;
+  const redactor = new SecretRedactor();
+  const credential = await resolveAwsDefaultCredentials({
+    environment: {
+      AWS_PROFILE: "delegated",
+      AWS_SHARED_CREDENTIALS_FILE: credentialsPath,
+      AWS_CONFIG_FILE: configPath,
+    },
+    homeDirectory: directory,
+    redactor,
+    profileChainResolver: async (input) => {
+      received = input as unknown as Record<string, unknown>;
+      return {
+        accessKeyId: "assumed-access",
+        secretAccessKey: "assumed-secret",
+        sessionToken: "assumed-session",
+        expiresAt: NOW + 3_600_000,
+      };
+    },
+  });
+  assert.equal(received?.profile, "delegated");
+  assert.equal(received?.credentialsFilepath, credentialsPath);
+  assert.equal(received?.configFilepath, configPath);
+  assert.equal(received?.region, "ca-central-1");
+  assert.deepEqual(credential, {
+    accessKeyId: "assumed-access",
+    secretAccessKey: "assumed-secret",
+    sessionToken: "assumed-session",
+    expiresAt: NOW + 3_600_000,
+    source: "profile:delegated:official-chain",
+  });
+  assert.equal(redactor.redact("assumed-access assumed-secret assumed-session"), "[REDACTED] [REDACTED] [REDACTED]");
+});
+
+test("AWS delegates IAM Identity Center profiles to the official profile chain", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const configPath = join(directory, "config");
+  await writeFile(
+    configPath,
+    [
+      "[profile workforce]",
+      "sso_session = company",
+      "sso_account_id = 123456789012",
+      "sso_role_name = Developer",
+      "region = us-east-2",
+      "",
+      "[sso-session company]",
+      "sso_start_url = https://example.awsapps.com/start",
+      "sso_region = us-east-1",
+      "",
+    ].join("\n"),
+  );
+  let calls = 0;
+  const credential = await resolveAwsDefaultCredentials({
+    environment: { AWS_PROFILE: "workforce", AWS_CONFIG_FILE: configPath },
+    homeDirectory: directory,
+    profileChainResolver: async ({ profile, region }) => {
+      calls += 1;
+      assert.equal(profile, "workforce");
+      assert.equal(region, "us-east-2");
+      return { accessKeyId: "sso-access", secretAccessKey: "sso-secret", source: "sso-cache" };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(credential?.source, "sso-cache");
+});
+
 test("AWS credential_process is tokenized without a shell and has bounded inputs", async (context) => {
   const directory = await temporaryDirectory(context);
   const configPath = join(directory, "config");

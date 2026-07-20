@@ -16,7 +16,16 @@ import type { RuntimeExtensionSessionHandler } from "../../src/extensions/runtim
 import { reloadExtensionPackage, smokeExtensionPackage } from "../../src/cli/extension-author.js";
 
 const examples = {
+  "advanced-ui": "advanced-ui-example",
   "brokered-provider": "brokered-provider-example",
+  "child-specialist": "child-specialist-example",
+  "paged-memory": "paged-memory-example",
+  "prompt-inspector": "prompt-inspector-example",
+  "provider-lifecycle": "provider-lifecycle-example",
+  "resource-discovery": "resource-discovery-example",
+  "review-workflow": "review-workflow-example",
+  "session-analytics": "session-analytics-example",
+  "session-tools": "session-tools-example",
   "shared-events": "shared-events-example",
   "state-migration": "state-migration-example",
   "reload-safety": "reload-safety-example",

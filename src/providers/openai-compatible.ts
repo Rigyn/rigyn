@@ -6,6 +6,7 @@ import type {
   FinishReason,
   ImageBlock,
   ModelCapability,
+  ModelModality,
   ModelInfo,
   NormalizedUsage,
   ProviderAdapter,
@@ -67,7 +68,11 @@ export type OpenAICompatibleProfile =
   | "vercel-ai-gateway"
   | "zai"
   | "kimi-coding"
-  | "minimax";
+  | "minimax"
+  | "xiaomi"
+  | "moonshot"
+  | "opencode"
+  | "cloudflare-ai-gateway";
 
 export interface OpenRouterConfig {
   apiKey?: TokenSource;
@@ -232,6 +237,8 @@ class ChatCompletionsAdapter implements ProviderAdapter {
         ? mistralCacheKey(request.sessionId)
         : undefined;
       if (generatedCacheKey !== undefined && !headers.has("x-affinity")) headers.set("x-affinity", generatedCacheKey);
+      applySessionAffinityHeaders(headers, request, this.#config.openRouter);
+      for (const [name, value] of Object.entries(request.modelSettings?.headers ?? {})) headers.set(name, value);
       const cacheKey = this.#config.mistral && this.#config.mistralPromptCache
         ? headers.get("x-affinity") ?? generatedCacheKey
         : undefined;
@@ -453,6 +460,8 @@ class ChatCompletionsAdapter implements ProviderAdapter {
       const model = asRecord(entry);
       const id = catalogId(model?.id);
       if (id === undefined) return [];
+      const xiaomiModel = this.#config.profile === "xiaomi" ? documentedXiaomiChatModel(id) : undefined;
+      if (this.#config.profile === "xiaomi" && xiaomiModel === undefined) return [];
       if (this.#config.profile === "vercel-ai-gateway") {
         const type = asString(model?.type);
         if (type !== "language") return [];
@@ -461,7 +470,13 @@ class ChatCompletionsAdapter implements ProviderAdapter {
       const outputModalities = asArray(architecture?.output_modalities)
         .filter((value): value is string => typeof value === "string");
       if (outputModalities.length > 0 && !outputModalities.includes("text")) return [];
-      const capabilities = modelCapabilities(model, observedAt, this.#config.profile);
+      const capabilities = xiaomiModel === undefined
+        ? modelCapabilities(model, observedAt, this.#config.profile)
+        : {
+            tools: documentedCapability(true, observedAt),
+            reasoning: documentedCapability(true, observedAt),
+            images: documentedCapability(xiaomiModel.images, observedAt),
+          };
       const compatibility = baseModelCompatibility("openai-chat-completions", capabilities.tools, observedAt);
       const inputModalityEvidence = providerModalities(architecture?.input_modalities, observedAt);
       const outputModalityEvidence = providerModalities(architecture?.output_modalities, observedAt);
@@ -472,6 +487,11 @@ class ChatCompletionsAdapter implements ProviderAdapter {
       if (inputModalityEvidence !== undefined) compatibility.inputModalities = inputModalityEvidence;
       if (outputModalityEvidence !== undefined) compatibility.outputModalities = outputModalityEvidence;
       if (reasoningEfforts !== undefined) compatibility.reasoningEfforts = reasoningEfforts;
+      if (xiaomiModel !== undefined) {
+        const inputModalities: ModelModality[] = xiaomiModel.images ? ["text", "image"] : ["text"];
+        compatibility.inputModalities = modelEvidence(inputModalities, "maintained", observedAt);
+        compatibility.reasoningEfforts = modelEvidence(["off", "high"], "maintained", observedAt);
+      }
       if (this.#config.openRouter && this.#config.promptCache !== "off") {
         compatibility.cacheMode = modelEvidence("explicit", "configuration", observedAt);
         compatibility.cacheAffinity = modelEvidence("prefix", "configuration", observedAt);
@@ -494,16 +514,16 @@ class ChatCompletionsAdapter implements ProviderAdapter {
         ...(pricing === undefined ? {} : { pricing }),
         metadata: jsonValueOrString(model),
       };
-      const displayName = asString(model?.name);
-      const description = asString(model?.description);
+      const displayName = asString(model?.name) ?? xiaomiModel?.displayName;
+      const description = asString(model?.description) ?? xiaomiModel?.description;
       const contextTokens = catalogLimit(
         model?.context_length ?? model?.max_context_length ??
         (this.#config.profile === "vercel-ai-gateway" ? model?.context_window : undefined),
-      );
+      ) ?? xiaomiModel?.contextTokens;
       const maxOutputTokens = catalogLimit(
         asRecord(model?.top_provider)?.max_completion_tokens ?? model?.max_output_tokens ??
         (this.#config.profile === "vercel-ai-gateway" ? model?.max_tokens : undefined),
-      );
+      ) ?? xiaomiModel?.maxOutputTokens;
       if (displayName !== undefined) info.displayName = displayName;
       if (description !== undefined) info.description = description;
       if (contextTokens !== undefined) info.contextTokens = contextTokens;
@@ -525,7 +545,7 @@ export class OpenAICompatibleAdapter extends ChatCompletionsAdapter {
     const baseUrl = trimSlash(config.baseUrl);
     assertSecureEndpoint(baseUrl, "OpenAI-compatible base URL");
     const profile = config.profile ?? "default";
-    if (!["default", "vercel-ai-gateway", "zai", "kimi-coding", "minimax"].includes(profile)) {
+    if (!["default", "vercel-ai-gateway", "zai", "kimi-coding", "minimax", "xiaomi", "moonshot", "opencode", "cloudflare-ai-gateway"].includes(profile)) {
       throw new TypeError("OpenAI-compatible profile is unsupported");
     }
     super({
@@ -618,33 +638,38 @@ function buildChatBody(
     request,
     request.providerState?.kind === (openRouter ? "openrouter_chat" : "chat_completions"),
   );
+  const compatibility = request.modelSettings?.compatibility;
+  const messages = buildChatMessages(request, openRouter, mistral);
   const body: Record<string, unknown> = {
     model: request.model,
-    messages: buildChatMessages(request, openRouter, mistral),
+    messages,
     stream: true,
     n: 1,
   };
-  if (includeUsage) body.stream_options = { include_usage: true };
+  if (compatibility?.supportsUsageInStreaming ?? includeUsage) body.stream_options = { include_usage: true };
   if (request.maxOutputTokens !== undefined) {
-    body[mistral || profile === "zai" ? "max_tokens" : "max_completion_tokens"] = request.maxOutputTokens;
+    const maxTokensField = compatibility?.maxTokensField
+      ?? (mistral || profile === "zai" || profile === "moonshot" || profile === "opencode" || profile === "cloudflare-ai-gateway"
+        ? "max_tokens"
+        : "max_completion_tokens");
+    body[maxTokensField] = request.maxOutputTokens;
   }
-  if (request.reasoningEffort !== undefined) {
-    if (openRouter) body.reasoning = { effort: request.reasoningEffort };
-    else if (mistral && mistralReasoningMode === "prompt") {
-      if (!["off", "none"].includes(request.reasoningEffort)) body.prompt_mode = "reasoning";
-    } else {
-      body.reasoning_effort = mistral || profile === "zai"
-        ? mistralReasoningEffort(request.reasoningEffort)
-        : request.reasoningEffort;
-    }
-  }
+  applyReasoningParameters(body, request, openRouter, mistral, mistralReasoningMode, profile);
+  let tools: Array<Record<string, unknown>> | undefined;
   if (request.tools.length > 0) {
-    body.tools = request.tools.map((tool) => ({
+    tools = request.tools.map((tool) => ({
       type: "function",
       function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
     }));
+    body.tools = tools;
     if (profile === "zai") body.tool_stream = true;
     if (profile === "default" || profile === "vercel-ai-gateway") body.parallel_tool_calls = true;
+  }
+  if (compatibility?.cacheControlFormat === "anthropic") {
+    applyAnthropicCacheControl(messages, tools, {
+      type: "ephemeral",
+      ...(compatibility.cacheControlTtl === "1h" ? { ttl: "1h" } : {}),
+    });
   }
   if (profile === "minimax") body.reasoning_split = true;
   if ((openRouter || mistral) && request.metadata !== undefined) body.metadata = request.metadata;
@@ -656,7 +681,185 @@ function buildChatBody(
     };
   }
   if (mistralCacheKey !== undefined) body.prompt_cache_key = mistralCacheKey;
+  if (compatibility?.openRouterRouting !== undefined) {
+    body.provider = structuredClone(compatibility.openRouterRouting);
+  }
+  if (compatibility?.vercelGatewayRouting !== undefined) {
+    body.providerOptions = { gateway: structuredClone(compatibility.vercelGatewayRouting) };
+  }
   return body;
+}
+
+function reasoningEnabled(request: ProviderRequest): boolean {
+  return request.reasoningEffort !== undefined && !["off", "none"].includes(request.reasoningEffort);
+}
+
+function mappedReasoningEffort(request: ProviderRequest, offDefault?: string): string | undefined {
+  const effort = request.reasoningEffort === "none" ? "off" : request.reasoningEffort;
+  const selected = effort ?? "off";
+  const mapping = request.modelSettings?.reasoningEffortMap;
+  if (mapping !== undefined && Object.hasOwn(mapping, selected)) {
+    return mapping[selected] ?? undefined;
+  }
+  if (selected === "off") return offDefault;
+  return selected;
+}
+
+function applyReasoningParameters(
+  body: Record<string, unknown>,
+  request: ProviderRequest,
+  openRouter: boolean,
+  mistral: boolean,
+  mistralReasoningMode: "effort" | "prompt",
+  profile: OpenAICompatibleProfile,
+): void {
+  const compatibility = request.modelSettings?.compatibility;
+  const format = compatibility?.reasoningFormat;
+  const enabled = reasoningEnabled(request);
+  if (format !== undefined) {
+    if (format === "zai") {
+      body.thinking = enabled ? { type: "enabled", clear_thinking: false } : { type: "disabled" };
+      const effort = mappedReasoningEffort(request);
+      if (enabled && compatibility?.supportsReasoningEffort === true && effort !== undefined) {
+        body.reasoning_effort = effort;
+      }
+      return;
+    }
+    if (format === "qwen") {
+      body.enable_thinking = enabled;
+      return;
+    }
+    if (format === "qwen-chat-template") {
+      body.chat_template_kwargs = { enable_thinking: enabled, preserve_thinking: true };
+      return;
+    }
+    if (format === "chat-template") {
+      const parameters = resolveChatTemplateParameters(request);
+      if (parameters !== undefined) body.chat_template_kwargs = parameters;
+      return;
+    }
+    if (format === "deepseek") {
+      if (enabled) body.thinking = { type: "enabled" };
+      else if (request.modelSettings?.reasoningEffortMap?.off !== null) body.thinking = { type: "disabled" };
+      const effort = mappedReasoningEffort(request);
+      if (enabled && compatibility?.supportsReasoningEffort === true && effort !== undefined) {
+        body.reasoning_effort = effort;
+      }
+      return;
+    }
+    if (format === "openrouter") {
+      const effort = mappedReasoningEffort(request, "none");
+      if (effort !== undefined) body.reasoning = { effort };
+      return;
+    }
+    if (format === "ant-ling") {
+      const mapping = request.modelSettings?.reasoningEffortMap;
+      const effort = request.reasoningEffort === undefined ? undefined : mapping?.[request.reasoningEffort === "none" ? "off" : request.reasoningEffort];
+      if (enabled && typeof effort === "string") body.reasoning = { effort };
+      return;
+    }
+    if (format === "together") {
+      body.reasoning = { enabled };
+      const effort = mappedReasoningEffort(request);
+      if (enabled && compatibility?.supportsReasoningEffort === true && effort !== undefined) {
+        body.reasoning_effort = effort;
+      }
+      return;
+    }
+    if (format === "string-thinking") {
+      const effort = mappedReasoningEffort(request, "none");
+      if (effort !== undefined) body.thinking = effort;
+      return;
+    }
+    const effort = mappedReasoningEffort(request);
+    if (effort !== undefined && compatibility?.supportsReasoningEffort !== false) body.reasoning_effort = effort;
+    return;
+  }
+
+  if (profile === "xiaomi") {
+    body.thinking = { type: enabled ? "enabled" : "disabled" };
+  } else if (profile === "moonshot") {
+    if (enabled || request.modelSettings?.reasoningEffortMap?.off !== null) {
+      body.thinking = { type: enabled ? "enabled" : "disabled" };
+    }
+  } else if (profile === "cloudflare-ai-gateway") {
+    // The gateway accepts the model's native reasoning behavior but rejects
+    // the generic Chat Completions reasoning_effort field.
+  } else if (
+    request.reasoningEffort !== undefined ||
+    Object.hasOwn(request.modelSettings?.reasoningEffortMap ?? {}, "off")
+  ) {
+    const effort = mappedReasoningEffort(request, request.reasoningEffort);
+    if (openRouter && effort !== undefined) body.reasoning = { effort };
+    else if (mistral && mistralReasoningMode === "prompt") {
+      if (enabled) body.prompt_mode = "reasoning";
+    } else if (effort !== undefined && compatibility?.supportsReasoningEffort !== false) {
+      body.reasoning_effort = mistral || profile === "zai" ? mistralReasoningEffort(effort) : effort;
+    }
+  }
+}
+
+function resolveChatTemplateParameters(request: ProviderRequest): Record<string, unknown> | undefined {
+  const configured = request.modelSettings?.compatibility?.chatTemplateParameters;
+  if (configured === undefined) return undefined;
+  const resolve = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.map(resolve).filter((entry) => entry !== undefined);
+    }
+    const record = asRecord(value);
+    if (record === undefined) return value;
+    if (record.$var === "thinking.enabled" || record.$var === "thinking.effort") {
+      if (record.omitWhenOff === true && !reasoningEnabled(request)) return undefined;
+      return record.$var === "thinking.enabled" ? reasoningEnabled(request) : mappedReasoningEffort(request);
+    }
+    return Object.fromEntries(Object.entries(record).flatMap(([key, entry]) => {
+      const resolved = resolve(entry);
+      return resolved === undefined ? [] : [[key, resolved]];
+    }));
+  };
+  const result = resolve(configured) as Record<string, unknown>;
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
+interface AnthropicCacheControl {
+  type: "ephemeral";
+  ttl?: "1h";
+}
+
+function applyAnthropicCacheControl(
+  messages: unknown[],
+  tools: Array<Record<string, unknown>> | undefined,
+  cacheControl: AnthropicCacheControl,
+): void {
+  const instruction = messages.find((message) => {
+    const role = asString(asRecord(message)?.role);
+    return role === "system" || role === "developer";
+  });
+  if (instruction !== undefined) addCacheControlToText(instruction, cacheControl);
+  if (tools !== undefined && tools.length > 0) tools[tools.length - 1]!.cache_control = cacheControl;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const role = asString(asRecord(message)?.role);
+    if ((role === "user" || role === "assistant") && addCacheControlToText(message, cacheControl)) break;
+  }
+}
+
+function addCacheControlToText(value: unknown, cacheControl: AnthropicCacheControl): boolean {
+  const message = asRecord(value);
+  if (message === undefined) return false;
+  if (typeof message.content === "string") {
+    if (message.content === "") return false;
+    message.content = [{ type: "text", text: message.content, cache_control: cacheControl }];
+    return true;
+  }
+  if (!Array.isArray(message.content)) return false;
+  for (let index = message.content.length - 1; index >= 0; index -= 1) {
+    const part = asRecord(message.content[index]);
+    if (part?.type !== "text") continue;
+    part.cache_control = cacheControl;
+    return true;
+  }
+  return false;
 }
 
 function buildChatMessages(request: ProviderRequest, openRouter: boolean, mistral: boolean): unknown[] {
@@ -667,7 +870,7 @@ function buildChatMessages(request: ProviderRequest, openRouter: boolean, mistra
       : undefined;
   const lastAssistant = findLastAssistant(request);
   return request.messages.flatMap((message, index): unknown[] => {
-    if (state !== undefined && index === lastAssistant) return [state.assistantMessage];
+    if (state !== undefined && index === lastAssistant) return [structuredClone(state.assistantMessage)];
     const toolResults = message.content.filter((block) => block.type === "tool_result");
     const images = [
       ...message.content.filter((block) => block.type === "image"),
@@ -722,6 +925,21 @@ function findLastAssistant(request: ProviderRequest): number {
     if (request.messages[index]?.role === "assistant") return index;
   }
   return -1;
+}
+
+function applySessionAffinityHeaders(headers: Headers, request: ProviderRequest, openRouter: boolean): void {
+  const compatibility = request.modelSettings?.compatibility;
+  if (compatibility?.sendSessionAffinityHeaders !== true) return;
+  const sessionId = mistralCacheKey(request.sessionId);
+  if (sessionId === undefined) return;
+  const format = compatibility.sessionAffinityFormat ?? (openRouter ? "openrouter" : "openai");
+  if (format === "openrouter") {
+    headers.set("x-session-id", sessionId);
+    return;
+  }
+  if (format === "openai") headers.set("session_id", sessionId);
+  headers.set("x-client-request-id", sessionId);
+  headers.set("x-session-affinity", sessionId);
 }
 
 function mistralCacheKey(sessionId: string | undefined): string | undefined {
@@ -784,7 +1002,7 @@ function chatState(
 ): ProviderState {
   const message: Record<string, JsonValue> = { role: "assistant", content };
   if (reasoning !== "") {
-    message[profile === "zai" || profile === "kimi-coding" || profile === "minimax"
+    message[profile === "zai" || profile === "kimi-coding" || profile === "minimax" || profile === "xiaomi" || profile === "moonshot"
       ? "reasoning_content"
       : "reasoning"] = reasoning;
   }
@@ -891,6 +1109,49 @@ function modelCapabilities(
       observedAt,
     ),
   };
+}
+
+interface DocumentedXiaomiChatModel {
+  displayName: string;
+  description: string;
+  contextTokens: number;
+  maxOutputTokens: number;
+  images: boolean;
+}
+
+function documentedXiaomiChatModel(id: string): DocumentedXiaomiChatModel | undefined {
+  if (id === "mimo-v2-pro") {
+    return {
+      displayName: "MiMo V2 Pro",
+      description: "Xiaomi text, reasoning, and agent model",
+      contextTokens: 262_144,
+      maxOutputTokens: 32_768,
+      images: false,
+    };
+  }
+  if (id === "mimo-v2.5-pro") {
+    return {
+      displayName: "MiMo V2.5 Pro",
+      description: "Xiaomi text, reasoning, and agent model",
+      contextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      images: false,
+    };
+  }
+  if (id === "mimo-v2.5") {
+    return {
+      displayName: "MiMo V2.5",
+      description: "Xiaomi multimodal reasoning and agent model",
+      contextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      images: true,
+    };
+  }
+  return undefined;
+}
+
+function documentedCapability(supported: boolean, observedAt: string): ModelCapability {
+  return { value: supported ? "supported" : "unsupported", source: "maintained", observedAt };
 }
 
 function capability(supported: boolean, known: boolean, observedAt: string): ModelCapability {

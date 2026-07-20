@@ -3,6 +3,7 @@ import {
   AgentRunner,
   attachQueuedRunDelivery,
   cloneQueuedRunMessage,
+  DEFAULT_RETRY_POLICY,
   queuedRunDeliveryId,
   queuedRunDeliveryMessageId,
   normalizedContextTokens,
@@ -20,11 +21,14 @@ import type {
   AdapterError,
   CanonicalMessage,
   ImageBlock,
+  ModelInfo,
   NormalizedUsage,
   OutboundImagePolicy,
   PromptCompositionMetadata,
   PromptCompositionSource,
   ProviderId,
+  ProviderRequest,
+  ToolResultBlock,
 } from "../core/types.js";
 import {
   discoverInstructions,
@@ -58,6 +62,7 @@ import {
   WriteTool,
   WorkspaceBoundary,
   type HarnessTool,
+  type ToolBackendRequest,
   type ToolExecutionBackend,
   type ToolInvocation,
 } from "../tools/index.js";
@@ -69,6 +74,7 @@ import { defaultSecretRedactor } from "../auth/redaction.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import { HarnessError } from "../core/errors.js";
+import type { JsonValue } from "../core/json.js";
 import {
   normalizeChildRunPolicy,
   type ChildRunPolicy,
@@ -82,6 +88,7 @@ import {
 import type { CloneSessionPathInput, CloneSessionPathResult } from "./session-clone.js";
 import type {
   RuntimeAgentOutcome,
+  RuntimeAssistantStreamSnapshot,
   RuntimeExtensionEvent,
   RuntimeExtensionEventMap,
   RuntimeExtensionHost,
@@ -93,12 +100,18 @@ import type {
   RuntimeChildUsage,
   RuntimeChildVisibleEvent,
   RuntimeModelSelection,
+  RuntimeModelSelectSource,
   RuntimeRunScope,
   RuntimeSessionSnapshot,
+  RuntimeSessionUsageSnapshot,
+  RuntimeSystemPromptSnapshot,
+  RuntimeUserMessageResult,
   RuntimeExtensionStateRecord,
   RuntimeExtensionStateCompareAndAppendResult,
+  RuntimeInputDelivery,
   RuntimeTurnEndEvent,
 } from "../extensions/runtime.js";
+import { analyzeCacheEffectiveness } from "../core/cache-diagnostics.js";
 import type { ExtensionMessageEvent, ExtensionStateEvent } from "../core/extension-entries.js";
 import {
   buildHarnessResourceCatalog,
@@ -187,9 +200,61 @@ function runtimeChildUsage(events: readonly EventEnvelope[], runId: string): Run
   return response === undefined ? total : addRuntimeChildUsage(total, response);
 }
 
+function historicalSessionUsage(
+  threadId: string,
+  branch: string,
+  events: readonly EventEnvelope[],
+): RuntimeSessionUsageSnapshot {
+  const active = new Map<string, RuntimeChildUsage>();
+  const responses: RuntimeChildUsage[] = [];
+  const runIds = new Set<string>();
+  let responseCount = 0;
+  let usageEventCount = 0;
+  const flush = (key: string): void => {
+    const usage = active.get(key);
+    if (usage !== undefined) responses.push(usage);
+    active.delete(key);
+  };
+  for (const envelope of events) {
+    const key = envelope.runId ?? `${threadId}:unscoped`;
+    if (envelope.event.type === "run_started" && envelope.runId !== undefined) runIds.add(envelope.runId);
+    if (envelope.event.type === "provider_response_started") {
+      responseCount += 1;
+      flush(key);
+      continue;
+    }
+    if (envelope.event.type !== "usage") continue;
+    usageEventCount += 1;
+    const prior = active.get(key);
+    active.set(key, envelope.event.semantics === "incremental"
+      ? addRuntimeChildUsage(prior, envelope.event.usage)
+      : addRuntimeChildUsage(undefined, envelope.event.usage));
+  }
+  for (const key of active.keys()) flush(key);
+  const usage = responses.reduce<RuntimeChildUsage>((total, entry) => addRuntimeChildUsage(total, entry), {});
+  const cache = analyzeCacheEffectiveness(responses);
+  return {
+    threadId,
+    branch,
+    runCount: runIds.size,
+    responseCount,
+    usageEventCount,
+    usage,
+    cache: {
+      status: cache.status,
+      samples: cache.samples,
+      observedInputTokens: cache.observedInputTokens,
+      uncachedInputTokens: cache.uncachedInputTokens,
+      cacheReadTokens: cache.cacheReadTokens,
+      cacheWriteTokens: cache.cacheWriteTokens,
+      ...(cache.reuseRatio === undefined ? {} : { reuseRatio: cache.reuseRatio }),
+    },
+  };
+}
+
 const RUNTIME_CHILD_VISIBLE_EVENT_TYPES = new Set<RuntimeChildVisibleEvent["type"]>([
   "run_started", "model_selected", "run_state", "assistant_started", "provider_response_started", "text_delta",
-  "reasoning_delta", "assistant_completed", "tool_requested", "tool_started", "tool_progress", "tool_completed",
+  "reasoning_delta", "tool_call_started", "tool_call_delta", "assistant_completed", "tool_requested", "tool_started", "tool_progress", "tool_completed",
   "tool_in_doubt", "usage", "retry_scheduled", "compaction_started", "compaction_completed", "steering_queued",
   "run_completed", "run_failed", "run_cancelled", "warning",
 ]);
@@ -352,9 +417,13 @@ export interface HarnessOptions {
   store: SessionStore;
   workspace: string;
   providers: ProviderRegistry;
+  /** Optional credential-aware availability check used by extension model selection. */
+  providerAvailable?: (provider: ProviderId, signal?: AbortSignal) => Promise<boolean>;
   projectTrusted?: boolean;
   userInstructions?: { text: string; source?: string };
   userInstructionFile?: string;
+  /** Directory containing trusted user-level SYSTEM.md and APPEND_SYSTEM.md files. */
+  userPromptDirectory?: string;
   skillRoots?: SkillRoot[];
   extraTools?: readonly HarnessTool[];
   /** Routes explicitly claimed model tools through a fail-closed host boundary. */
@@ -362,9 +431,15 @@ export interface HarnessOptions {
   outboundImages?: OutboundImagePolicy;
   runtimeExtensions?: RuntimeExtensionHost;
   shellPath?: string;
+  shellCommandPrefix?: string;
   autoCompaction?: boolean;
+  compactionReserveTokens?: number;
+  compactionKeepRecentTokens?: number;
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
+  branchSummaryReserveTokens?: number;
+  imageAutoResize?: boolean;
+  thinkingBudgets?: ProviderRequest["thinkingBudgets"];
   retry?: RetryPolicy;
   childRuns?: Partial<ChildRunPolicy>;
   /** Own session and generic-event dispatch unless a CLI or RPC host already does so. */
@@ -375,6 +450,7 @@ export interface HarnessOptions {
 
 export interface HarnessRuntimeResources {
   providers: ProviderRegistry;
+  providerAvailable?: (provider: ProviderId, signal?: AbortSignal) => Promise<boolean>;
   projectTrusted: boolean;
   skills: readonly SkillMetadata[];
   extraTools: readonly HarnessTool[];
@@ -382,16 +458,29 @@ export interface HarnessRuntimeResources {
   outboundImages?: OutboundImagePolicy;
   runtimeExtensions?: RuntimeExtensionHost;
   shellPath?: string;
+  shellCommandPrefix?: string;
   autoCompaction?: boolean;
+  compactionReserveTokens?: number;
+  compactionKeepRecentTokens?: number;
   compactionRetainRecentTurns?: number;
   compactionToolResultBytes?: number;
+  branchSummaryReserveTokens?: number;
+  imageAutoResize?: boolean;
+  thinkingBudgets?: ProviderRequest["thinkingBudgets"];
   retry?: RetryPolicy;
   childRuns?: Partial<ChildRunPolicy>;
   resourceCatalog?: Pick<HarnessResourceCatalogSources, "extensions" | "packages" | "projectPackages" | "packageDiagnostics">;
 }
 
+/** Programmatic resources owned by one SDK composition layer. */
+export interface HarnessSdkComposition {
+  tools?: readonly HarnessTool[];
+  skills?: readonly SkillMetadata[];
+}
+
 interface HarnessResourceGeneration {
   readonly providers: ProviderRegistry;
+  readonly providerAvailable?: (provider: ProviderId, signal?: AbortSignal) => Promise<boolean>;
   readonly projectTrusted: boolean;
   readonly skills: readonly SkillMetadata[];
   readonly extraTools: readonly HarnessTool[];
@@ -399,9 +488,15 @@ interface HarnessResourceGeneration {
   readonly outboundImages: OutboundImagePolicy;
   readonly runtimeExtensions?: RuntimeExtensionHost;
   readonly shellPath?: string;
+  readonly shellCommandPrefix?: string;
   readonly autoCompaction?: boolean;
+  readonly compactionReserveTokens?: number;
+  readonly compactionKeepRecentTokens?: number;
   readonly compactionRetainRecentTurns?: number;
   readonly compactionToolResultBytes?: number;
+  readonly branchSummaryReserveTokens?: number;
+  readonly imageAutoResize: boolean;
+  readonly thinkingBudgets?: Readonly<NonNullable<ProviderRequest["thinkingBudgets"]>>;
   readonly retry?: Readonly<RetryPolicy>;
   readonly childRunPolicy: Readonly<ChildRunPolicy>;
   readonly resourceCatalog?: Pick<HarnessResourceCatalogSources, "extensions" | "packages" | "projectPackages" | "packageDiagnostics">;
@@ -432,6 +527,7 @@ function immutableResourceGeneration(resources: HarnessRuntimeResources): Harnes
       });
   return Object.freeze({
     providers: resources.providers,
+    ...(resources.providerAvailable === undefined ? {} : { providerAvailable: resources.providerAvailable }),
     projectTrusted: resources.projectTrusted,
     skills: Object.freeze([...resources.skills]),
     extraTools: Object.freeze([...resources.extraTools]),
@@ -439,13 +535,21 @@ function immutableResourceGeneration(resources: HarnessRuntimeResources): Harnes
     outboundImages: resources.outboundImages ?? "allow",
     ...(resources.runtimeExtensions === undefined ? {} : { runtimeExtensions: resources.runtimeExtensions }),
     ...(resources.shellPath === undefined ? {} : { shellPath: resources.shellPath }),
+    ...(resources.shellCommandPrefix === undefined ? {} : { shellCommandPrefix: resources.shellCommandPrefix }),
     ...(resources.autoCompaction === undefined ? {} : { autoCompaction: resources.autoCompaction }),
+    ...(resources.compactionReserveTokens === undefined ? {} : { compactionReserveTokens: resources.compactionReserveTokens }),
+    ...(resources.compactionKeepRecentTokens === undefined ? {} : { compactionKeepRecentTokens: resources.compactionKeepRecentTokens }),
     ...(resources.compactionRetainRecentTurns === undefined
       ? {}
       : { compactionRetainRecentTurns: resources.compactionRetainRecentTurns }),
     ...(resources.compactionToolResultBytes === undefined
       ? {}
       : { compactionToolResultBytes: resources.compactionToolResultBytes }),
+    ...(resources.branchSummaryReserveTokens === undefined ? {} : { branchSummaryReserveTokens: resources.branchSummaryReserveTokens }),
+    imageAutoResize: resources.imageAutoResize ?? true,
+    ...(resources.thinkingBudgets === undefined
+      ? {}
+      : { thinkingBudgets: Object.freeze({ ...resources.thinkingBudgets }) }),
     ...(resources.retry === undefined ? {} : { retry: Object.freeze({ ...resources.retry }) }),
     childRunPolicy: Object.freeze(normalizeChildRunPolicy(resources.childRuns)),
     ...(resourceCatalog === undefined ? {} : { resourceCatalog }),
@@ -455,6 +559,7 @@ function immutableResourceGeneration(resources: HarnessRuntimeResources): Harnes
 function initialResourceGeneration(options: HarnessOptions): HarnessResourceGeneration {
   return immutableResourceGeneration({
     providers: options.providers,
+    ...(options.providerAvailable === undefined ? {} : { providerAvailable: options.providerAvailable }),
     projectTrusted: options.projectTrusted ?? false,
     skills: [],
     extraTools: options.extraTools ?? [],
@@ -462,16 +567,46 @@ function initialResourceGeneration(options: HarnessOptions): HarnessResourceGene
     ...(options.outboundImages === undefined ? {} : { outboundImages: options.outboundImages }),
     ...(options.runtimeExtensions === undefined ? {} : { runtimeExtensions: options.runtimeExtensions }),
     ...(options.shellPath === undefined ? {} : { shellPath: options.shellPath }),
+    ...(options.shellCommandPrefix === undefined ? {} : { shellCommandPrefix: options.shellCommandPrefix }),
     ...(options.autoCompaction === undefined ? {} : { autoCompaction: options.autoCompaction }),
+    ...(options.compactionReserveTokens === undefined ? {} : { compactionReserveTokens: options.compactionReserveTokens }),
+    ...(options.compactionKeepRecentTokens === undefined ? {} : { compactionKeepRecentTokens: options.compactionKeepRecentTokens }),
     ...(options.compactionRetainRecentTurns === undefined
       ? {}
       : { compactionRetainRecentTurns: options.compactionRetainRecentTurns }),
     ...(options.compactionToolResultBytes === undefined
       ? {}
       : { compactionToolResultBytes: options.compactionToolResultBytes }),
+    ...(options.branchSummaryReserveTokens === undefined ? {} : { branchSummaryReserveTokens: options.branchSummaryReserveTokens }),
+    ...(options.imageAutoResize === undefined ? {} : { imageAutoResize: options.imageAutoResize }),
+    ...(options.thinkingBudgets === undefined ? {} : { thinkingBudgets: options.thinkingBudgets }),
     ...(options.retry === undefined ? {} : { retry: options.retry }),
     ...(options.childRuns === undefined ? {} : { childRuns: options.childRuns }),
     ...(options.resourceCatalog === undefined ? {} : { resourceCatalog: options.resourceCatalog }),
+  });
+}
+
+function withShellCommandPrefix(backend: ToolExecutionBackend, prefix: string | undefined): ToolExecutionBackend {
+  if (prefix === undefined || prefix === "") return backend;
+  const requestWithPrefix = (request: ToolBackendRequest): ToolBackendRequest => {
+    if (request.invocation.name !== "bash") return request;
+    const input = request.invocation.input;
+    if (input === null || typeof input !== "object" || Array.isArray(input) || typeof input.command !== "string") return request;
+    return {
+      ...request,
+      invocation: {
+        ...request.invocation,
+        input: { ...input, command: `${prefix}\n${input.command}` },
+      },
+    };
+  };
+  return Object.freeze({
+    id: backend.id,
+    handles: (toolName: string) => backend.handles(toolName),
+    resources: (request: ToolBackendRequest, context: Parameters<ToolExecutionBackend["resources"]>[1]) =>
+      backend.resources(requestWithPrefix(request), context),
+    execute: (request: ToolBackendRequest, context: Parameters<ToolExecutionBackend["execute"]>[1]) =>
+      backend.execute(requestWithPrefix(request), context),
   });
 }
 
@@ -553,6 +688,7 @@ export interface NavigateTreeOptions {
   model?: string;
   summaryTokenBudget?: number;
   summaryInstructions?: string;
+  replaceInstructions?: boolean;
   label?: string;
   signal?: AbortSignal;
 }
@@ -578,6 +714,102 @@ interface RuntimeLifecycleProjection {
   branch: string;
   step: number;
   tools: Map<string, ToolInvocation>;
+  stream?: {
+    provider: ProviderId;
+    model: string;
+    text: Map<number, string>;
+    reasoning: Map<number, { text: string; visibility: "summary" | "provider_trace" }>;
+    toolCalls: Map<number, {
+      id?: string;
+      name?: string;
+      rawArguments: string;
+      arguments?: JsonValue;
+      parseError?: string;
+      complete: boolean;
+    }>;
+  };
+}
+
+const MAX_RUNTIME_LIFECYCLE_MESSAGES = 256;
+const MAX_RUNTIME_LIFECYCLE_MESSAGE_BYTES = 512 * 1024;
+const MAX_RUNTIME_LIFECYCLE_MESSAGES_BYTES = 4 * 1024 * 1024;
+
+function runtimeAssistantStreamSnapshot(projection: RuntimeLifecycleProjection): RuntimeAssistantStreamSnapshot {
+  const stream = projection.stream;
+  if (stream === undefined) throw new Error("Assistant stream projection is unavailable");
+  return {
+    role: "assistant",
+    provider: stream.provider,
+    model: stream.model,
+    text: [...stream.text.entries()].sort(([left], [right]) => left - right).map(([part, text]) => ({ part, text })),
+    reasoning: [...stream.reasoning.entries()].sort(([left], [right]) => left - right).map(([part, value]) => ({
+      part,
+      text: value.text,
+      visibility: value.visibility,
+    })),
+    toolCalls: [...stream.toolCalls.entries()].sort(([left], [right]) => left - right).map(([index, value]) => ({
+      index,
+      ...(value.id === undefined ? {} : { id: value.id }),
+      ...(value.name === undefined ? {} : { name: value.name }),
+      rawArguments: value.rawArguments,
+      ...(value.arguments === undefined ? {} : { arguments: structuredClone(value.arguments) }),
+      ...(value.parseError === undefined ? {} : { parseError: value.parseError }),
+      complete: value.complete,
+    })),
+  };
+}
+
+function runtimeLifecycleMessage(message: CanonicalMessage): CanonicalMessage {
+  const projected: CanonicalMessage = {
+    ...message,
+    content: message.content.map((block) => {
+      if (block.type === "text") return { ...block, text: boundedLifecycleText(block.text, 256 * 1024) };
+      if (block.type === "image") {
+        if (block.data === undefined || Buffer.byteLength(block.data, "utf8") <= 128 * 1024) return { ...block };
+        return { type: "image" as const, mediaType: block.mediaType };
+      }
+      if (block.type === "tool_call") return {
+        ...block,
+        ...(block.rawArguments === undefined ? {} : { rawArguments: boundedLifecycleText(block.rawArguments, 256 * 1024) }),
+      };
+      if (block.type === "tool_result") return { ...block, content: boundedLifecycleText(block.content, 256 * 1024) };
+      const { serialized: _serialized, ...opaque } = block;
+      return opaque;
+    }),
+  };
+  if (Buffer.byteLength(JSON.stringify(projected), "utf8") <= MAX_RUNTIME_LIFECYCLE_MESSAGE_BYTES) return projected;
+  return {
+    ...projected,
+    content: projected.content.slice(0, 32).map((block) => block.type === "text"
+      ? { ...block, text: boundedLifecycleText(block.text, 32 * 1024) }
+      : block.type === "tool_result"
+        ? { ...block, content: boundedLifecycleText(block.content, 32 * 1024) }
+        : block),
+  };
+}
+
+function runtimeLifecycleMessages(
+  events: readonly EventEnvelope[],
+  runId: string,
+): { messages: CanonicalMessage[]; truncated: boolean } {
+  const all = events.flatMap((entry) => entry.runId === runId && entry.event.type === "message_appended"
+    ? [runtimeLifecycleMessage(entry.event.message)]
+    : []);
+  const selected: CanonicalMessage[] = [];
+  let bytes = 2;
+  let truncated = false;
+  for (let index = all.length - 1; index >= 0; index -= 1) {
+    const message = all[index]!;
+    const size = Buffer.byteLength(JSON.stringify(message), "utf8") + 1;
+    if (selected.length >= MAX_RUNTIME_LIFECYCLE_MESSAGES || bytes + size > MAX_RUNTIME_LIFECYCLE_MESSAGES_BYTES) {
+      truncated = true;
+      break;
+    }
+    selected.push(message);
+    bytes += size;
+  }
+  selected.reverse();
+  return { messages: selected, truncated };
 }
 
 function instructionMatches(message: CanonicalMessage, prompt: string): boolean {
@@ -712,6 +944,37 @@ function extensionMessageRecord(
   };
 }
 
+function extensionSystemPromptSnapshot(
+  threadId: string,
+  branch: string,
+  events: readonly EventEnvelope[],
+  model: RuntimeModelSelection | undefined,
+): RuntimeSystemPromptSnapshot | undefined {
+  const message = events.findLast((entry) =>
+    entry.event.type === "message_appended" && entry.event.message.purpose === "instructions");
+  if (message?.event.type !== "message_appended") return undefined;
+  const raw = message.event.message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+  const text = defaultSecretRedactor.redact(raw);
+  const compositionEvent = events.findLast((entry) =>
+    entry.event.type === "run_started" && entry.event.promptComposition !== undefined);
+  const composition = compositionEvent?.event.type === "run_started"
+    ? compositionEvent.event.promptComposition
+    : undefined;
+  return {
+    threadId,
+    branch,
+    text,
+    bytes: Buffer.byteLength(text, "utf8"),
+    sha256: sha256(text),
+    redacted: text !== raw || text.includes("[REDACTED]"),
+    ...(model === undefined ? {} : { model: structuredClone(model) }),
+    ...(composition === undefined ? {} : { composition: structuredClone(composition) }),
+  };
+}
+
 export class HarnessService {
   readonly #options: HarnessOptions;
   #resources: HarnessResourceGeneration;
@@ -728,11 +991,17 @@ export class HarnessService {
   }>();
   readonly #activeToolRuns = new Map<string, { coordinator: ToolCoordinator; tools: HarnessTool[] }>();
   readonly #runtimeModelSelections = new Map<string, RuntimeModelSelection>();
+  readonly #sessionAutoCompaction = new Map<string, boolean>();
   readonly #sessions = new Map<string, { branch?: string; cwd: string }>();
   readonly #pendingExtensionTurns = new Map<string, Map<number, RuntimeTurnEndEvent>>();
+  readonly #activeExtensionTurnSelections = new Map<string, { provider: ProviderId; model: string }>();
+  readonly #extensionStartedRuns = new Set<Promise<void>>();
   readonly #childRunDepth = new Map<string, number>();
   readonly #resourceGenerationReaders = new Map<HarnessResourceGeneration, HarnessResourceGenerationReaders>();
+  #sdkTools: readonly HarnessTool[] = [];
+  #sdkSkills: readonly SkillMetadata[] = [];
   #activeChildRuns = 0;
+  #autoRetryEnabled: boolean;
   #workspaceBoundary: WorkspaceBoundary | undefined;
   #closed = false;
   #reloading = false;
@@ -749,6 +1018,7 @@ export class HarnessService {
   constructor(options: HarnessOptions) {
     this.#options = options;
     this.#resources = initialResourceGeneration(options);
+    this.#autoRetryEnabled = this.#resources.retry?.enabled ?? true;
     this.#workspaceRoot = resolve(options.workspace);
     this.#sessionAccess = new WorkspaceSessionFacade(options.store, this.#workspaceRoot);
     const conversation = new StoredConversation(options.store);
@@ -793,9 +1063,17 @@ export class HarnessService {
           }, signal);
         },
         afterRun: async (event, signal) => {
+          const scope = this.#runtimeRunScope(event);
+          const history = runtimeLifecycleMessages(this.#sessionAccess.snapshot({
+            threadId: event.threadId,
+            branch: scope.branch,
+            include: { events: true },
+          }).events ?? [], event.runId);
           const extensionEvent = {
-            ...this.#runtimeRunScope(event),
+            ...scope,
             outcome: boundedAgentOutcome(event.outcome),
+            messages: history.messages,
+            messagesTruncated: history.truncated,
           };
           await this.#flushPendingExtensionTurns(event.runId, signal);
           await this.#observeRuntime("agent_end", extensionEvent, signal);
@@ -803,11 +1081,25 @@ export class HarnessService {
         },
         beforeModel: async (event, signal) => {
           const runScope = this.#runtimeRunScope(event);
+          this.#activeExtensionTurnSelections.set(`${event.runId}\0${event.step}`, {
+            provider: event.provider,
+            model: event.model,
+          });
           await this.#observeRuntime("turn_start", { ...event, ...runScope }, signal);
           await this.#observeRuntime("message_start", {
             ...runScope,
             step: event.step,
             role: "assistant",
+            provider: event.provider,
+            model: event.model,
+            message: {
+              role: "assistant",
+              provider: event.provider,
+              model: event.model,
+              text: [],
+              reasoning: [],
+              toolCalls: [],
+            },
           }, signal);
         },
         afterModel: async (event, signal) => {
@@ -817,13 +1109,15 @@ export class HarnessService {
                 ...event,
                 ...runScope,
                 outcome: { status: "failed", error: boundedLifecycleAdapterError(event.outcome.error) },
+                toolResults: [],
               }
-            : { ...event, ...runScope };
+            : { ...event, ...runScope, toolResults: [] };
           if (extensionEvent.outcome.status === "completed") {
             const turns = this.#pendingExtensionTurns.get(event.runId) ?? new Map<number, RuntimeTurnEndEvent>();
             turns.set(event.step, extensionEvent);
             this.#pendingExtensionTurns.set(event.runId, turns);
           } else {
+            this.#activeExtensionTurnSelections.delete(`${event.runId}\0${event.step}`);
             await this.#observeRuntime("turn_end", extensionEvent, signal);
           }
         },
@@ -994,6 +1288,9 @@ export class HarnessService {
     for (const key of this.#runtimeModelSelections.keys()) {
       if (key.startsWith(`${threadId}\0`)) this.#runtimeModelSelections.delete(key);
     }
+    for (const key of this.#sessionAutoCompaction.keys()) {
+      if (key.startsWith(`${threadId}\0`)) this.#sessionAutoCompaction.delete(key);
+    }
     if (session !== undefined && this.#options.managedExtensionLifecycle !== false) {
       await this.#observeRuntime("session_end", {
         reason: "delete",
@@ -1034,6 +1331,60 @@ export class HarnessService {
       model,
       ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     });
+  }
+
+  autoCompactionEnabled(threadId: string, branch?: string): boolean {
+    if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
+    const selectedBranch = this.#extensionBranch(threadId, branch);
+    return this.#sessionAutoCompaction.get(this.#activeToolKey(threadId, selectedBranch))
+      ?? this.#resources.autoCompaction
+      ?? true;
+  }
+
+  setSessionAutoCompaction(input: { threadId: string; branch?: string; enabled: boolean }): boolean {
+    if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
+    if (typeof input.enabled !== "boolean") throw new TypeError("Automatic compaction enabled must be a boolean");
+    const branch = this.#extensionBranch(input.threadId, input.branch);
+    this.#sessionAutoCompaction.set(this.#activeToolKey(input.threadId, branch), input.enabled);
+    return input.enabled;
+  }
+
+  async publishRuntimeModelSelectionChange(input: {
+    threadId: string;
+    branch?: string;
+    previous?: RuntimeModelSelection;
+    current: RuntimeModelSelection;
+    source: RuntimeModelSelectSource;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    if (this.#closed) throw new HarnessError("SERVICE_CLOSED", "Harness service is closed");
+    input.signal?.throwIfAborted();
+    const branch = this.#extensionBranch(input.threadId, input.branch);
+    const previous = input.previous;
+    const current = input.current;
+    const modelChanged = previous === undefined || previous.provider !== current.provider || previous.model !== current.model;
+    if (modelChanged) {
+      await this.#observeRuntime("model_select", {
+        threadId: input.threadId,
+        branch,
+        provider: current.provider,
+        model: current.model,
+        ...(previous === undefined ? {} : { previousModel: { ...previous } }),
+        source: input.source,
+      }, input.signal);
+    }
+    const previousLevel = previous?.reasoningEffort ?? "off";
+    const currentLevel = current.reasoningEffort ?? "off";
+    if (previousLevel !== currentLevel) {
+      await this.#observeRuntime("thinking_level_select", {
+        threadId: input.threadId,
+        branch,
+        level: currentLevel,
+        previousLevel,
+        source: input.source,
+      }, input.signal);
+    }
+    input.signal?.throwIfAborted();
   }
 
   async setSessionName(input: {
@@ -1392,6 +1743,7 @@ export class HarnessService {
         targetThreadId: threadId,
         ...(input.sourceEventId === undefined ? {} : { sourceEventId: input.sourceEventId }),
         targetBranch: branch,
+        position: "at",
       }, input.signal);
       if (result.cancel === true) {
         const reason = result.reason === undefined
@@ -1454,6 +1806,7 @@ export class HarnessService {
         targetThreadId,
         ...(sourceEventId === undefined ? {} : { sourceEventId }),
         targetBranch: sourceBranch,
+        position: input.beforeEventId === undefined ? "at" : "before",
       }, input.signal);
       if (directive.cancel === true) {
         throw new HarnessError(
@@ -1501,8 +1854,8 @@ export class HarnessService {
       options.summaryInstructions !== undefined &&
       (options.summaryInstructions.trim() === "" || options.summaryInstructions.includes("\0") || Buffer.byteLength(options.summaryInstructions, "utf8") > BRANCH_SUMMARY_LIMITS.maxInstructionsBytes)
     ) throw new Error(`Branch summary instructions must contain 1 to ${BRANCH_SUMMARY_LIMITS.maxInstructionsBytes} bytes without NUL`);
-    if (options.label !== undefined && options.summarize !== true) {
-      throw new Error("A branch summary label requires summarization");
+    if (options.replaceInstructions !== undefined && typeof options.replaceInstructions !== "boolean") {
+      throw new Error("Branch summary replaceInstructions must be a boolean");
     }
     const control = this.#manager.reserve(options.threadId);
     const signal = options.signal === undefined
@@ -1515,20 +1868,50 @@ export class HarnessService {
         branch: sourceBranch,
         include: { branchEvents: [sourceBranch, options.targetBranch] },
       }).branchEvents;
+      let branchSummaryModel: ModelInfo | undefined;
+      if (options.summarize === true) {
+        try {
+          branchSummaryModel = await this.#resources.providers.resolveModel(
+            options.provider!,
+            options.model!,
+            signal,
+          );
+        } catch {
+          signal.throwIfAborted();
+        }
+      }
+      const branchSummaryContextTokens = branchSummaryModel?.contextTokens === undefined
+        ? undefined
+        : Math.max(
+            1,
+            branchSummaryModel.contextTokens - (this.#resources.branchSummaryReserveTokens ?? 16_384),
+          );
       const preparation = prepareAbandonedBranch(
         branchEvents?.get(sourceBranch) ?? [],
         branchEvents?.get(options.targetBranch) ?? [],
         options.targetEventId,
+        branchSummaryContextTokens === undefined ? {} : { maxContextTokens: branchSummaryContextTokens },
       );
-      if (options.label !== undefined && preparation.messages.length === 0) {
-        throw new Error("A branch summary label requires abandoned conversational content");
-      }
       const priorEventId = thread.branches
         .find((entry) => entry.name === sourceBranch)?.headEventId;
       const extensions = this.#resources.runtimeExtensions;
       const treeDirective = extensions?.hasListeners("session_before_tree") === true
         ? await extensions.reduceSessionBeforeTree({
             threadId: options.threadId,
+            preparation: {
+              targetId: options.targetEventId,
+              oldLeafId: priorEventId ?? null,
+              commonAncestorId: preparation.commonAncestorEventId ?? null,
+              entriesToSummarize: preparation.entriesToSummarize.map((entry) => ({
+                ...entry,
+                event: defaultSecretRedactor.redactValue(entry.event) as RuntimeEvent,
+              })),
+              userWantsSummary: options.summarize === true,
+              ...(options.summaryInstructions === undefined ? {} : { customInstructions: options.summaryInstructions }),
+              ...(options.replaceInstructions === undefined ? {} : { replaceInstructions: options.replaceInstructions }),
+              ...(options.label === undefined ? {} : { label: options.label }),
+            },
+            signal,
             targetEventId: options.targetEventId,
             summarize: options.summarize === true,
             sourceEventIds: preparation.messages.map((entry) => entry.eventId),
@@ -1536,29 +1919,29 @@ export class HarnessService {
         : undefined;
       signal.throwIfAborted();
       if (treeDirective?.cancel === true) return { cancelled: true };
+      const selectedInstructions = treeDirective?.customInstructions === undefined
+        ? options.summaryInstructions
+        : treeDirective.customInstructions.trim() === ""
+          ? undefined
+          : treeDirective.customInstructions;
+      const replaceInstructions = treeDirective?.replaceInstructions ?? options.replaceInstructions;
+      const label = treeDirective?.label === undefined
+        ? options.label
+        : defaultSecretRedactor.redact(treeDirective.label);
       let generated: Awaited<ReturnType<typeof generateBranchSummary>> | undefined;
       if (options.summarize === true && preparation.messages.length > 0) {
         if (treeDirective?.summary === undefined) {
-          let modelMaxOutputTokens: number | undefined;
-          try {
-            modelMaxOutputTokens = (await this.#resources.providers.resolveModel(
-              options.provider!,
-              options.model!,
-              signal,
-            ))?.maxOutputTokens;
-          } catch {
-            signal.throwIfAborted();
-          }
           const summaryMaxOutputTokens = cappedExplicitMaxOutputTokens(
             options.summaryTokenBudget ?? BRANCH_SUMMARY_LIMITS.defaultOutputTokens,
-            modelMaxOutputTokens,
+            branchSummaryModel?.maxOutputTokens,
           );
           generated = await generateBranchSummary(preparation, {
-            provider: this.#resources.providers.get(options.provider!),
+            provider: this.#resources.providers.configuredAdapter(options.provider!),
             model: options.model!,
             signal,
             ...(summaryMaxOutputTokens === undefined ? {} : { maxOutputTokens: summaryMaxOutputTokens }),
-            ...(options.summaryInstructions === undefined ? {} : { instructions: options.summaryInstructions }),
+            ...(selectedInstructions === undefined ? {} : { instructions: selectedInstructions }),
+            ...(replaceInstructions === undefined ? {} : { replaceInstructions }),
           });
         } else {
           generated = this.#extensionBranchSummary(
@@ -1587,13 +1970,13 @@ export class HarnessService {
             ...(treeMetadata === undefined
               ? {}
               : { extensionMetadata: defaultSecretRedactor.redactValue(treeMetadata) as typeof treeMetadata }),
-            ...(options.label === undefined ? {} : { label: options.label }),
+            ...(label === undefined ? {} : { label }),
           },
         });
         await this.#observeRuntime("session_tree", {
           threadId: options.threadId,
           ...(priorEventId === undefined ? {} : { previousEventId: priorEventId }),
-          currentEventId: committed.summaryEvent.eventId,
+          currentEventId: committed.branch.headEventId ?? committed.summaryEvent.eventId,
           summary: committed.summaryEvent.event.summary,
           ...(committed.summaryEvent.event.extensionMetadata === undefined
             ? {}
@@ -1610,6 +1993,7 @@ export class HarnessService {
           fromBranch: options.targetBranch,
           newBranch: options.newBranch,
           atEventId: options.targetEventId,
+          ...(label === undefined ? {} : { label }),
         },
       });
       await this.#observeRuntime("session_tree", {
@@ -1720,6 +2104,94 @@ export class HarnessService {
     }
   }
 
+  async #acceptRuntimeUserMessage(input: {
+    threadId: string;
+    branch?: string;
+    text: string;
+    images?: ImageBlock[];
+    delivery: RuntimeInputDelivery;
+    signal?: AbortSignal;
+  }): Promise<RuntimeUserMessageResult> {
+    input.signal?.throwIfAborted();
+    const branch = this.#queueBranch(input.threadId, input.branch);
+    let text = input.text;
+    let images = input.images?.map((image) => ({ ...image }));
+    const extensions = this.#resources.runtimeExtensions;
+    if (extensions?.hasListeners("input") === true) {
+      const reduced = await extensions.reduceInput({
+        threadId: input.threadId,
+        branch,
+        text,
+        ...(images === undefined ? {} : { images }),
+        source: "extension",
+        delivery: input.delivery,
+      }, input.signal);
+      input.signal?.throwIfAborted();
+      if (reduced.action === "handled") {
+        return {
+          threadId: input.threadId,
+          branch,
+          delivery: input.delivery,
+          queued: false,
+          handled: true,
+        };
+      }
+      if (reduced.action === "transform") {
+        text = reduced.text;
+        images = reduced.images?.map((image) => ({ ...image }));
+      }
+    }
+    if (text === "" && (images === undefined || images.length === 0)) {
+      throw new Error("Runtime user message has no text or images after input processing");
+    }
+    if (this.#manager.active(input.threadId)) {
+      if (input.delivery === "follow_up") this.followUp(input.threadId, text, images);
+      else this.steer(input.threadId, text, images);
+      return {
+        threadId: input.threadId,
+        branch,
+        delivery: input.delivery,
+        queued: true,
+      };
+    }
+    const selected = this.#runtimeModelSelection(input.threadId, branch);
+    if (selected === undefined) throw new Error("Session has no selected model for an extension-started turn");
+    const run = this.run({
+      threadId: input.threadId,
+      branch,
+      prompt: text,
+      ...(images === undefined ? {} : { images }),
+      provider: selected.provider,
+      model: selected.model,
+      ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
+    });
+    const tracked = run.then(
+      () => undefined,
+      async (cause) => {
+        if (this.#closed) return;
+        try {
+          const envelope = this.#sessionAccess.appendEvent(input.threadId, branch, {
+            type: "warning",
+            code: "extension_started_run_failed",
+            message: defaultSecretRedactor.redact(cause instanceof Error ? cause.message : String(cause)).slice(0, 4_096),
+          });
+          await this.#observeRuntime("event", envelope);
+        } catch {
+          // The initiating API already returned; background failure reporting is best effort.
+        }
+      },
+    );
+    this.#extensionStartedRuns.add(tracked);
+    void tracked.finally(() => this.#extensionStartedRuns.delete(tracked));
+    return {
+      threadId: input.threadId,
+      branch,
+      delivery: input.delivery,
+      queued: true,
+      started: true,
+    };
+  }
+
   steer(threadId: string, message: string, images?: ImageBlock[]): void {
     this.#enqueueRunInput(threadId, "steer", message, images);
   }
@@ -1811,6 +2283,72 @@ export class HarnessService {
     this.#manager.cancel(threadId, reason);
   }
 
+  cancelRetry(threadId: string): boolean {
+    return this.#manager.cancelRetry(threadId);
+  }
+
+  get autoRetryEnabled(): boolean {
+    return this.#autoRetryEnabled;
+  }
+
+  setAutoRetryEnabled(enabled: boolean): void {
+    if (typeof enabled !== "boolean") throw new TypeError("Automatic retry enabled must be a boolean");
+    this.#autoRetryEnabled = enabled;
+    this.#manager.setAutoRetryEnabled(enabled);
+  }
+
+  /**
+   * Transactionally replaces only resources previously contributed through
+   * this SDK boundary. Runtime, extension, and host-owned resources are kept.
+   */
+  async setSdkComposition(
+    composition: HarnessSdkComposition,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const previousTools = new Set(this.#sdkTools);
+    const previousSkills = new Set(this.#sdkSkills);
+    const tools = Object.freeze([...(composition.tools ?? [])]);
+    const skills = Object.freeze([...(composition.skills ?? [])]);
+    const current = this.#resources;
+    await this.replaceRuntimeResources({
+      providers: current.providers,
+      projectTrusted: current.projectTrusted,
+      skills: [
+        ...current.skills.filter((skill) => !previousSkills.has(skill)),
+        ...skills,
+      ],
+      extraTools: [
+        ...current.extraTools.filter((tool) => !previousTools.has(tool)),
+        ...tools,
+      ],
+      ...(current.toolBackend === undefined ? {} : { toolBackend: current.toolBackend }),
+      outboundImages: current.outboundImages,
+      ...(current.runtimeExtensions === undefined ? {} : { runtimeExtensions: current.runtimeExtensions }),
+      ...(current.shellPath === undefined ? {} : { shellPath: current.shellPath }),
+      ...(current.shellCommandPrefix === undefined ? {} : { shellCommandPrefix: current.shellCommandPrefix }),
+      ...(current.autoCompaction === undefined ? {} : { autoCompaction: current.autoCompaction }),
+      ...(current.compactionReserveTokens === undefined ? {} : { compactionReserveTokens: current.compactionReserveTokens }),
+      ...(current.compactionKeepRecentTokens === undefined ? {} : { compactionKeepRecentTokens: current.compactionKeepRecentTokens }),
+      ...(current.compactionRetainRecentTurns === undefined
+        ? {}
+        : { compactionRetainRecentTurns: current.compactionRetainRecentTurns }),
+      ...(current.compactionToolResultBytes === undefined
+        ? {}
+        : { compactionToolResultBytes: current.compactionToolResultBytes }),
+      ...(current.branchSummaryReserveTokens === undefined ? {} : { branchSummaryReserveTokens: current.branchSummaryReserveTokens }),
+      imageAutoResize: current.imageAutoResize,
+      ...(current.thinkingBudgets === undefined ? {} : { thinkingBudgets: current.thinkingBudgets }),
+      retry: {
+        ...(current.retry ?? DEFAULT_RETRY_POLICY),
+        enabled: this.#autoRetryEnabled,
+      },
+      childRuns: current.childRunPolicy,
+      ...(current.resourceCatalog === undefined ? {} : { resourceCatalog: current.resourceCatalog }),
+    }, signal === undefined ? {} : { signal });
+    this.#sdkTools = tools;
+    this.#sdkSkills = skills;
+  }
+
   async replaceRuntimeResources(
     resources: HarnessRuntimeResources,
     options: { signal?: AbortSignal; commit?: () => void | Promise<void> } = {},
@@ -1823,6 +2361,7 @@ export class HarnessService {
     if (this.#hasPendingRunHandoff()) throw new HarnessError("SERVICE_BUSY", "Cannot reload resources while a run is starting");
     const candidate = immutableResourceGeneration(resources);
     const previous = this.#resources;
+    const previousAutoRetryEnabled = this.#autoRetryEnabled;
     const sessions = [...this.#sessions.entries()];
     this.#reloading = true;
     let applied = false;
@@ -1844,6 +2383,7 @@ export class HarnessService {
       }
       sessionsEnded = true;
       this.#resources = candidate;
+      this.#autoRetryEnabled = candidate.retry?.enabled ?? true;
       this.#bindExtensionSessionHost(candidate.runtimeExtensions);
       await this.#drainResourceGeneration(
         previous,
@@ -1868,6 +2408,7 @@ export class HarnessService {
       if (applied) throw error;
       if (this.#resources !== previous) {
         this.#resources = previous;
+        this.#autoRetryEnabled = previousAutoRetryEnabled;
         this.#bindExtensionSessionHost(previous.runtimeExtensions);
       }
       if (sessionsEnded && this.#options.managedExtensionLifecycle !== false) {
@@ -1988,11 +2529,17 @@ export class HarnessService {
     if (options.contextTokenBudget === undefined) {
       automaticContextBudget = resolveEffectiveContextBudget(
         resolvedModel,
-        options.maxOutputTokens === undefined ? {} : { requestedMaxOutputTokens: options.maxOutputTokens },
+        {
+          ...(options.maxOutputTokens === undefined ? {} : { requestedMaxOutputTokens: options.maxOutputTokens }),
+          ...(this.#resources.compactionReserveTokens === undefined ? {} : { reserveTokens: this.#resources.compactionReserveTokens }),
+        },
       );
     }
     const contextCwd = this.#contextCwd(threadId, options.cwd);
-    const toolBackend = options.toolBackend === undefined ? this.#resources.toolBackend : options.toolBackend ?? undefined;
+    const configuredToolBackend = options.toolBackend === undefined ? this.#resources.toolBackend : options.toolBackend ?? undefined;
+    const toolBackend = configuredToolBackend === undefined
+      ? undefined
+      : withShellCommandPrefix(configuredToolBackend, this.#resources.shellCommandPrefix);
     const processRunner = new DirectProcessRunner();
     const tools = this.#buildTools(threadId, { ...options, outboundImages, cwd: contextCwd }, depth);
     const allowed = options.allowedTools === undefined
@@ -2002,14 +2549,16 @@ export class HarnessService {
     const initiallyActive = allowed.filter((tool) => !excluded.has(tool.definition.name));
     const activeToolBranch = this.#extensionBranch(threadId, options.branch);
     const activeToolKey = this.#activeToolKey(threadId, activeToolBranch);
+    const previousRuntimeSelection = this.#runtimeModelSelection(threadId, activeToolBranch);
+    const currentRuntimeSelection: RuntimeModelSelection = {
+      provider: options.provider,
+      model: options.model,
+      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+    };
     this.setRuntimeModelSelection({
       threadId,
       branch: activeToolBranch,
-      selection: {
-        provider: options.provider,
-        model: options.model,
-        ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
-      },
+      selection: currentRuntimeSelection,
     });
     const desiredTools = this.#activeToolSelections.get(activeToolKey);
     const availableToolNames = new Set(initiallyActive.map((tool) => tool.definition.name));
@@ -2037,7 +2586,12 @@ export class HarnessService {
         : await discoverWorkspacePromptFiles(
             this.#options.workspace,
             this.#resources.projectTrusted,
-            { includeSystemPrompt: options.systemPrompt === undefined },
+            {
+              includeSystemPrompt: options.systemPrompt === undefined,
+              ...(this.#options.userPromptDirectory === undefined
+                ? {}
+                : { globalDirectory: this.#options.userPromptDirectory }),
+            },
           );
       const customPrompt = options.systemPrompt ?? automaticPromptFiles.systemPrompt;
       const appendedPrompts = [
@@ -2114,18 +2668,13 @@ export class HarnessService {
       { activeTools: initiallyActive.map((tool) => tool.definition.name).sort((left, right) => left.localeCompare(right)) },
     );
     const extensionReducers = this.#agentExtensionReducers();
-    await this.#observeRuntime("model_select", {
+    await this.publishRuntimeModelSelectionChange({
       threadId,
-      ...(options.branch === undefined ? {} : { branch: options.branch }),
-      provider: options.provider,
-      model: options.model,
+      branch: activeToolBranch,
+      ...(previousRuntimeSelection === undefined ? {} : { previous: previousRuntimeSelection }),
+      current: currentRuntimeSelection,
       source: "run",
-    });
-    await this.#observeRuntime("thinking_level_select", {
-      threadId,
-      ...(options.branch === undefined ? {} : { branch: options.branch }),
-      level: options.reasoningEffort ?? "off",
-      source: "run",
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     let promptQueueMessage: QueuedRunMessage | undefined;
     if (options.queueLease !== undefined) {
@@ -2185,7 +2734,10 @@ export class HarnessService {
                 const selectedContextBudget = options.contextTokenBudget === undefined
                   ? resolveEffectiveContextBudget(
                       selected.info,
-                      options.maxOutputTokens === undefined ? {} : { requestedMaxOutputTokens: options.maxOutputTokens },
+                      {
+                        ...(options.maxOutputTokens === undefined ? {} : { requestedMaxOutputTokens: options.maxOutputTokens }),
+                        ...(this.#resources.compactionReserveTokens === undefined ? {} : { reserveTokens: this.#resources.compactionReserveTokens }),
+                      },
                     )
                   : undefined;
                 const selectedMaxOutputTokens = cappedExplicitMaxOutputTokens(
@@ -2235,14 +2787,23 @@ export class HarnessService {
               }),
         ...(options.summaryTokenBudget === undefined ? {} : { summaryTokenBudget: options.summaryTokenBudget }),
         ...(autoCompaction === undefined ? {} : { autoCompaction }),
+        autoCompactionEnabled: () => this.#sessionAutoCompaction.get(this.#activeToolKey(threadId, activeToolBranch))
+          ?? autoCompaction
+          ?? true,
+        ...(this.#resources.compactionReserveTokens === undefined ? {} : { compactionReserveTokens: this.#resources.compactionReserveTokens }),
+        ...(this.#resources.compactionKeepRecentTokens === undefined ? {} : { compactionKeepRecentTokens: this.#resources.compactionKeepRecentTokens }),
         ...(this.#resources.compactionRetainRecentTurns === undefined ? {} : { compactionRetainRecentTurns: this.#resources.compactionRetainRecentTurns }),
         ...(this.#resources.compactionToolResultBytes === undefined ? {} : { compactionToolResultBytes: this.#resources.compactionToolResultBytes }),
         ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
+        ...(this.#resources.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...this.#resources.thinkingBudgets } }),
         ...(options.manualCompaction === true ? { manualCompaction: true } : {}),
         ...(options.compactionInstructions === undefined ? {} : { compactionInstructions: options.compactionInstructions }),
         ...(options.steeringMode === undefined ? {} : { steeringMode: options.steeringMode }),
         ...(options.followUpMode === undefined ? {} : { followUpMode: options.followUpMode }),
-        ...(this.#resources.retry === undefined ? {} : { retry: { ...this.#resources.retry } }),
+        retry: {
+          ...(this.#resources.retry ?? DEFAULT_RETRY_POLICY),
+          enabled: this.#autoRetryEnabled,
+        },
       } satisfies AgentRunRequest;
       const running = reserved
         ? this.#manager.startReserved(request, options.manualCompaction === true ? undefined : loadRunContext)
@@ -2292,6 +2853,24 @@ export class HarnessService {
               ...this.#runtimeRunScope(scope),
               message,
             }, signal),
+            finalizedAssistantEnd: async (response, signal, scope) => {
+              const reduced = await extensions.reduceFinalizedMessageEnd({
+                ...this.#runtimeRunScope(scope),
+                message: response.message,
+                finalized: {
+                  finishReason: response.finishReason,
+                  ...(response.usage === undefined ? {} : { usage: response.usage }),
+                  ...(response.rawReason === undefined ? {} : { rawReason: response.rawReason }),
+                  ...(response.explanation === undefined ? {} : { explanation: response.explanation }),
+                },
+              }, signal);
+              if (reduced.finalized === undefined) throw new Error("Runtime finalized assistant response was lost");
+              return {
+                message: reduced.message,
+                ...reduced.finalized,
+                ...(reduced.transformations === undefined ? {} : { transformations: reduced.transformations }),
+              };
+            },
           }
         : {}),
       ...(beforeProviderRequest
@@ -2369,13 +2948,16 @@ export class HarnessService {
     resources: HarnessResourceGeneration = this.#resources,
   ): HarnessTool[] {
     const builtins: HarnessTool[] = [
-      new ReadTool(),
+      new ReadTool({ autoResizeImages: resources.imageAutoResize }),
       new GrepTool(),
       new FindTool(),
       new LsTool(),
       new WriteTool(),
       new EditTool(),
-      new ShellTool("bash", resources.shellPath === undefined ? {} : { shellPath: resources.shellPath }),
+      new ShellTool("bash", {
+        ...(resources.shellPath === undefined ? {} : { shellPath: resources.shellPath }),
+        ...(resources.shellCommandPrefix === undefined ? {} : { commandPrefix: resources.shellCommandPrefix }),
+      }),
     ];
     const tools = new Map<string, HarnessTool>();
     if (options.noBuiltinTools !== true) {
@@ -2431,6 +3013,22 @@ export class HarnessService {
         ...(branch === undefined ? {} : { branch }),
         workspace: this.#workspaceRoot,
       });
+      if (resumed) {
+        const selectedBranch = branch ?? this.#sessionAccess.thread(threadId).defaultBranch;
+        const key = this.#activeToolKey(threadId, selectedBranch);
+        const previous = this.#runtimeModelSelections.get(key);
+        const restored = this.#sessionAccess.modelSelection(threadId, selectedBranch);
+        if (restored !== undefined && previous === undefined) {
+          this.setRuntimeModelSelection({ threadId, branch: selectedBranch, selection: restored });
+          await this.publishRuntimeModelSelectionChange({
+            threadId,
+            branch: selectedBranch,
+            current: restored,
+            source: "restore",
+            ...(signal === undefined ? {} : { signal }),
+          });
+        }
+      }
     }
   }
 
@@ -2444,9 +3042,12 @@ export class HarnessService {
     const event = envelope.event;
     if (event.type === "assistant_started") {
       projection.step = event.step;
+      delete projection.stream;
       return;
     }
     if (event.type === "text_delta" && projection.step > 0) {
+      const stream = this.#runtimeStreamProjection(projection, runId);
+      stream.text.set(event.part, `${stream.text.get(event.part) ?? ""}${event.text}`);
       await this.#observeRuntime("message_update", {
         threadId: envelope.threadId,
         runId,
@@ -2455,10 +3056,17 @@ export class HarnessService {
         kind: "text",
         part: event.part,
         delta: event.text,
+        message: runtimeAssistantStreamSnapshot(projection),
       }, signal);
       return;
     }
     if (event.type === "reasoning_delta" && projection.step > 0) {
+      const stream = this.#runtimeStreamProjection(projection, runId);
+      const previous = stream.reasoning.get(event.part);
+      stream.reasoning.set(event.part, {
+        text: `${previous?.text ?? ""}${event.visibility === "provider_trace" ? "" : event.text}`,
+        visibility: event.visibility,
+      });
       await this.#observeRuntime("message_update", {
         threadId: envelope.threadId,
         runId,
@@ -2468,15 +3076,119 @@ export class HarnessService {
         part: event.part,
         delta: event.visibility === "provider_trace" ? "" : event.text,
         visibility: event.visibility,
+        message: runtimeAssistantStreamSnapshot(projection),
       }, signal);
+      return;
+    }
+    if (event.type === "tool_call_started" && projection.step > 0) {
+      const stream = this.#runtimeStreamProjection(projection, runId);
+      const previous = stream.toolCalls.get(event.index);
+      stream.toolCalls.set(event.index, {
+        ...(previous ?? { rawArguments: "", complete: false }),
+        ...(event.id === undefined ? {} : { id: event.id }),
+        ...(event.name === undefined ? {} : { name: event.name }),
+      });
+      await this.#observeRuntime("message_update", {
+        threadId: envelope.threadId,
+        runId,
+        branch: projection.branch,
+        step: projection.step,
+        kind: "tool_call_start",
+        index: event.index,
+        ...(event.id === undefined ? {} : { id: event.id }),
+        ...(event.name === undefined ? {} : { name: event.name }),
+        message: runtimeAssistantStreamSnapshot(projection),
+      }, signal);
+      return;
+    }
+    if (event.type === "tool_call_delta" && projection.step > 0) {
+      const stream = this.#runtimeStreamProjection(projection, runId);
+      const previous = stream.toolCalls.get(event.index) ?? { rawArguments: "", complete: false };
+      stream.toolCalls.set(event.index, {
+        ...previous,
+        rawArguments: `${previous.rawArguments}${event.jsonFragment}`,
+      });
+      await this.#observeRuntime("message_update", {
+        threadId: envelope.threadId,
+        runId,
+        branch: projection.branch,
+        step: projection.step,
+        kind: "tool_call_delta",
+        index: event.index,
+        jsonFragment: event.jsonFragment,
+        message: runtimeAssistantStreamSnapshot(projection),
+      }, signal);
+      return;
+    }
+    if (event.type === "assistant_response_transformed" && projection.step > 0) {
+      const turn = this.#pendingExtensionTurns.get(runId)?.get(projection.step);
+      if (turn !== undefined && turn.outcome.status === "completed") {
+        turn.outcome = {
+          status: "completed",
+          finishReason: event.final.finishReason,
+          ...(event.final.usage === undefined ? {} : { usage: event.final.usage }),
+        };
+      }
+      return;
+    }
+    if (event.type === "message_appended" && projection.step > 0) {
+      if (event.message.role === "assistant") {
+        const message = runtimeLifecycleMessage(event.message);
+        const turns = this.#pendingExtensionTurns.get(runId);
+        const turn = turns?.get(projection.step);
+        if (turn !== undefined) turn.message = message;
+        const stream = this.#runtimeStreamProjection(projection, runId);
+        for (const [index, block] of message.content.filter((value) => value.type === "tool_call").entries()) {
+          const rawArguments = block.rawArguments ?? JSON.stringify(block.arguments);
+          const parseError = block.rawArguments !== undefined && block.arguments === null
+            ? "Tool arguments were not valid JSON"
+            : undefined;
+          stream.toolCalls.set(index, {
+            id: block.callId,
+            name: block.name,
+            rawArguments,
+            arguments: structuredClone(block.arguments),
+            ...(parseError === undefined ? {} : { parseError }),
+            complete: true,
+          });
+          await this.#observeRuntime("message_update", {
+            threadId: envelope.threadId,
+            runId,
+            branch: projection.branch,
+            step: projection.step,
+            kind: "tool_call_end",
+            index,
+            id: block.callId,
+            name: block.name,
+            rawArguments,
+            arguments: structuredClone(block.arguments),
+            ...(parseError === undefined ? {} : { parseError }),
+            message: runtimeAssistantStreamSnapshot(projection),
+          }, signal);
+        }
+      } else if (event.message.role === "tool") {
+        const turns = this.#pendingExtensionTurns.get(runId);
+        const turn = turns?.get(projection.step);
+        if (turn !== undefined) {
+          turn.toolResults = runtimeLifecycleMessage(event.message).content.filter(
+            (block): block is ToolResultBlock => block.type === "tool_result",
+          );
+          turns!.delete(projection.step);
+          if (turns!.size === 0) this.#pendingExtensionTurns.delete(runId);
+          this.#activeExtensionTurnSelections.delete(`${runId}\0${projection.step}`);
+          await this.#observeRuntime("turn_end", turn, signal);
+        }
+      }
       return;
     }
     if (event.type === "assistant_completed") {
       const turns = this.#pendingExtensionTurns.get(runId);
       const turn = turns?.get(projection.step);
       if (turn !== undefined) {
+        if (turn.message?.content.some((block) => block.type === "tool_call") === true) return;
         turns!.delete(projection.step);
         if (turns!.size === 0) this.#pendingExtensionTurns.delete(runId);
+        this.#activeExtensionTurnSelections.delete(`${runId}\0${projection.step}`);
         await this.#observeRuntime("turn_end", turn, signal);
       }
       return;
@@ -2584,11 +3296,29 @@ export class HarnessService {
     }
   }
 
+  #runtimeStreamProjection(
+    projection: RuntimeLifecycleProjection,
+    runId: string,
+  ): NonNullable<RuntimeLifecycleProjection["stream"]> {
+    if (projection.stream !== undefined) return projection.stream;
+    const selection = this.#activeExtensionTurnSelections.get(`${runId}\0${projection.step}`);
+    if (selection === undefined) throw new Error("Assistant stream selection is unavailable");
+    projection.stream = {
+      provider: selection.provider,
+      model: selection.model,
+      text: new Map(),
+      reasoning: new Map(),
+      toolCalls: new Map(),
+    };
+    return projection.stream;
+  }
+
   async #flushPendingExtensionTurns(runId: string, signal?: AbortSignal): Promise<void> {
     const turns = this.#pendingExtensionTurns.get(runId);
     if (turns === undefined) return;
     this.#pendingExtensionTurns.delete(runId);
     for (const [, turn] of [...turns].sort(([left], [right]) => left - right)) {
+      this.#activeExtensionTurnSelections.delete(`${runId}\0${turn.step}`);
       await this.#observeRuntime("turn_end", turn, signal);
     }
   }
@@ -2855,10 +3585,18 @@ export class HarnessService {
           toolBackend: childBackend ?? null,
           ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
           ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-          additionalInstructions: {
-            source: RUNTIME_CHILD_INSTRUCTION_SOURCE,
-            text: "This is a bounded in-process child session. Complete only the delegated task. Do not start or delegate another child run.",
-          },
+          ...(input.systemPrompt === undefined
+            ? {}
+            : { systemPrompt: { source: RUNTIME_CHILD_INSTRUCTION_SOURCE, text: input.systemPrompt } }),
+          appendSystemPrompt: [
+            ...(input.appendSystemPrompt === undefined
+              ? []
+              : [{ source: RUNTIME_CHILD_INSTRUCTION_SOURCE, text: input.appendSystemPrompt }]),
+            {
+              source: RUNTIME_CHILD_INSTRUCTION_SOURCE,
+              text: "This is a bounded in-process child session. Complete only the delegated task. Do not start or delegate another child run.",
+            },
+          ],
           ...(input.onEvent === undefined ? {} : {
             onEvent: (envelope: EventEnvelope) => {
               const event = runtimeChildEvent(envelope, childBranch);
@@ -3058,24 +3796,125 @@ export class HarnessService {
       appendMessage: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
-        const event = defaultSecretRedactor.redactValue(input.event) as ExtensionMessageEvent;
+        const requested = defaultSecretRedactor.redactValue(input.event) as ExtensionMessageEvent;
+        const active = this.#manager.active(input.threadId);
+        const deferred = input.delivery === "next_turn";
+        const userContext = requested.modelContext !== false && requested.modelContext.role === "user"
+          ? requested.modelContext
+          : undefined;
+        if (input.triggerTurn === true && userContext === undefined) {
+          throw new Error("Triggered extension messages require user model context");
+        }
+        const deliver = userContext !== undefined && !deferred && (active || input.triggerTurn === true);
+        if (deliver && !active && this.#runtimeModelSelection(input.threadId, branch) === undefined) {
+          throw new Error("Session has no selected model for an extension-started turn");
+        }
+        const event: ExtensionMessageEvent = deliver
+          ? { ...requested, modelContext: false }
+          : requested;
         const envelope = this.#sessionAccess.appendEvent(input.threadId, branch, event);
         await this.#publishExtensionSessionEvent({
           branch,
           envelope: envelope as EventEnvelope<ExtensionMessageEvent>,
         });
+        if (deliver && userContext !== undefined) {
+          await this.#acceptRuntimeUserMessage({
+            threadId: input.threadId,
+            branch,
+            text: userContext.text,
+            ...(userContext.images === undefined ? {} : { images: userContext.images }),
+            delivery: input.delivery === "follow_up" ? "follow_up" : "steer",
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+          });
+        }
         return extensionMessageRecord(envelope as EventEnvelope<ExtensionMessageEvent>, branch);
       },
       readMessages: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
-        return this.#sessionAccess.extensionMessages(
+        const messages = this.#sessionAccess.extensionMessages(
           input.threadId,
           branch,
           input.extensionId,
           input.schemaVersion,
           input.kind,
-        ).slice(-input.limit).map((entry) => extensionMessageRecord(entry, branch));
+        );
+        const end = input.beforeEventId === undefined
+          ? messages.length
+          : messages.findIndex((entry) => entry.eventId === input.beforeEventId);
+        if (end < 0) throw new Error("Extension message cursor is not reachable in the selected namespace and branch");
+        return messages.slice(0, end).slice(-input.limit).map((entry) => extensionMessageRecord(entry, branch));
+      },
+      getUsage: async (input) => {
+        input.signal?.throwIfAborted();
+        const branch = this.#extensionBranch(input.threadId, input.branch);
+        const events = this.#sessionAccess.snapshot({
+          threadId: input.threadId,
+          branch,
+          include: { events: true },
+        }).events ?? [];
+        input.signal?.throwIfAborted();
+        return historicalSessionUsage(input.threadId, branch, events);
+      },
+      getSystemPrompt: async (input) => {
+        input.signal?.throwIfAborted();
+        const branch = this.#extensionBranch(input.threadId, input.branch);
+        const events = this.#sessionAccess.snapshot({
+          threadId: input.threadId,
+          branch,
+          include: { events: true },
+        }).events ?? [];
+        input.signal?.throwIfAborted();
+        return extensionSystemPromptSnapshot(
+          input.threadId,
+          branch,
+          events,
+          this.#runtimeModelSelection(input.threadId, branch),
+        );
+      },
+      readNativeSession: async (input) => {
+        input.signal?.throwIfAborted();
+        const branch = this.#extensionBranch(input.threadId, input.branch);
+        const snapshot = this.#sessionAccess.snapshot({
+          threadId: input.threadId,
+          branch,
+          include: { runs: true, modelSelection: true },
+        });
+        const page = this.#options.store.listEventPage(input.threadId, branch, {
+          ...(input.afterSequence === undefined ? {} : { afterSequence: input.afterSequence }),
+          ...(input.throughSequence === undefined ? {} : { throughSequence: input.throughSequence }),
+          limit: input.limit,
+        });
+        const selection = input.provider === undefined && input.model === undefined
+          ? this.#runtimeModelSelection(input.threadId, branch)
+          : input.provider !== undefined && input.model !== undefined
+            ? { provider: input.provider, model: input.model }
+            : undefined;
+        if (input.includeContext === true && selection === undefined) {
+          throw new Error("Native session context requires both provider and model, or a saved model selection");
+        }
+        const signal = input.signal ?? new AbortController().signal;
+        const context = input.includeContext !== true || selection === undefined
+          ? undefined
+          : (await new StoredConversation(this.#options.store).loadContext(
+              input.threadId,
+              branch,
+              selection.provider,
+              signal,
+              selection.model,
+            )).messages;
+        input.signal?.throwIfAborted();
+        return {
+          thread: snapshot.thread,
+          branch,
+          events: page.events,
+          runs: snapshot.runs ?? [],
+          nextSequence: page.nextSequence,
+          snapshotSequence: page.snapshotSequence,
+          hasMore: page.hasMore,
+          ...(selection === undefined ? {} : { model: selection }),
+          ...(context === undefined ? {} : { context }),
+        };
       },
       getActiveTools: async (input) => {
         input.signal?.throwIfAborted();
@@ -3177,15 +4016,14 @@ export class HarnessService {
       },
       sendUserMessage: async (input) => {
         input.signal?.throwIfAborted();
-        const branch = this.#queueBranch(input.threadId, input.branch);
-        if (input.delivery === "follow_up") this.followUp(input.threadId, input.text, input.images);
-        else this.steer(input.threadId, input.text, input.images);
-        return {
+        return await this.#acceptRuntimeUserMessage({
           threadId: input.threadId,
-          branch,
-          delivery: input.delivery,
-          queued: true,
-        };
+          ...(input.branch === undefined ? {} : { branch: input.branch }),
+          text: input.text,
+          ...(input.images === undefined ? {} : { images: input.images }),
+          delivery: input.delivery ?? "steer",
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        });
       },
       cancel: async (input) => {
         input.signal?.throwIfAborted();
@@ -3236,6 +4074,7 @@ export class HarnessService {
           ...(input.name === undefined ? {} : { name: input.name }),
           ...(input.defaultBranch === undefined ? {} : { defaultBranch: input.defaultBranch }),
           ...(cwd === undefined ? {} : { cwd }),
+          ...(input.parentThreadId === undefined ? {} : { parentThreadId: input.parentThreadId }),
           ...(input.signal === undefined ? {} : { signal: input.signal }),
         });
         return await this.#runtimeSessionSnapshot(thread.threadId, thread.defaultBranch, input.signal);
@@ -3286,6 +4125,7 @@ export class HarnessService {
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.summaryTokenBudget === undefined ? {} : { summaryTokenBudget: input.summaryTokenBudget }),
           ...(input.summaryInstructions === undefined ? {} : { summaryInstructions: input.summaryInstructions }),
+          ...(input.replaceInstructions === undefined ? {} : { replaceInstructions: input.replaceInstructions }),
           ...(input.label === undefined ? {} : { label: input.label }),
           ...(input.signal === undefined ? {} : { signal: input.signal }),
         });
@@ -3303,12 +4143,24 @@ export class HarnessService {
       setModel: async (input) => {
         input.signal?.throwIfAborted();
         const branch = this.#extensionBranch(input.threadId, input.branch);
+        const previous = this.#runtimeModelSelection(input.threadId, branch);
         const selected = await this.resolveModelSelection(input.model, {
           provider: input.provider,
           refresh: true,
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         });
+        if (this.#resources.providerAvailable !== undefined && !(await this.#resources.providerAvailable(selected.provider, input.signal))) {
+          throw new HarnessError(
+            "EXTENSION_MODEL_AUTH",
+            `Provider ${selected.provider} has no usable active credential`,
+          );
+        }
+        if (
+          previous?.provider === selected.provider &&
+          previous.model === selected.model &&
+          previous.reasoningEffort === selected.reasoningEffort
+        ) return selected;
         this.#sessionAccess.appendEvent(input.threadId, branch, {
           type: "model_selected",
           provider: selected.provider,
@@ -3316,6 +4168,14 @@ export class HarnessService {
           ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
         });
         this.setRuntimeModelSelection({ threadId: input.threadId, branch, selection: selected });
+        await this.publishRuntimeModelSelectionChange({
+          threadId: input.threadId,
+          branch,
+          ...(previous === undefined ? {} : { previous }),
+          current: selected,
+          source: "set",
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        });
         return selected;
       },
       setThinking: async (input) => {
@@ -3329,6 +4189,17 @@ export class HarnessService {
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           reasoningEffort: input.reasoningEffort,
         });
+        if (this.#resources.providerAvailable !== undefined && !(await this.#resources.providerAvailable(selected.provider, input.signal))) {
+          throw new HarnessError(
+            "EXTENSION_MODEL_AUTH",
+            `Provider ${selected.provider} has no usable active credential`,
+          );
+        }
+        if (
+          current.provider === selected.provider &&
+          current.model === selected.model &&
+          current.reasoningEffort === selected.reasoningEffort
+        ) return selected;
         this.#sessionAccess.appendEvent(input.threadId, branch, {
           type: "model_selected",
           provider: selected.provider,
@@ -3336,6 +4207,14 @@ export class HarnessService {
           ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
         });
         this.setRuntimeModelSelection({ threadId: input.threadId, branch, selection: selected });
+        await this.publishRuntimeModelSelectionChange({
+          threadId: input.threadId,
+          branch,
+          previous: current,
+          current: selected,
+          source: "set",
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        });
         return selected;
       },
       exec: async (input) => {

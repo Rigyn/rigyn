@@ -8,13 +8,14 @@ import type {
   ModelInfo,
   NormalizedUsage,
   ProviderAdapter,
+  ProviderId,
   ProviderRequest,
   ProviderResponseDiagnostics,
   ProviderState,
 } from "../core/types.js";
 import { requireBody } from "./lines.js";
 import { normalizeImageSource, requireImageMediaType, requireImageUrlProtocol } from "./images.js";
-import { stringifyProviderJson } from "./json.js";
+import { sanitizeUnicode, stringifyProviderJson } from "./json.js";
 import { providerWireRequest } from "./messages.js";
 import { decodeSSE } from "./sse.js";
 import { requestAnthropicWithSdk } from "./anthropic-sdk-transport.js";
@@ -48,6 +49,8 @@ import {
 } from "./transport.js";
 
 export interface AnthropicConfig {
+  /** Public provider identity. Defaults to `anthropic`. */
+  id?: ProviderId;
   apiKey?: TokenSource;
   accessToken?: TokenSource;
   oauth?: (signal?: AbortSignal) => boolean | Promise<boolean>;
@@ -59,6 +62,8 @@ export interface AnthropicConfig {
   fetch?: FetchLike;
   promptCache?: "off" | "5m" | "1h";
   thinking?: AnthropicThinkingConfig;
+  /** Use the current per-tool partial-input streaming contract. Disable only for legacy-compatible endpoints. */
+  eagerToolInputStreaming?: boolean;
   /** Enable documented Anthropic server tool search on a compatible endpoint. */
   deferredToolLoading?: boolean;
 }
@@ -90,6 +95,7 @@ const MAX_CACHE_BREAKPOINTS = 4;
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const CACHE_LOOKBACK_BLOCKS = 20;
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
+const LEGACY_TOOL_INPUT_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const TOOL_SEARCH_TYPE = "tool_search_tool_bm25_20251119";
 const TOOL_SEARCH_NAME = "tool_search_tool_bm25";
 const MIN_THINKING_BUDGET = 1024;
@@ -159,9 +165,14 @@ const OAUTH_TOOL_NAMES = new Map<string, string>([
 ]);
 
 export class AnthropicAdapter implements ProviderAdapter {
-  readonly id = "anthropic" as const;
-  readonly #config: Required<Pick<AnthropicConfig, "baseUrl" | "version" | "defaultMaxOutputTokens" | "deferredToolLoading">> &
-    Omit<AnthropicConfig, "baseUrl" | "version" | "defaultMaxOutputTokens" | "deferredToolLoading">;
+  readonly id: ProviderId;
+  readonly #config: Required<Pick<
+    AnthropicConfig,
+    "baseUrl" | "version" | "defaultMaxOutputTokens" | "deferredToolLoading" | "eagerToolInputStreaming"
+  >> & Omit<
+    AnthropicConfig,
+    "baseUrl" | "version" | "defaultMaxOutputTokens" | "deferredToolLoading" | "eagerToolInputStreaming"
+  >;
   readonly #fetch: FetchLike;
   readonly #discoveredCompatibility = new Map<string, AnthropicModelCompatibility>();
 
@@ -172,8 +183,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (config.deferredToolLoading !== undefined && typeof config.deferredToolLoading !== "boolean") {
       throw new TypeError("Anthropic deferredToolLoading must be a boolean");
     }
+    if (config.eagerToolInputStreaming !== undefined && typeof config.eagerToolInputStreaming !== "boolean") {
+      throw new TypeError("Anthropic eagerToolInputStreaming must be a boolean");
+    }
     const baseUrl = trimSlash(config.baseUrl ?? DEFAULT_ANTHROPIC_BASE_URL);
     assertSecureEndpoint(baseUrl, "Anthropic base URL");
+    if (!/^[a-z][a-z0-9._-]{0,62}$/u.test(config.id ?? "anthropic")) {
+      throw new TypeError("Anthropic provider ID is invalid");
+    }
+    this.id = config.id ?? "anthropic";
     const thinking = normalizeAnthropicThinkingConfig(config.thinking);
     this.#config = {
       ...config,
@@ -182,6 +200,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       version: config.version ?? "2023-06-01",
       defaultMaxOutputTokens: config.defaultMaxOutputTokens ?? 8192,
       deferredToolLoading: config.deferredToolLoading ?? baseUrl === DEFAULT_ANTHROPIC_BASE_URL,
+      eagerToolInputStreaming: config.eagerToolInputStreaming ?? true,
     };
     this.#fetch = config.fetch ?? globalThis.fetch;
   }
@@ -195,7 +214,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const compatibility = this.#modelCompatibility(request.model);
       const interleavedBeta = shouldRequestInterleavedThinkingBeta(request, compatibility);
-      const auth = await this.#headers(signal, interleavedBeta ? [INTERLEAVED_THINKING_BETA] : []);
+      const additionalBeta = [
+        ...(interleavedBeta ? [INTERLEAVED_THINKING_BETA] : []),
+        ...(request.tools.length > 0 && !this.#config.eagerToolInputStreaming
+          ? [LEGACY_TOOL_INPUT_STREAMING_BETA]
+          : []),
+      ];
+      const auth = await this.#headers(signal, additionalBeta);
       const headers = auth.headers;
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
@@ -210,6 +235,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.#config.thinking?.budgets,
           auth.oauth,
           this.#config.deferredToolLoading,
+          this.#config.eagerToolInputStreaming,
         )),
         signal,
       }, auth.apiKey);
@@ -221,6 +247,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let responseModel = request.model;
       let responseId: string | undefined;
       let stopReason: string | undefined;
+      let refusalExplanation: string | undefined;
       let usageSnapshot: NormalizedUsage | undefined;
       const pendingUsage: NormalizedUsage[] = [];
       const blocks = new Map<number, Record<string, unknown>>();
@@ -401,6 +428,10 @@ export class AnthropicAdapter implements ProviderAdapter {
         if (type === "message_delta") {
           const delta = asRecord(event.delta);
           stopReason = asString(delta?.stop_reason) ?? stopReason;
+          if (stopReason === "refusal") {
+            const stopDetails = asRecord(delta?.stop_details);
+            refusalExplanation = boundedRefusalExplanation(asString(stopDetails?.explanation)) ?? refusalExplanation;
+          }
           const usage = anthropicUsage(event.usage);
           if (usage !== undefined) {
             usageSnapshot = mergeUsageSnapshots(usageSnapshot, usage);
@@ -429,6 +460,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             state: anthropicState(blocks),
           };
           if (stopReason !== undefined) end.rawReason = stopReason;
+          if (stopReason === "refusal" && refusalExplanation !== undefined) end.explanation = refusalExplanation;
           yield end;
           return;
         }
@@ -583,6 +615,7 @@ function buildAnthropicBody(
   configuredBudgets: AnthropicThinkingConfig["budgets"],
   oauth: boolean,
   deferredToolLoading: boolean,
+  eagerToolInputStreaming: boolean,
 ): Record<string, unknown> {
   request = providerWireRequest(request, request.providerState?.kind === "anthropic_messages");
   const system = request.messages
@@ -599,6 +632,7 @@ function buildAnthropicBody(
     name: outboundToolName(tool.name, oauth),
     description: tool.description,
     input_schema: tool.inputSchema,
+    ...(eagerToolInputStreaming ? { eager_input_streaming: true } : {}),
     ...(useDeferredTools && tool.loading === "deferred" ? { defer_loading: true } : {}),
   }));
   if (useDeferredTools) tools.unshift({ type: TOOL_SEARCH_TYPE, name: TOOL_SEARCH_NAME });
@@ -632,7 +666,14 @@ function buildAnthropicBody(
     body.system = system;
   }
   if (tools.length > 0) body.tools = tools;
-  applyAnthropicThinking(body, request.reasoningEffort, compatibility, configuredBudgets);
+  applyAnthropicThinking(
+    body,
+    request.reasoningEffort,
+    compatibility,
+    request.thinkingBudgets === undefined
+      ? configuredBudgets
+      : { ...configuredBudgets, ...request.thinkingBudgets },
+  );
   if (request.metadata !== undefined) body.metadata = request.metadata;
   return body;
 }
@@ -664,7 +705,10 @@ function applyAnthropicThinking(
     throw new InvalidProviderRequestError(`Anthropic has no manual thinking budget for effort ${JSON.stringify(effort)}`);
   }
   const reasoningEffort = effort as AnthropicReasoningEffort;
-  const requestedBudget = configuredBudgets?.[reasoningEffort] ?? DEFAULT_THINKING_BUDGETS[reasoningEffort];
+  const requestedBudget = Math.max(
+    MIN_THINKING_BUDGET,
+    configuredBudgets?.[reasoningEffort] ?? DEFAULT_THINKING_BUDGETS[reasoningEffort],
+  );
   const answerAwareLimit = Math.max(MIN_THINKING_BUDGET, maxTokens - RESERVED_ANSWER_TOKENS);
   const budgetTokens = Math.min(requestedBudget, maxTokens - 1, answerAwareLimit);
   body.thinking = { type: "enabled", budget_tokens: budgetTokens };
@@ -771,7 +815,7 @@ function buildAnthropicMessages(request: ProviderRequest, allowEmptySignature: b
               ];
           return [{ type: "tool_result", tool_use_id: block.callId, content, is_error: block.isError }];
         }
-        if (block.type === "provider_opaque" && block.provider === "anthropic") {
+        if (block.type === "provider_opaque" && block.provider === request.provider) {
           return normalizeAnthropicAssistantBlocks([block.value], allowEmptySignature, oauth);
         }
         return [];
@@ -881,6 +925,14 @@ function anthropicCacheCreationTokens(usage: Record<string, unknown>): unknown {
 
 function reportedTokenCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function boundedRefusalExplanation(value: string | undefined): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  const normalized = sanitizeUnicode(value).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
+  const encoded = Buffer.from(normalized, "utf8");
+  if (encoded.byteLength <= 4 * 1024) return normalized;
+  return encoded.subarray(0, 4 * 1024).toString("utf8").replace(/\uFFFD+$/u, "");
 }
 
 function mapAnthropicStop(reason: string | undefined, sawTools: boolean): FinishReason {

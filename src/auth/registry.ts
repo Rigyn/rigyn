@@ -1,4 +1,9 @@
-import { DEFAULT_ENVIRONMENT_CREDENTIALS, EnvironmentCredentialSource } from "./broker.js";
+import {
+  DEFAULT_ENVIRONMENT_CREDENTIALS,
+  EnvironmentCredentialSource,
+  environmentCredentialVariables,
+  resolvedEnvironmentCredentialVariable,
+} from "./broker.js";
 import { describeAmbientIdentity } from "./ambient.js";
 import { pollDeviceToken, requestDeviceAuthorization } from "./device.js";
 import {
@@ -8,10 +13,14 @@ import {
   type OAuthTokenResponse,
 } from "./loopback.js";
 import {
+  cloneProviderAuthDescriptor,
   normalizeProviderAuthDescriptor,
   type ProviderAuthDescriptor,
   type ProviderAuthDescriptorMethod,
+  type ProviderManagedAuthInteraction,
+  type ProviderManagedOAuthAuthMethod,
 } from "./provider-descriptor.js";
+import { normalizeManagedOAuthCredential } from "./managed.js";
 import { oauthErrorCode, oauthTokenExpiresAt } from "./oauth-token.js";
 import type {
   AmbientCredentialDescriptor,
@@ -65,6 +74,7 @@ export type ProviderAuthMethod =
   | { id: "api_key"; kind: "api_key"; label: string; detail: string }
   | { id: "bearer"; kind: "bearer"; label: string; detail: string }
   | { id: `oauth:${string}`; kind: "oauth"; label: string; detail: string; registrationId: string }
+  | { id: `managed:${string}`; kind: "managed_oauth"; label: string; detail: string; methodId: string }
   | { id: "ambient"; kind: "ambient"; label: string; detail: string; ambientProvider: AmbientProvider };
 
 export interface ProviderAuthBinding {
@@ -165,6 +175,7 @@ const DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
   bedrock: "Amazon Bedrock",
   openrouter: "OpenRouter",
   ollama: "Ollama",
+  "llama.cpp": "llama.cpp Router",
   groq: "Groq",
   together: "Together",
   deepseek: "DeepSeek",
@@ -175,6 +186,14 @@ const DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
   "vercel-ai-gateway": "Vercel AI Gateway",
   zai: "Z.AI Coding Plan (Global)",
   "zai-coding-cn": "Z.AI Coding Plan (China)",
+  "ant-ling": "Ant Ling",
+  nvidia: "NVIDIA",
+  xiaomi: "Xiaomi MiMo",
+  "xiaomi-token-plan-cn": "Xiaomi Token Plan (China)",
+  "xiaomi-token-plan-ams": "Xiaomi Token Plan (Amsterdam)",
+  "xiaomi-token-plan-sgp": "Xiaomi Token Plan (Singapore)",
+  moonshotai: "Moonshot AI",
+  "moonshotai-cn": "Moonshot AI (China)",
   opencode: "OpenCode Zen",
   "opencode-go": "OpenCode Go",
   "kimi-coding": "Kimi For Coding",
@@ -336,6 +355,7 @@ function descriptorMethod<T extends ProviderAuthDescriptorMethod["kind"]>(
 
 export class ProviderAuthRegistry {
   readonly #bindings = new Map<string, ProviderAuthBinding>();
+  readonly #displayNameOverrides = new Map<string, Array<{ token: symbol; value: string }>>();
   readonly #registrations = new Map<string, OAuthRegistrationConfig>();
   readonly #registrationDetails = new Map<string, string>();
   readonly #descriptors = new Map<string, RegisteredProviderAuthDescriptor>();
@@ -371,6 +391,9 @@ export class ProviderAuthRegistry {
     if (this.#descriptors.has(provider)) {
       throw new Error(`Provider auth descriptor is still registered: ${provider}`);
     }
+    if ((this.#displayNameOverrides.get(provider)?.length ?? 0) > 0) {
+      throw new Error(`Provider display-name override is still registered: ${provider}`);
+    }
     return this.#bindings.delete(provider);
   }
 
@@ -385,24 +408,72 @@ export class ProviderAuthRegistry {
   binding(provider: string): ProviderAuthBinding {
     const base = this.#bindings.get(provider);
     if (base === undefined) throw new Error(`Provider auth metadata is not registered: ${provider}`);
+    const displayName = this.#displayNameOverrides.get(provider)?.at(-1)?.value;
     const descriptor = this.#descriptors.get(provider)?.descriptor;
-    if (descriptor === undefined) return { ...base };
+    if (descriptor === undefined) return { ...base, displayName: displayName ?? base.displayName };
     const apiKey = descriptorMethod(descriptor, "api_key");
     const ambient = descriptorMethod(descriptor, "ambient");
     return {
       ...base,
       credentialId: descriptor.credentialId ?? base.credentialId,
-      displayName: descriptor.displayName ?? base.displayName,
+      displayName: displayName ?? descriptor.displayName ?? base.displayName,
       ...(apiKey === undefined ? {} : { secret: "api_key" as const }),
       ...(ambient === undefined ? {} : { ambient: ambient.provider }),
       externallyManaged: false,
     };
   }
 
+  /** Temporarily changes only presentation metadata while preserving credentials and methods. */
+  overrideDisplayName(provider: string, value: string): () => void {
+    if (!this.#bindings.has(provider)) throw new Error(`Provider auth metadata is not registered: ${provider}`);
+    const displayName = value.trim();
+    if (
+      displayName === "" ||
+      displayName !== value ||
+      /[\x00-\x1f\x7f]/u.test(displayName) ||
+      Buffer.byteLength(displayName, "utf8") > 1_024
+    ) throw new TypeError("Provider display name is invalid");
+    const token = Symbol(provider);
+    const layers = this.#displayNameOverrides.get(provider) ?? [];
+    layers.push({ token, value: displayName });
+    this.#displayNameOverrides.set(provider, layers);
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      const current = this.#displayNameOverrides.get(provider);
+      if (current === undefined) return;
+      const index = current.findIndex((entry) => entry.token === token);
+      if (index >= 0) current.splice(index, 1);
+      if (current.length === 0) this.#displayNameOverrides.delete(provider);
+    };
+  }
+
   /** Secret-free, detached descriptor metadata for host-side request brokerage. */
   descriptor(provider: string): ProviderAuthDescriptor | undefined {
     const descriptor = this.#descriptors.get(provider)?.descriptor;
-    return descriptor === undefined ? undefined : normalizeProviderAuthDescriptor(descriptor);
+    return descriptor === undefined ? undefined : cloneProviderAuthDescriptor(descriptor);
+  }
+
+  managedMethod(provider: string, methodId: string): ProviderManagedOAuthAuthMethod | undefined {
+    const descriptor = this.#descriptors.get(provider)?.descriptor;
+    const method = descriptor?.methods.find((entry): entry is ProviderManagedOAuthAuthMethod =>
+      entry.kind === "managed_oauth" && entry.id === methodId);
+    return method === undefined ? undefined : { ...method };
+  }
+
+  async authorizeManaged(
+    provider: string,
+    methodId: string,
+    interaction: ProviderManagedAuthInteraction,
+  ): Promise<OAuthCredential> {
+    interaction.signal.throwIfAborted();
+    const method = this.managedMethod(provider, methodId);
+    if (method === undefined) throw new Error(`Managed provider authentication method is not registered: ${provider}/${methodId}`);
+    const binding = this.binding(provider);
+    const value = await method.login(interaction);
+    interaction.signal.throwIfAborted();
+    return normalizeManagedOAuthCredential(binding.credentialId, method.id, value);
   }
 
   /** Attach one generation-owned extension descriptor. The returned cleanup is idempotent. */
@@ -568,6 +639,16 @@ export class ProviderAuthRegistry {
         detail: "GitHub Copilot subscription · supports GitHub Enterprise Cloud",
       });
     }
+    for (const method of this.#descriptors.get(provider)?.descriptor.methods ?? []) {
+      if (method.kind !== "managed_oauth") continue;
+      methods.push({
+        id: `managed:${method.id}`,
+        kind: "managed_oauth",
+        label: method.label ?? `Sign in with ${providerDisplayName(provider)}`,
+        detail: method.detail ?? "Provider-managed authentication",
+        methodId: method.id,
+      });
+    }
     for (const [registrationId, registration] of this.#registrations) {
       if (registration.provider !== provider) continue;
       methods.push({
@@ -582,11 +663,12 @@ export class ProviderAuthRegistry {
     }
     const environmentSpec = DEFAULT_ENVIRONMENT_CREDENTIALS[binding.credentialId];
     if (environmentSpec !== undefined) {
+      const variables = environmentCredentialVariables(environmentSpec);
       methods.push({
         id: "environment",
         kind: "environment",
         label: "Use environment credential",
-        detail: environmentSpec.variable,
+        detail: variables.join(" or "),
         variable: environmentSpec.variable,
       });
     }
@@ -719,7 +801,10 @@ export class ProviderAuthRegistry {
     const binding = this.binding(provider);
     const methods = this.methods(provider);
     const emptyStored: StoredAuthState = { present: false, active: false, shadowed: false, usable: false };
-    const environmentVariable = DEFAULT_ENVIRONMENT_CREDENTIALS[binding.credentialId]?.variable;
+    const environmentSpec = DEFAULT_ENVIRONMENT_CREDENTIALS[binding.credentialId];
+    const environmentVariable = environmentSpec === undefined
+      ? undefined
+      : resolvedEnvironmentCredentialVariable(environmentSpec, this.#environment) ?? environmentSpec.variable;
     try {
       const environment = await new EnvironmentCredentialSource({ environment: this.#environment }).resolve({
         provider: binding.credentialId,
@@ -747,7 +832,10 @@ export class ProviderAuthRegistry {
             fallbackSelected: profileState.fallbackSelected,
             ...(profileState.activeProfile === undefined ? {} : { activeProfile: profileState.activeProfile }),
           };
-      const usable = storedCredential === undefined ? false : credentialUsable(storedCredential, this.#now());
+      const managedRefresh = storedCredential?.kind === "oauth" && storedCredential.refreshToken !== undefined &&
+        typeof storedCredential.providerData?.managedFlow === "string" &&
+        this.managedMethod(provider, storedCredential.providerData.managedFlow) !== undefined;
+      const usable = storedCredential === undefined ? false : credentialUsable(storedCredential, this.#now()) || managedRefresh;
       const stored: StoredAuthState = storedCredential === undefined
         ? emptyStored
         : {

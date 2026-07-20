@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AgentRunner, RunControl, ThreadRunManager } from "../../src/core/index.js";
+import { AgentRunner, RunControl, ThreadRunManager, type RetryPolicy } from "../../src/core/index.js";
 import type { EventEnvelope, EventSink, RuntimeEvent } from "../../src/core/events.js";
 import type { AdapterEvent, CanonicalMessage, ModelInfo, ProviderAdapter, ProviderRequest } from "../../src/core/types.js";
 import { DirectProcessRunner } from "../../src/process/index.js";
@@ -88,7 +88,7 @@ const echoTool: HarnessTool = {
 
 async function setup(
   provider: ProviderAdapter,
-  scripts?: { retry?: { maxAttempts: number; baseDelayMs: number; maxDelayMs: number; jitter: number } },
+  scripts?: { retry?: RetryPolicy },
   registeredTools: HarnessTool[] = [echoTool],
 ) {
   const root = await mkdtemp(join(tmpdir(), "harness-agent-"));
@@ -167,6 +167,62 @@ test("tool loading mode participates in the continuation fingerprint", async () 
   assert.equal(deferred, await fingerprint("deferred"));
 });
 
+test("agent persists a refusal explanation only when the provider emitted no response text", async (t) => {
+  const explanation = "The request cannot be completed under the active safety policy.";
+
+  await t.test("empty response", async () => {
+    const provider = new ScriptedProvider([() => events([
+      { type: "response_start", model: "model" },
+      { type: "response_end", reason: "refusal", rawReason: "refusal", explanation, state },
+    ])]);
+    const harness = await setup(provider);
+    const result = await harness.runner.run({
+      threadId: "refusal-explanation",
+      prompt: "work",
+      provider,
+      model: "model",
+      tools: harness.tools,
+      toolContext: harness.toolContext,
+    });
+
+    assert.equal(result.finishReason, "refusal");
+    assert.equal(result.rawReason, "refusal");
+    assert.equal(result.explanation, explanation);
+    assert.equal(result.finalText, explanation);
+    const assistant = harness.allMessages.findLast((message) => message.role === "assistant");
+    assert.deepEqual(assistant?.content, [{ type: "text", text: explanation }]);
+    const completed = harness.runtimes[0]?.events.find((entry) => entry.event.type === "assistant_completed");
+    assert.deepEqual(completed?.event, {
+      type: "assistant_completed",
+      finishReason: "refusal",
+      rawReason: "refusal",
+      explanation,
+    });
+  });
+
+  await t.test("provider text wins", async () => {
+    const provider = new ScriptedProvider([() => events([
+      { type: "response_start", model: "model" },
+      { type: "text_delta", part: 0, text: "Provider supplied refusal text." },
+      { type: "response_end", reason: "refusal", rawReason: "refusal", explanation, state },
+    ])]);
+    const harness = await setup(provider);
+    const result = await harness.runner.run({
+      threadId: "refusal-provider-text",
+      prompt: "work",
+      provider,
+      model: "model",
+      tools: harness.tools,
+      toolContext: harness.toolContext,
+    });
+
+    assert.equal(result.finalText, "Provider supplied refusal text.");
+    assert.equal(result.explanation, explanation);
+    const assistant = harness.allMessages.findLast((message) => message.role === "assistant");
+    assert.deepEqual(assistant?.content, [{ type: "text", text: "Provider supplied refusal text." }]);
+  });
+});
+
 function textMessageForTest(
   id: string,
   role: CanonicalMessage["role"],
@@ -189,7 +245,8 @@ test("agent performs a complete tool round trip and persists canonical messages"
       { type: "response_start", model: "routed-model", responseId: "resp-1", requestId: "req-1" },
       { type: "text_delta", part: 0, text: "checking" },
       { type: "tool_call_start", index: 0, id: "call-1", name: "echo" },
-      { type: "tool_call_delta", index: 0, jsonFragment: "{\"value\":\"ok\"}" },
+      { type: "tool_call_delta", index: 0, jsonFragment: "{\"value\":\"" },
+      { type: "tool_call_delta", index: 0, jsonFragment: "ok\"}" },
       { type: "tool_call_end", index: 0, id: "call-1", name: "echo", rawArguments: "{\"value\":\"ok\"}", arguments: { value: "ok" } },
       { type: "response_end", reason: "tool_calls", state },
     ]),
@@ -238,6 +295,21 @@ test("agent performs a complete tool round trip and persists canonical messages"
     responseId: "resp-1",
     requestId: "req-1",
   });
+  const runtimeEvents = harness.runtimes[0]!.events.map((entry) => entry.event);
+  assert.deepEqual(
+    runtimeEvents.filter((event) => event.type === "tool_call_started" || event.type === "tool_call_delta"),
+    [
+      { type: "tool_call_started", index: 0, id: "call-1", name: "echo" },
+      { type: "tool_call_delta", index: 0, jsonFragment: "{\"value\":\"" },
+      { type: "tool_call_delta", index: 0, jsonFragment: "ok\"}" },
+    ],
+  );
+  const finalDeltaIndex = runtimeEvents.findLastIndex((event) => event.type === "tool_call_delta");
+  const assistantMessageIndex = runtimeEvents.findIndex((event) =>
+    event.type === "message_appended" && event.message.role === "assistant");
+  const requestedIndex = runtimeEvents.findIndex((event) => event.type === "tool_requested");
+  assert.equal(finalDeltaIndex < assistantMessageIndex, true);
+  assert.equal(finalDeltaIndex < requestedIndex, true);
   const terminal = harness.runtimes[0]?.events.filter((entry) => ["run_completed", "run_failed", "run_cancelled"].includes(entry.event.type));
   assert.equal(terminal?.length, 1);
 });
@@ -949,6 +1021,99 @@ test("agent retries a transport failure only before response body", async () => 
   assert.equal(harness.runtimes[0]?.events.filter((entry) => entry.event.type === "retry_scheduled").length, 1);
 });
 
+test("agent treats response metadata as retry-safe until substantive output", async () => {
+  let calls = 0;
+  const provider = new ScriptedProvider([
+    () => {
+      calls += 1;
+      return events([
+        { type: "response_start", model: "m" },
+        {
+          type: "error",
+          error: {
+            category: "network",
+            message: "metadata-only EOF",
+            retryable: true,
+            partial: false,
+            bodyStarted: false,
+          },
+        },
+      ]);
+    },
+    () => {
+      calls += 1;
+      return events([
+        { type: "response_start", model: "m" },
+        { type: "text_delta", part: 0, text: "recovered" },
+        { type: "response_end", reason: "stop", state },
+      ]);
+    },
+  ]);
+  const harness = await setup(provider, {
+    retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+  const result = await harness.runner.run({
+    threadId: "metadata-retry",
+    prompt: "p",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.finalText, "recovered");
+  assert.equal(harness.runtimes[0]?.events.filter((entry) => entry.event.type === "retry_scheduled").length, 1);
+});
+
+test("automatic retry can be disabled without changing the attempt budget", async () => {
+  let calls = 0;
+  const provider = new ScriptedProvider([
+    () => (async function* () {
+      calls += 1;
+      throw new Error("connect failed");
+    })(),
+  ]);
+  const harness = await setup(provider, {
+    retry: { enabled: false, maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+  await assert.rejects(
+    harness.runner.run({ threadId: "retry-disabled", prompt: "p", provider, model: "m", tools: harness.tools, toolContext: harness.toolContext }),
+    /connect failed/u,
+  );
+  assert.equal(calls, 1);
+  assert.equal(harness.runtimes[0]?.events.some((entry) => entry.event.type === "retry_scheduled"), false);
+});
+
+test("cancelling a scheduled retry leaves the run abort signal untouched", async () => {
+  let calls = 0;
+  const provider = new ScriptedProvider([
+    () => (async function* () {
+      calls += 1;
+      throw new Error("connect failed");
+    })(),
+  ]);
+  const harness = await setup(provider, {
+    retry: { maxAttempts: 3, baseDelayMs: 60_000, maxDelayMs: 60_000, jitter: 0 },
+  });
+  const control = new RunControl();
+  const running = harness.runner.run({
+    threadId: "retry-cancel",
+    prompt: "p",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+  }, control);
+  while (harness.runtimes[0]?.events.some((entry) => entry.event.type === "retry_scheduled") !== true) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(control.cancelRetry(), true);
+  assert.equal(control.cancelRetry(), false);
+  await assert.rejects(running, /Automatic retry cancelled: connect failed/u);
+  assert.equal(control.abortController.signal.aborted, false);
+  assert.equal(calls, 1);
+});
+
 test("a run-scoped retry policy overrides the runner default without replaying partial output", async () => {
   let calls = 0;
   const provider = new ScriptedProvider([
@@ -1473,6 +1638,33 @@ test("disabled automatic compaction preserves full context and never recovers a 
   assert.equal(eventsForRun.some(
     (event) => event.type === "warning" && event.code === "provider_context_limit" && event.message.includes("disabled"),
   ), true);
+});
+
+test("automatic compaction consults a live session policy after provider work begins", async () => {
+  let enabled = true;
+  const provider = new ScriptedProvider([
+    () => {
+      enabled = false;
+      return events([
+        { type: "response_start", model: "m" },
+        { type: "response_end", reason: "context_limit", state },
+      ]);
+    },
+  ]);
+  const harness = await setup(provider);
+
+  await assert.rejects(harness.runner.run({
+    threadId: "live-auto-compaction-policy",
+    prompt: "continue",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+    contextTokenBudget: 100_000,
+    autoCompactionEnabled: () => enabled,
+  }), /automatic compaction is disabled/u);
+  assert.equal(provider.requests.length, 1);
+  assert.equal(harness.runtimes[0]?.events.some((entry) => entry.event.type === "compaction_completed"), false);
 });
 
 test("disabled automatic compaction still enforces the hard context boundary before network", async () => {

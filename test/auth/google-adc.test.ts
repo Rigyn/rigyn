@@ -180,7 +180,7 @@ test("Google ADC falls back to metadata with the required flavor header", async 
   assert.equal(token?.quotaProjectId, "environment-quota-project");
 });
 
-test("Google external-account resolver rejects unsupported AWS credential sources", async (context) => {
+test("Google external-account resolver delegates AWS subject-token signing to the official resolver", async (context) => {
   const directory = await temporaryDirectory(context);
   const path = join(directory, "aws-external.json");
   await writeFile(
@@ -190,14 +190,86 @@ test("Google external-account resolver rejects unsupported AWS credential source
       audience: "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/aws",
       subject_token_type: "urn:ietf:params:aws:token-type:aws4_request",
       token_url: "https://sts.googleapis.com/v1/token",
-      credential_source: { environment_id: "aws1" },
+      credential_source: {
+        environment_id: "aws1",
+        regional_cred_verification_url:
+          "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15",
+      },
     }),
   );
-  await assert.rejects(
-    resolveGoogleApplicationDefaultCredentials({
-      environment: { GOOGLE_APPLICATION_CREDENTIALS: path },
-      homeDirectory: directory,
-    }),
-    /AWS credential sources are not supported/,
-  );
+  let resolverCalls = 0;
+  let form: URLSearchParams | undefined;
+  const token = await resolveGoogleApplicationDefaultCredentials({
+    environment: { GOOGLE_APPLICATION_CREDENTIALS: path },
+    homeDirectory: directory,
+    now: () => NOW,
+    externalSubjectTokenResolver: async ({ credential, scopes }) => {
+      resolverCalls += 1;
+      assert.equal((credential.credential_source as Record<string, unknown>).environment_id, "aws1");
+      assert.deepEqual(scopes, ["https://www.googleapis.com/auth/cloud-platform"]);
+      return "serialized-signed-aws-request";
+    },
+    fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+      form = new URLSearchParams(String(init?.body));
+      return Response.json({ access_token: "aws-federated-access", expires_in: 900 });
+    }) as typeof fetch,
+  });
+  assert.equal(resolverCalls, 1);
+  assert.equal(form?.get("subject_token"), "serialized-signed-aws-request");
+  assert.equal(token?.accessToken, "aws-federated-access");
+});
+
+test("Google executable external accounts require the explicit environment gate and absolute commands", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const path = join(directory, "executable-external.json");
+  await writeFile(path, JSON.stringify({
+    type: "external_account",
+    audience: "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/executable",
+    subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    token_url: "https://sts.googleapis.com/v1/token",
+    credential_source: { executable: { command: "/usr/local/bin/identity-token --format=json", timeout_millis: 5_000 } },
+  }));
+  await assert.rejects(resolveGoogleApplicationDefaultCredentials({
+    environment: { GOOGLE_APPLICATION_CREDENTIALS: path },
+    homeDirectory: directory,
+    externalSubjectTokenResolver: async () => "must-not-run",
+  }), /ALLOW_EXECUTABLES=1/u);
+
+  const token = await resolveGoogleApplicationDefaultCredentials({
+    environment: {
+      GOOGLE_APPLICATION_CREDENTIALS: path,
+      GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES: "1",
+    },
+    homeDirectory: directory,
+    now: () => NOW,
+    externalSubjectTokenResolver: async () => "executable-id-token",
+    fetch: (async () => Response.json({ access_token: "executable-access", expires_in: 600 })) as typeof fetch,
+  });
+  assert.equal(token?.accessToken, "executable-access");
+});
+
+test("Google X.509 external accounts validate certificate configuration before delegation", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const path = join(directory, "x509-external.json");
+  const certificateConfig = join(directory, "certificate-config.json");
+  await writeFile(path, JSON.stringify({
+    type: "external_account",
+    audience: "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/x509",
+    subject_token_type: "urn:ietf:params:oauth:token-type:mtls",
+    token_url: "https://sts.googleapis.com/v1/token",
+    credential_source: { certificate: { certificate_config_location: certificateConfig } },
+  }));
+  let calls = 0;
+  const token = await resolveGoogleApplicationDefaultCredentials({
+    environment: { GOOGLE_APPLICATION_CREDENTIALS: path },
+    homeDirectory: directory,
+    now: () => NOW,
+    externalSubjectTokenResolver: async () => {
+      calls += 1;
+      return "x509-svid-token";
+    },
+    fetch: (async () => Response.json({ access_token: "x509-access", expires_in: 600 })) as typeof fetch,
+  });
+  assert.equal(calls, 1);
+  assert.equal(token?.accessToken, "x509-access");
 });

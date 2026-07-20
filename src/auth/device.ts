@@ -103,7 +103,8 @@ export async function requestDeviceAuthorization(options: DeviceAuthorizationOpt
     ? undefined
     : secureEndpoint(responseString(parsed.verification_uri_complete, "verification_uri_complete", 16 * 1024), "Complete verification URI").toString();
   const expiresInSeconds = parsed.expires_in;
-  const intervalSeconds = parsed.interval ?? 5;
+  // Some interoperable device providers return zero to request the RFC default.
+  const intervalSeconds = parsed.interval === 0 ? 5 : parsed.interval ?? 5;
   if (!Number.isSafeInteger(expiresInSeconds) || (expiresInSeconds as number) <= 0 || (expiresInSeconds as number) > 7 * 24 * 60 * 60) {
     throw new Error("OAuth device response has an invalid expires_in");
   }

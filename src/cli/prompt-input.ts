@@ -37,6 +37,7 @@ export async function expandPromptReferences(
   input: string,
   workspace: string,
   signal?: AbortSignal,
+  autoResizeImages = true,
 ): Promise<ExpandedPromptInput> {
   const boundary = await WorkspaceBoundary.create(workspace);
   const references: Array<{ token: string; path: string; explicit: boolean }> = [];
@@ -81,7 +82,10 @@ export async function expandPromptReferences(
     if (sniffImageMediaType(bounded.data) !== undefined) {
       let processed;
       try {
-        processed = await preprocessImage(bounded.data, { ...(signal === undefined ? {} : { signal }) });
+        processed = await preprocessImage(bounded.data, {
+          ...(signal === undefined ? {} : { signal }),
+          autoResize: autoResizeImages,
+        });
       } catch (error) {
         throw new Error(`Referenced image could not be processed safely: ${local}: ${error instanceof Error ? error.message : String(error)}`);
       }

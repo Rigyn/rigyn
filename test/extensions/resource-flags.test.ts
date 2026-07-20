@@ -8,6 +8,7 @@ import { parseArguments } from "../../src/cli/args.js";
 import { discoverSkills } from "../../src/context/skills.js";
 import { loadPromptTemplates, loadRuntimeExtensions, loadThemes, renderExtensionPrompt } from "../../src/extensions/index.js";
 import { resolveExplicitRuntimeExtensions } from "../../src/extensions/explicit-runtime.js";
+import { THEME_TOKENS } from "../../src/tui/theme.js";
 
 test("resource flags and short aliases parse as repeatable invocation resources", () => {
   const parsed = parseArguments([
@@ -76,6 +77,7 @@ test("token-based themes load from a plain themes directory", async (t) => {
     name: "ocean",
     vars: { primary: "#00aaff", panel: 236 },
     colors: {
+      ...Object.fromEntries(THEME_TOKENS.map((token) => [token, ""])),
       accent: "primary",
       text: "",
       muted: 242,

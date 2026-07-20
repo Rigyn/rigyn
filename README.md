@@ -14,10 +14,10 @@ New here? Follow the [five-minute getting-started guide](docs/getting-started.md
 
 ## Install
 
-From the v0.2.0 GitHub release:
+From the v0.3.0 GitHub release:
 
 ```sh
-npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.2.0/rigyn-0.2.0.tgz -- rigyn self-install
+npm exec --yes --package=https://github.com/Rigyn/rigyn/releases/download/v0.3.0/rigyn-0.3.0.tgz -- rigyn self-install
 rigyn
 ```
 
@@ -106,9 +106,9 @@ Useful interactive commands are:
 /name [NAME]              /fork
 /clone [NAME]             /tree
 /compact [INSTRUCTIONS]   /reload
-/export [FILE]            /import [FILE]
+/export [FILE]            /share [FILE]              /import [FILE]
 /copy                     /hotkeys
-/trust                    /quit
+/changelog                /trust                     /quit
 ```
 
 Type `/` to open the command palette. `! command` runs a user shell command without sending it to the model. While a response is active, normal submissions steer the current run and the follow-up shortcut queues work for the next turn. Queue behavior is configurable as one-at-a-time or all-at-once.
@@ -149,7 +149,7 @@ Caching reduces repeated-input billing and latency; compaction reduces the amoun
 
 ## Providers
 
-Built-in adapters cover OpenAI Responses, ChatGPT subscription OAuth, Anthropic Messages, GitHub Copilot, Gemini Interactions and Generate Content, Vertex AI, Azure OpenAI, Amazon Bedrock, OpenRouter, Mistral chat and conversations, Ollama, and OpenAI-compatible endpoints. Presets are included for Groq, Together, DeepSeek, Cerebras, xAI, Fireworks, Hugging Face, Vercel AI Gateway, Z.AI Coding Plan, Kimi For Coding, and MiniMax.
+Built-in adapters cover OpenAI Responses, ChatGPT subscription OAuth, Anthropic Messages, GitHub Copilot, Gemini Interactions and Generate Content, Vertex AI, Azure OpenAI, Amazon Bedrock, OpenRouter, Mistral chat and conversations, Ollama, and OpenAI-compatible endpoints. Presets are included for Groq, Together, DeepSeek, Cerebras, xAI (per-model Responses/Chat routing plus device OAuth), Fireworks, Hugging Face, Vercel AI Gateway, Z.AI Coding Plan, Kimi For Coding, and MiniMax.
 
 Vertex and Azure OpenAI require a provider entry with their project or endpoint. Bedrock requires a configured region, or it is added automatically when `AWS_REGION` or `AWS_DEFAULT_REGION` is set. The other named adapters and presets are preconfigured; credentials still determine whether they are connected.
 
@@ -263,7 +263,7 @@ Settings changed in the TUI preserve existing JSONC comments. The complete key l
 
 `-p --mode text` prints the final response for a one-shot run, `-p --mode json` emits normalized events, and `rigyn rpc` starts newline-delimited JSON RPC over standard input and output. One-shot prompts may invoke installed runtime commands, declarative commands, prompt templates, and skills with the same slash forms used in chat. The package also exports the provider-neutral service, event, provider, tool, extension, storage, context, and TUI contracts for embedding.
 
-For an in-process Node.js integration, the task-focused `rigyn/embedding` owner keeps credential, provider-registry, store, and service authority private while owning cancellation, reload, and cleanup. It uses the same configured providers and brokered credentials as the CLI:
+For an in-process Node.js integration, the task-focused `rigyn/embedding` owner keeps credential, provider-registry, store, and service authority private while owning cancellation, reload, and cleanup. `rigyn/sdk` adds lifecycle-safe provider, tool, extension, resource, template, and context composition over that same owner. `rigyn/modes` adds ready-made print, terminal, and typed in-process RPC adapters that borrow an existing owner without creating or closing another runtime. These boundaries use the configured providers and brokered credentials of the CLI:
 
 ```js
 import { createEmbeddingHarness } from "rigyn/embedding";
@@ -293,9 +293,9 @@ try {
 
 The packaged [`examples/embedding-runtime.mjs`](examples/embedding-runtime.mjs) is the same configured lifecycle as a runnable file: `node examples/embedding-runtime.mjs <provider> <model> <prompt>`. [`examples/embedding-in-memory.mjs`](examples/embedding-in-memory.mjs) and [`examples/embedding-cancellation.mjs`](examples/embedding-cancellation.mjs) demonstrate the credential-free test preset and bounded cancellation. Call `runtime.start()` instead of `run()` when you need an immediate handle with `threadId`, `result`, and `cancel()`. The advanced root `createHarnessRuntime()` remains available to hosts that explicitly need its underlying registries and service.
 
-Existing layers are available as explicit ESM subpaths under `rigyn/<layer>`, where `<layer>` is `auth`, `config`, `context`, `core`, `embedding`, `extensions`, `images`, `interfaces`, `net`, `process`, `prompts`, `providers`, `service`, `storage`, `testing`, `tools`, or `tui`. Each subpath resolves to its built JavaScript and TypeScript declarations, so consumers can depend on one layer without importing the root barrel.
+Existing layers are available as explicit ESM subpaths under `rigyn/<layer>`, where `<layer>` is `auth`, `config`, `context`, `core`, `embedding`, `extensions`, `images`, `interfaces`, `modes`, `net`, `process`, `prompts`, `providers`, `sdk`, `service`, `storage`, `testing`, `tools`, or `tui`. Each subpath resolves to its built JavaScript and TypeScript declarations, so consumers can depend on one layer without importing the root barrel.
 
-The supported entry points and compatibility rules are defined in the [public Node.js API policy](docs/public-api.md). Paths inside `dist/` are not public imports.
+The supported entry points and compatibility rules are defined in the [public Node.js API policy](docs/public-api.md). Mode ownership and examples are in [In-process modes](docs/modes.md). Paths inside `dist/` are not public imports.
 
 All package entry points intentionally target the supported local Node.js runtime (24.15+ or 26+). No root or subpath is declared browser-safe, including entry points that contain provider-neutral types. A browser interface should talk to a trusted local Node process over the newline-delimited RPC interface or a private localhost extension bridge; browser code should not bundle the harness modules directly.
 

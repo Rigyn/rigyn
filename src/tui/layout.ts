@@ -19,7 +19,7 @@ import {
   type TerminalImageResolution,
   type TranscriptImage,
 } from "./terminal-image.js";
-import { cellWidth, graphemeWidth, padCells, sanitizeTerminalText, splitGraphemes, truncateCells, wrapCells } from "./unicode.js";
+import { byteTruncate, cellWidth, graphemeWidth, padCells, sanitizeTerminalText, splitGraphemes, truncateCells, wrapCells } from "./unicode.js";
 
 interface RenderedLine {
   text: string;
@@ -54,6 +54,11 @@ export interface TranscriptRenderOptions {
   hyperlinks?: boolean;
   resolveImage?: (image: TranscriptImage, limits: { maxColumns: number; maxRows: number }) => TerminalImageResolution;
   maxImageRows?: number;
+  hiddenReasoningLabel?: string;
+  hideReasoningBlock?: boolean;
+  outputPad?: 0 | 1;
+  codeBlockIndent?: string;
+  imageWidthCells?: number;
 }
 
 interface EditorBlock {
@@ -71,9 +76,15 @@ function entryRole(entry: TranscriptEntry): ThemeRole {
   return "muted";
 }
 
-function entryPrefix(entry: TranscriptEntry, theme: Theme): string {
+function entryPrefix(entry: TranscriptEntry, theme: Theme, hiddenReasoningLabel = "summary"): string {
   if (entry.kind === "startup" || entry.kind === "user" || entry.kind === "assistant") return "";
-  if (entry.kind === "reasoning") return `${theme.glyphs.assistant} summary `;
+  if (entry.kind === "reasoning") {
+    const label = truncateCells(
+      byteTruncate(sanitizeTerminalText(hiddenReasoningLabel).replaceAll("\n", " ").trim() || "summary", 64),
+      32,
+    );
+    return `${theme.glyphs.assistant} ${label} `;
+  }
   if (entry.kind === "warning") return "! warning ";
   if (entry.kind === "error") return `${theme.glyphs.failure} error `;
   if (entry.kind === "status") return `${theme.glyphs.pending} `;
@@ -375,6 +386,24 @@ function structuralLines(value: RuntimeUiBlock | undefined, width: number): Rend
   }
 }
 
+function structuralSlotLines(
+  values: readonly RuntimeUiBlock[] | undefined,
+  width: number,
+  maximumLines: number,
+): RenderedLine[] {
+  return (values ?? []).slice(-16).flatMap((value) => {
+    try {
+      return structuralLines(sanitizeRuntimeUiBlock(value, {
+        width,
+        maxLines: 4,
+        maxBytes: 16 * 1024,
+      }), width) ?? [];
+    } catch {
+      return [];
+    }
+  }).slice(-maximumLines);
+}
+
 function structuralEditorBlock(
   value: RuntimeUiBlock | undefined,
   width: number,
@@ -408,10 +437,11 @@ function hangingLines(prefix: string, value: string, width: number, role: ThemeR
   }));
 }
 
-function userMessageLines(value: string, width: number, theme: Theme): RenderedLine[] {
+function userMessageLines(value: string, width: number, theme: Theme, outputPad = 0): RenderedLine[] {
   const unicode = theme.glyphs.horizontal === "─";
-  const label = ` You ${unicode ? "›" : ">"} `;
-  const content = wrapCells(value, Math.max(1, width - cellWidth(label) - 1));
+  const edge = " ".repeat(outputPad);
+  const label = `${edge} You ${unicode ? "›" : ">"} `;
+  const content = wrapCells(value, Math.max(1, width - cellWidth(label) - outputPad - 1));
   const padding = { text: "", role: "userMessage" as const, fill: true };
   return [
     padding,
@@ -424,10 +454,11 @@ function userMessageLines(value: string, width: number, theme: Theme): RenderedL
   ];
 }
 
-function legacyUserMessageLines(value: string, width: number): RenderedLine[] {
+function legacyUserMessageLines(value: string, width: number, outputPad = 0): RenderedLine[] {
   const padding = { text: "", role: "userMessage" as const, fill: true };
-  const content = wrapCells(value, Math.max(1, width - 2)).map((line) => ({
-    text: ` ${line}`,
+  const edge = " ".repeat(1 + outputPad);
+  const content = wrapCells(value, Math.max(1, width - cellWidth(edge) - outputPad - 1)).map((line) => ({
+    text: `${edge}${line}`,
     role: "userMessage" as const,
     fill: true,
   }));
@@ -455,6 +486,11 @@ function transcriptLines(
   imageOptions: {
     resolveImage?: TranscriptRenderOptions["resolveImage"] | undefined;
     maxImageRows?: number | undefined;
+    hiddenReasoningLabel?: string | undefined;
+    hideReasoningBlock?: boolean | undefined;
+    outputPad?: 0 | 1 | undefined;
+    codeBlockIndent?: string | undefined;
+    imageWidthCells?: number | undefined;
   } = {},
 ): RenderedLine[] {
   let imageCount = 0;
@@ -466,7 +502,7 @@ function transcriptLines(
       return [{ text: `${fallback} — terminal preview limit reached`, role: "muted" }];
     }
     const resolved = imageOptions.resolveImage?.(image, {
-      maxColumns: Math.max(1, Math.min(width - 2, 80)),
+      maxColumns: Math.max(1, Math.min(width - 2, imageOptions.imageWidthCells ?? 80)),
       maxRows: maxImageRows,
     }) ?? { fallback };
     if (resolved.image === undefined) return [{ text: resolved.fallback, role: "muted" }];
@@ -487,7 +523,13 @@ function transcriptLines(
     ];
   });
   return entries.flatMap((entry, index) => {
-    const prefix = entryPrefix(entry, theme);
+    const prefix = entryPrefix(
+      entry,
+      theme,
+      entry.kind === "reasoning" && imageOptions.hideReasoningBlock === true
+        ? imageOptions.hiddenReasoningLabel ?? "Thinking..."
+        : imageOptions.hiddenReasoningLabel,
+    );
     const role = entryRole(entry);
     const separator: RenderedLine[] = index === 0 ? [] : [{ text: "", role: "muted" }];
     const withSemanticZone = (lines: RenderedLine[]): RenderedLine[] => {
@@ -502,27 +544,38 @@ function transcriptLines(
     }
     if (entry.kind === "user") {
       const lines = [
-        ...(entry.text === "" ? [] : messageMarkers ? userMessageLines(entry.text, width, theme) : legacyUserMessageLines(entry.text, width)),
+        ...(entry.text === "" ? [] : messageMarkers
+          ? userMessageLines(entry.text, width, theme, imageOptions.outputPad)
+          : legacyUserMessageLines(entry.text, width, imageOptions.outputPad)),
         ...renderedImages(entry),
       ];
       return [...separator, ...withSemanticZone(lines)];
     }
+    if (entry.kind === "reasoning" && imageOptions.hideReasoningBlock === true) {
+      if (entries[index - 1]?.kind === "reasoning") return [];
+      return [
+        ...separator,
+        { text: `${" ".repeat(imageOptions.outputPad ?? 0)}${prefix.trimEnd()}`, role: "muted" },
+      ];
+    }
     if (entry.kind === "reasoning" && entry.expanded !== true) {
       return [...separator, ...hangingLines(
-        prefix,
+        `${" ".repeat(imageOptions.outputPad ?? 0)}${prefix}`,
         collapsedReasoningSummary(entry.text),
-        width,
+        Math.max(1, width - (imageOptions.outputPad ?? 0)),
         "muted",
       )];
     }
     if (entry.kind === "assistant" || entry.kind === "reasoning") {
-      const messagePrefix = prefix;
+      const messagePrefix = `${" ".repeat(imageOptions.outputPad ?? 0)}${prefix}`;
       const lines = [
         ...(entry.text === "" ? [] : renderMarkdownMessageLines(
           messagePrefix,
           entry.text,
-          width,
+          Math.max(1, width - (imageOptions.outputPad ?? 0)),
           role,
+          undefined,
+          { codeBlockIndent: imageOptions.codeBlockIndent ?? "" },
         )),
         ...renderedImages(entry),
       ];
@@ -582,9 +635,12 @@ function editorBlock(
   label: string,
   width: number,
   maximumLines: number,
+  paddingX = 0,
 ): EditorBlock {
   const safeLabel = sanitizeTerminalText(label);
-  const prefix = safeLabel === "you" ? " " : ` ${safeLabel}> `;
+  const edge = " ".repeat(paddingX);
+  const prefix = `${edge}${safeLabel === "you" ? " " : ` ${safeLabel}> `}`;
+  const contentWidth = Math.max(1, width - (paddingX * 2));
   const continuation = " ".repeat(cellWidth(prefix));
   const graphemes = splitGraphemes(text);
   const lines: string[] = [prefix];
@@ -612,7 +668,7 @@ function editorBlock(
         if (selected === "\n" || /^\s$/u.test(selected)) break;
         wordWidth += graphemeWidth(selected);
       }
-      if (column + wordWidth > width) {
+      if (column + wordWidth > contentWidth) {
         const current = lines[row] ?? "";
         const trimmed = current.replace(/ +$/u, "");
         column -= cellWidth(current) - cellWidth(trimmed);
@@ -621,7 +677,7 @@ function editorBlock(
       }
     }
     if (index === cursor) {
-      if (column >= width) nextLine();
+      if (column >= contentWidth) nextLine();
       cursorRow = row;
       cursorColumn = column;
     }
@@ -630,16 +686,16 @@ function editorBlock(
       continue;
     }
     const next = graphemeWidth(grapheme);
-    if (grapheme === " " && column + next > width) {
+    if (grapheme === " " && column + next > contentWidth) {
       nextLine();
       continue;
     }
-    if (column > cellWidth(continuation) && column + next > width) nextLine();
+    if (column > cellWidth(continuation) && column + next > contentWidth) nextLine();
     lines[row] = `${lines[row] ?? ""}${grapheme}`;
     column += next;
   }
   if (cursor === graphemes.length) {
-    if (column >= width) nextLine();
+    if (column >= contentWidth) nextLine();
     cursorRow = row;
     cursorColumn = column;
   }
@@ -804,15 +860,16 @@ function overlayLines(
     : wrapCells(`DETAIL  ${detail}`, innerWidth).slice(0, 2).map((text): RenderedLine => ({ text, role: "muted" }));
   const dividerCount = showRegions ? 2 + (detailLines.length > 0 ? 1 : 0) : 0;
   const contentRoom = Math.max(1, innerHeight - top.length - actions.length - detailLines.length - dividerCount);
+  const visibleRoom = Math.max(1, Math.min(contentRoom, overlay.maxVisible ?? contentRoom));
   const content: RenderedLine[] = [];
   if (overlay.items.length === 0) {
-    content.push(...wrapCells(` ${overlay.emptyMessage ?? "No matches"}`, innerWidth).slice(0, contentRoom).map((text) => ({
+    content.push(...wrapCells(` ${overlay.emptyMessage ?? "No matches"}`, innerWidth).slice(0, visibleRoom).map((text) => ({
       text,
       role: "muted" as const,
     })));
   } else {
-    const start = Math.max(0, Math.min(overlay.selected - contentRoom + 1, overlay.items.length - contentRoom));
-    for (const [offset, item] of overlay.items.slice(start, start + contentRoom).entries()) {
+    const start = Math.max(0, Math.min(overlay.selected - visibleRoom + 1, overlay.items.length - visibleRoom));
+    for (const [offset, item] of overlay.items.slice(start, start + visibleRoom).entries()) {
       const index = start + offset;
       const selected = index === overlay.selected;
       const { detail: _detail, ...labelItem } = item;
@@ -1044,8 +1101,14 @@ function activityText(view: TuiViewState): string | undefined {
   const now = Date.now();
   const elapsedSeconds = Math.max(0, now - activity.startedAt) / 1_000;
   const elapsed = elapsedSeconds < 10 ? `${elapsedSeconds.toFixed(1)}s` : `${Math.floor(elapsedSeconds)}s`;
-  const frames = ["|", "/", "-", "\\"];
-  const spinner = frames[(view.context.activityFrame ?? 0) % frames.length]!;
+  const configuredFrames = Array.isArray(view.workingIndicator?.frames)
+    ? view.workingIndicator.frames.filter((frame): frame is string => typeof frame === "string").slice(0, 32)
+    : [];
+  const frames = configuredFrames.length > 0 ? configuredFrames : ["|", "/", "-", "\\"];
+  const spinner = truncateCells(byteTruncate(
+    sanitizeTerminalText(frames[(view.context.activityFrame ?? 0) % frames.length]!).replaceAll("\n", " "),
+    64,
+  ), 16);
   const retry = activity.retryAt === undefined
     ? undefined
     : `retry in ${(Math.max(0, activity.retryAt - now) / 1_000).toFixed(1)}s${activity.attempt === undefined ? "" : ` (attempt ${activity.attempt})`}`;
@@ -1387,21 +1450,36 @@ export function renderFrame(
     hyperlinks?: boolean;
     resolveImage?: TranscriptRenderOptions["resolveImage"];
     maxImageRows?: number;
+    editorPaddingX?: number;
+    hideReasoningBlock?: boolean;
+    outputPad?: 0 | 1;
+    codeBlockIndent?: string;
+    imageWidthCells?: number;
   } = {},
 ): Frame {
   const width = frameDimension(size.columns, MAX_FRAME_COLUMNS, 80);
   const maximumHeight = frameDimension(size.rows, MAX_FRAME_ROWS, 24);
-  const footer = contextLines(view, width);
-  let extensionHeaderLines: RenderedLine[] = (view.context.extensionHeaders ?? []).slice(-4).flatMap((header) =>
-    wrapCells(header, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
-      text: ` ${line}`,
-      role: "accent" as const,
-    }))).slice(-4);
-  let extensionFooterLines: RenderedLine[] = (view.context.extensionFooters ?? []).slice(-4).flatMap((extensionFooter) =>
-    wrapCells(extensionFooter, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
-      text: ` ${line}`,
-      role: "muted" as const,
-    }))).slice(-4);
+  const footer = view.runtimeFooterReplacement === undefined ? contextLines(view, width) : [];
+  let extensionHeaderLines: RenderedLine[] = view.runtimeHeaderReplacement === undefined
+    ? [
+        ...(view.context.extensionHeaders ?? []).slice(-4).flatMap((header) =>
+          wrapCells(header, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
+            text: ` ${line}`,
+            role: "accent" as const,
+          }))),
+        ...structuralSlotLines(view.runtimeHeaderComponents, width, 8),
+      ].slice(-8)
+    : structuralLines(sanitizeRuntimeUiBlock(view.runtimeHeaderReplacement, { width, maxLines: 8 }), width)?.slice(-8) ?? [];
+  let extensionFooterLines: RenderedLine[] = view.runtimeFooterReplacement === undefined
+    ? [
+        ...(view.context.extensionFooters ?? []).slice(-4).flatMap((extensionFooter) =>
+          wrapCells(extensionFooter, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
+            text: ` ${line}`,
+            role: "muted" as const,
+          }))),
+        ...structuralSlotLines(view.runtimeFooterComponents, width, 8),
+      ].slice(-8)
+    : structuralLines(sanitizeRuntimeUiBlock(view.runtimeFooterReplacement, { width, maxLines: 8 }), width)?.slice(-8) ?? [];
   const editorWidth = Math.max(1, width - 1);
   const editorHeight = Math.min(6, Math.max(2, Math.floor(maximumHeight / 3)));
   const editor = structuralEditorBlock(view.editorBlock, editorWidth, editorHeight) ?? editorBlock(
@@ -1410,12 +1488,17 @@ export function renderFrame(
     view.inputLabel,
     editorWidth,
     editorHeight,
+    options.editorPaddingX ?? 0,
   );
-  const widgetLines: RenderedLine[] = (view.context.widgets ?? []).slice(-4).flatMap((widget) =>
-    wrapCells(widget, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
-      text: ` ${line}`,
-      role: "accent" as const,
-    })));
+  let widgetLines: RenderedLine[] = [
+    ...(view.context.widgets ?? []).slice(-4).flatMap((widget) =>
+      wrapCells(widget, Math.max(1, width - 2)).slice(0, 2).map((line) => ({
+        text: ` ${line}`,
+        role: "accent" as const,
+      }))),
+    ...structuralSlotLines(view.runtimeWidgetComponents, width, 8),
+  ].slice(-8);
+  let belowWidgetLines: RenderedLine[] = structuralSlotLines(view.runtimeWidgetBelowComponents, width, 8).slice(-8);
   const editorBorderRole: ThemeRole = view.context.thinking === undefined || view.context.thinking === "off"
     ? "accent"
     : view.context.thinking === "minimal" || view.context.thinking === "low"
@@ -1432,12 +1515,23 @@ export function renderFrame(
       }];
   const commandLines = view.overlay?.inline === true ? inlineCommandLines(view.overlay, width) : [];
   const selectorActive = view.overlay !== undefined && view.overlay.inline !== true;
+  const widgetBudget = Math.max(
+    0,
+    maximumHeight - footer.length - inputImageLines.length - editor.lines.length - commandLines.length - 3,
+  );
+  let widgetAboveBudget = Math.min(widgetLines.length, Math.ceil(widgetBudget / 2));
+  let widgetBelowBudget = Math.min(belowWidgetLines.length, widgetBudget - widgetAboveBudget);
+  widgetAboveBudget += Math.min(widgetLines.length - widgetAboveBudget, widgetBudget - widgetAboveBudget - widgetBelowBudget);
+  widgetBelowBudget += Math.min(belowWidgetLines.length - widgetBelowBudget, widgetBudget - widgetAboveBudget - widgetBelowBudget);
+  widgetLines = widgetAboveBudget === 0 ? [] : widgetLines.slice(-widgetAboveBudget);
+  belowWidgetLines = widgetBelowBudget === 0 ? [] : belowWidgetLines.slice(-widgetBelowBudget);
   const editorLines: RenderedLine[] = selectorActive ? [] : [
     ...widgetLines,
     { text: theme.glyphs.horizontal.repeat(width), role: editorBorderRole },
     ...inputImageLines,
     ...editor.lines,
     { text: theme.glyphs.horizontal.repeat(width), role: editorBorderRole },
+    ...belowWidgetLines,
     ...commandLines,
   ];
   const chromeBudget = Math.max(0, maximumHeight - footer.length - editorLines.length - 1);
@@ -1488,7 +1582,10 @@ export function renderFrame(
       });
     }
     const all = [
-      ...transcriptLines(view.transcript, width, theme, options.toolRenderBlocks, options.sessionRenderBlocks, false, true, options),
+      ...transcriptLines(view.transcript, width, theme, options.toolRenderBlocks, options.sessionRenderBlocks, false, true, {
+      ...options,
+      ...(view.hiddenReasoningLabel === undefined ? {} : { hiddenReasoningLabel: view.hiddenReasoningLabel }),
+      }),
       ...(view.notice === undefined
         ? []
         : [{

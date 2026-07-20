@@ -67,8 +67,8 @@ async function waitForFile(path, timeoutMs = 5_000) {
 
 test("release metadata policy matches the published package contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.2.0");
-  assert.equal(result.subpathCount, 19);
+  assert.equal(result.version, "0.3.0");
+  assert.equal(result.subpathCount, 21);
   assert.equal(result.targetCount, 6);
   assert.ok(result.actionCount >= 6);
 });

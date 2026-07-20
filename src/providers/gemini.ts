@@ -382,9 +382,13 @@ function buildGenerateContentBody(request: ProviderRequest, provider: ProviderId
   const generationConfig: Record<string, unknown> = {};
   if (request.maxOutputTokens !== undefined) generationConfig.maxOutputTokens = request.maxOutputTokens;
   if (request.reasoningEffort !== undefined) {
-    generationConfig.thinkingConfig =
-      request.reasoningEffort === "none"
-        ? { thinkingBudget: 0 }
+    const configuredBudget = request.reasoningEffort in (request.thinkingBudgets ?? {})
+      ? request.thinkingBudgets?.[request.reasoningEffort as keyof NonNullable<ProviderRequest["thinkingBudgets"]>]
+      : undefined;
+    generationConfig.thinkingConfig = request.reasoningEffort === "none" || request.reasoningEffort === "off"
+      ? { thinkingBudget: 0 }
+      : configuredBudget !== undefined && /^gemini-2\.5(?:-|$)/u.test(stripModelPrefix(request.model))
+        ? { thinkingBudget: configuredBudget }
         : { thinkingLevel: request.reasoningEffort.toUpperCase() };
   }
   if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;

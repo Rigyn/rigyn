@@ -52,6 +52,14 @@ test("built-in compatible providers resolve their documented environment credent
     "vercel-ai-gateway": "AI_GATEWAY_API_KEY",
     zai: "ZAI_API_KEY",
     "zai-coding-cn": "ZAI_CODING_CN_API_KEY",
+    "ant-ling": "ANT_LING_API_KEY",
+    nvidia: "NVIDIA_API_KEY",
+    xiaomi: "MIMO_API_KEY",
+    moonshotai: "MOONSHOT_API_KEY",
+    "moonshotai-cn": "MOONSHOT_API_KEY",
+    "xiaomi-token-plan-cn": "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+    "xiaomi-token-plan-ams": "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+    "xiaomi-token-plan-sgp": "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
     opencode: "OPENCODE_API_KEY",
     "opencode-go": "OPENCODE_API_KEY",
     "kimi-coding": "KIMI_API_KEY",
@@ -67,6 +75,18 @@ test("built-in compatible providers resolve their documented environment credent
     assert.equal(credential?.kind, "api_key");
     assert.equal(credential?.kind === "api_key" ? credential.apiKey : undefined, `fixture-${variable}`);
   }
+});
+
+test("Xiaomi prefers the documented environment variable and preserves its legacy alias", async () => {
+  const official = await new EnvironmentCredentialSource({
+    environment: { MIMO_API_KEY: "official-key", XIAOMI_API_KEY: "legacy-key" },
+  }).resolve({ provider: "xiaomi" });
+  assert.equal(official?.kind === "api_key" ? official.apiKey : undefined, "official-key");
+
+  const legacy = await new EnvironmentCredentialSource({
+    environment: { XIAOMI_API_KEY: "legacy-key" },
+  }).resolve({ provider: "xiaomi" });
+  assert.equal(legacy?.kind === "api_key" ? legacy.apiKey : undefined, "legacy-key");
 });
 
 test("ambient descriptors expose only presence hints", () => {

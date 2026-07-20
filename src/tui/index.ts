@@ -46,7 +46,13 @@ export {
   type RuntimeUiView,
 } from "./component-kit.js";
 export { TuiController, TuiSelectionCancelledError, DEFAULT_TUI_LIMITS } from "./controller.js";
-export { MultilineEditor, type EditorOptions, type EditorPasteSnapshot, type EditorSnapshot } from "./editor.js";
+export {
+  MultilineEditor,
+  type EditorOptions,
+  type EditorPasteSnapshot,
+  type EditorSnapshot,
+  type TuiEditorImplementation,
+} from "./editor.js";
 export { editTextExternally, parseEditorCommand } from "./external-editor.js";
 export { fuzzyScore, rankPickerItems } from "./fuzzy.js";
 export { KeyDecoder, type KeyEvent, type TerminalReply } from "./keys.js";
@@ -79,6 +85,20 @@ export {
 } from "./session-tree-picker.js";
 export { TuiModel } from "./model.js";
 export {
+  createNativeUiHost,
+  createUnsafeTerminalHost,
+  type NativeUiAutocompleteWrapper,
+  type NativeUiControllerBridge,
+  type NativeUiDisposer,
+  type NativeUiEditorWrapper,
+  type NativeUiHost,
+  type NativeUiInputHandler,
+  type NativeUiInputResult,
+  type UnsafeTerminalHost,
+  type UnsafeTerminalInputHandler,
+  type UnsafeTerminalInputResult,
+} from "./native-ui.js";
+export {
   DEFAULT_TERMINAL_CELL_DIMENSIONS,
   ITERM_IMAGE_CHUNK_BYTES,
   KITTY_IMAGE_CHUNK_BYTES,
@@ -107,17 +127,32 @@ export {
 } from "./terminal-image.js";
 export {
   createTheme,
+  parseAutomaticThemePair,
   parseThemeDefinition,
+  resolveThemeSetting,
   style,
   themeContrastDiagnostics,
   THEME_ROLES,
   THEME_SCHEMA_URI,
+  THEME_TOKENS,
   type Theme,
+  type AutomaticThemePair,
+  type ThemeColorValue,
   type ThemeContrastDiagnostic,
   type ThemeDefinition,
+  type ThemeExportDefinition,
   type ThemeRole,
   type ThemeStyleDefinition,
+  type ThemeToken,
 } from "./theme.js";
+export {
+  parseTerminalBackgroundReply,
+  parseTerminalColorSchemeReply,
+  terminalColorSchemeForRgb,
+  terminalColorSchemeFromEnvironment,
+  type TerminalColorScheme,
+  type TerminalRgbColor,
+} from "./terminal-colors.js";
 export { fileReferenceQuery, scanWorkspaceFiles, type WorkspaceFileScanOptions } from "./workspace-files.js";
 export {
   byteTruncate,
@@ -163,9 +198,13 @@ export type {
   TuiInputImageSummary,
   TuiLimits,
   TuiMode,
+  TuiNormalizedKeyObserver,
+  TuiOperatorPreferences,
   TuiOutput,
+  TuiPersistentComponentSlot,
   TuiSignalSource,
   TuiSettingItem,
   TuiThemeChange,
   TuiViewState,
+  TuiWorkingIndicatorOptions,
 } from "./types.js";

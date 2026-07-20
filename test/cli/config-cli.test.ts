@@ -104,6 +104,37 @@ test("typed config rejects unknown top-level keys", () => {
         baseUrl: "https://ai-gateway.vercel.sh/v1",
         profile: "vercel-ai-gateway",
       },
+      mimo: {
+        kind: "openai-compatible",
+        baseUrl: "https://api.xiaomimimo.com/v1",
+        profile: "xiaomi",
+      },
+      cloudflare: {
+        kind: "openai-compatible",
+        baseUrl: "https://gateway.example/v1",
+        profile: "cloudflare-ai-gateway",
+      },
+      messages: {
+        kind: "anthropic",
+        id: "messages",
+        credentialProvider: "messages",
+        baseUrl: "https://messages.example/v1",
+      },
+      "llama.cpp": {
+        kind: "llama-router",
+        id: "llama.cpp",
+        baseUrl: "https://router.example.test",
+        credentialProvider: "local-router-token",
+        timeoutMs: 2_500,
+      },
+      "company-gateway": {
+        kind: "gateway-messages",
+        gatewayUrl: "https://gateway.example.test/v1",
+        credentialProvider: "company-login",
+        cacheRetention: "long",
+        toolChoice: "auto",
+        temperature: 0.4,
+      },
     },
   });
   assert.equal(config.providers.local?.kind, "openai-compatible");
@@ -113,10 +144,120 @@ test("typed config rejects unknown top-level keys", () => {
     baseUrl: "https://ai-gateway.vercel.sh/v1",
     profile: "vercel-ai-gateway",
   });
+  assert.deepEqual(config.providers.mimo, {
+    kind: "openai-compatible",
+    id: "mimo",
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    profile: "xiaomi",
+  });
+  assert.deepEqual(config.providers.cloudflare, {
+    kind: "openai-compatible",
+    id: "cloudflare",
+    baseUrl: "https://gateway.example/v1",
+    profile: "cloudflare-ai-gateway",
+  });
+  assert.deepEqual(config.providers.messages, {
+    kind: "anthropic",
+    id: "messages",
+    credentialProvider: "messages",
+    baseUrl: "https://messages.example/v1",
+  });
+  assert.deepEqual(config.providers["llama.cpp"], {
+    kind: "llama-router",
+    id: "llama.cpp",
+    baseUrl: "https://router.example.test",
+    credentialProvider: "local-router-token",
+    timeoutMs: 2_500,
+  });
+  assert.deepEqual(config.providers["company-gateway"], {
+    kind: "gateway-messages",
+    id: "company-gateway",
+    gatewayUrl: "https://gateway.example.test/v1",
+    credentialProvider: "company-login",
+    cacheRetention: "long",
+    toolChoice: "auto",
+    temperature: 0.4,
+  });
+  assert.throws(() => parseHarnessConfig({
+    providers: { "llama.cpp": { kind: "llama-router", id: "llama.cpp", timeoutMs: 120_001 } },
+  }), /timeoutMs must not exceed 120000/u);
   assert.throws(() => parseHarnessConfig({
     providers: { custom: { kind: "openai-compatible", baseUrl: "https://example.test/v1", profile: "guess" } },
   }), /profile must be/u);
+  assert.throws(() => parseHarnessConfig({
+    providers: { gateway: { kind: "gateway-messages", gatewayUrl: "https://example.test/v1", temperature: 3 } },
+  }), /temperature must be between 0 and 2/u);
   assert.throws(() => parseHarnessConfig({ typo: true }), /unknown keys/u);
+});
+
+test("routed provider configuration requires exact adapters, protocols, and optional static metadata", () => {
+  const config = parseHarnessConfig({
+    providers: {
+      company: {
+        kind: "routed",
+        credentialProvider: "company-credential",
+        adapters: {
+          fast: { kind: "openai-compatible", baseUrl: "https://chat.example/v1" },
+          deep: { kind: "anthropic", baseUrl: "https://messages.example/v1" },
+        },
+        routes: [{
+          model: "fast-code",
+          upstreamModel: "upstream-fast",
+          adapter: "fast",
+          protocolFamily: "openai-chat-completions",
+          modelInfo: {
+            displayName: "Fast Code",
+            contextTokens: 131_072,
+            tools: true,
+            reasoningEfforts: ["off", "high"],
+          },
+        }, {
+          model: "deep-code",
+          adapter: "deep",
+          protocolFamily: "anthropic-messages",
+        }],
+      },
+    },
+  });
+  const routed = config.providers.company;
+  assert.equal(routed?.kind, "routed");
+  if (routed?.kind !== "routed") throw new Error("Expected routed provider configuration");
+  assert.equal(routed.id, "company");
+  assert.equal(routed.credentialProvider, "company-credential");
+  assert.equal(routed.routes[0]?.modelInfo?.displayName, "Fast Code");
+  assert.equal(routed.routes[0]?.modelInfo?.compatibility?.protocolFamily?.value, "openai-chat-completions");
+  assert.throws(() => parseHarnessConfig({
+    providers: {
+      company: {
+        kind: "routed",
+        adapters: { nested: { kind: "routed", adapters: {}, routes: [] } },
+        routes: [{ model: "bad", adapter: "nested", protocolFamily: "openai-responses" }],
+      },
+    },
+  }), /cannot contain a nested routed provider/u);
+  assert.throws(() => parseHarnessConfig({
+    providers: {
+      company: {
+        kind: "routed",
+        adapters: { fast: { kind: "openai-compatible", baseUrl: "https://chat.example/v1" } },
+        routes: [{ model: "bad", adapter: "fast", protocolFamily: "guessed-protocol" }],
+      },
+    },
+  }), /protocolFamily is unsupported/u);
+  assert.throws(() => parseHarnessConfig({
+    providers: {
+      company: {
+        kind: "routed",
+        adapters: { fast: { kind: "openai-compatible", baseUrl: "https://chat.example/v1" } },
+        routes: [{
+          model: "bad",
+          adapter: "fast",
+          protocolFamily: "openai-chat-completions",
+          modelInfo: { id: "shadowed-id" },
+        }],
+      },
+    },
+  }), /modelInfo contains unknown keys: id/u);
 });
 
 test("declarative model metadata is exact, bounded, and closed", () => {
@@ -233,6 +374,33 @@ test("package-manager commands are bounded argv arrays and never shell strings",
   assert.throws(() => parseHarnessConfig({ gitCommand: ["git", "bad\0argument"] }), /1 through 32/u);
 });
 
+test("external credential helpers are bounded argv configurations with an explicit environment allowlist", () => {
+  const configured = parseHarnessConfig({
+    credentialCommands: {
+      company: {
+        argv: [process.execPath, "/opt/company/credential-helper.mjs"],
+        environment: ["COMPANY_PROFILE", "COMPANY_REGION"],
+        timeoutMs: 5_000,
+        maxOutputBytes: 8_192,
+        cacheTtlMs: 120_000,
+      },
+    },
+  });
+  assert.deepEqual(configured.credentialCommands.company, {
+    argv: [process.execPath, "/opt/company/credential-helper.mjs"],
+    environment: ["COMPANY_PROFILE", "COMPANY_REGION"],
+    timeoutMs: 5_000,
+    maxOutputBytes: 8_192,
+    cacheTtlMs: 120_000,
+  });
+  assert.deepEqual(parseHarnessConfig({}).credentialCommands, {});
+  assert.throws(() => parseHarnessConfig({ credentialCommands: { company: { argv: [] } } }), /1 through 32/u);
+  assert.throws(() => parseHarnessConfig({ credentialCommands: { company: { argv: [process.execPath], environment: ["BAD-NAME"] } } }), /environment/u);
+  assert.throws(() => parseHarnessConfig({ credentialCommands: { company: { argv: [process.execPath], timeoutMs: 60_001 } } }), /must not exceed 60000/u);
+  assert.throws(() => parseHarnessConfig({ credentialCommands: { company: { argv: [process.execPath], cacheTtlMs: 3_600_001 } } }), /must not exceed 3600000/u);
+  assert.throws(() => parseHarnessConfig({ credentialCommands: { company: { argv: [process.execPath], shell: true } } }), /unknown keys/u);
+});
+
 test("automatic compaction controls are typed, bounded, and have conservative defaults", () => {
   const defaults = parseHarnessConfig({});
   assert.equal(defaults.autoCompaction, true);
@@ -328,6 +496,7 @@ test("Anthropic prompt caching is configurable and strict", () => {
       anthropic: {
         promptCache: "1h",
         deferredToolLoading: true,
+        eagerToolInputStreaming: false,
         thinking: {
           budgets: { low: 2048, high: 16_384 },
           models: {
@@ -346,6 +515,7 @@ test("Anthropic prompt caching is configurable and strict", () => {
     kind: "anthropic",
     promptCache: "1h",
     deferredToolLoading: true,
+    eagerToolInputStreaming: false,
     thinking: {
       budgets: { low: 2048, high: 16_384 },
       models: {
@@ -365,6 +535,10 @@ test("Anthropic prompt caching is configurable and strict", () => {
   assert.throws(
     () => parseHarnessConfig({ providers: { anthropic: { deferredToolLoading: "yes" } } }),
     /deferredToolLoading must be a boolean/u,
+  );
+  assert.throws(
+    () => parseHarnessConfig({ providers: { anthropic: { eagerToolInputStreaming: "yes" } } }),
+    /eagerToolInputStreaming must be a boolean/u,
   );
   assert.throws(
     () => parseHarnessConfig({ providers: { anthropic: { thinking: { budgets: { low: 1023 } } } } }),
@@ -539,14 +713,16 @@ test("HTTP transport proxy and timeout settings are typed and bounded", () => {
 
 test("provider retry policy is configurable and remains replay-safe by default", () => {
   assert.deepEqual(parseHarnessConfig({}).providerRetry, {
+    enabled: true,
     maxAttempts: 3,
     baseDelayMs: 500,
     maxDelayMs: 30_000,
     jitter: 0.2,
   });
   assert.deepEqual(parseHarnessConfig({
-    providerRetry: { maxAttempts: 5, baseDelayMs: 1_000, maxDelayMs: 60_000, jitter: 0 },
+    providerRetry: { enabled: false, maxAttempts: 5, baseDelayMs: 1_000, maxDelayMs: 60_000, jitter: 0 },
   }).providerRetry, {
+    enabled: false,
     maxAttempts: 5,
     baseDelayMs: 1_000,
     maxDelayMs: 60_000,
@@ -555,6 +731,7 @@ test("provider retry policy is configurable and remains replay-safe by default",
   assert.throws(() => parseHarnessConfig({ providerRetry: { maxAttempts: 11 } }), /must not exceed 10/u);
   assert.throws(() => parseHarnessConfig({ providerRetry: { baseDelayMs: 10, maxDelayMs: 1 } }), /must not exceed maxDelayMs/u);
   assert.throws(() => parseHarnessConfig({ providerRetry: { jitter: 1.1 } }), /from 0 through 1/u);
+  assert.throws(() => parseHarnessConfig({ providerRetry: { enabled: "sometimes" } }), /must be a boolean/u);
 });
 
 test("public OAuth registrations are typed, bounded, and never accept client secrets", () => {
@@ -645,4 +822,89 @@ test("trust store canonicalizes workspaces and persists explicit decisions", asy
   await store.untrust(root);
   assert.equal(await store.isTrusted(root), false);
   assert.equal(await store.decision(root), undefined);
+});
+
+test("operator preferences have stable defaults and reject invalid values", () => {
+  const defaults = parseHarnessConfig({});
+  assert.deepEqual({
+    quietStartup: defaults.quietStartup,
+    hideThinkingBlock: defaults.hideThinkingBlock,
+    treeFilterMode: defaults.treeFilterMode,
+    editorPaddingX: defaults.editorPaddingX,
+    outputPad: defaults.outputPad,
+    showHardwareCursor: defaults.showHardwareCursor,
+    terminal: defaults.terminal,
+    markdown: defaults.markdown,
+    branchSummary: defaults.branchSummary,
+  }, {
+    quietStartup: false,
+    hideThinkingBlock: false,
+    treeFilterMode: "default",
+    editorPaddingX: 0,
+    outputPad: 0,
+    showHardwareCursor: true,
+    terminal: { showImages: true, imageWidthCells: 80, clearOnShrink: false },
+    markdown: { codeBlockIndent: "" },
+    branchSummary: { reserveTokens: 16_384, skipPrompt: false },
+  });
+  const configured = parseHarnessConfig({
+    quietStartup: true,
+    hideThinkingBlock: true,
+    externalEditor: "code --wait",
+    treeFilterMode: "labeled-only",
+    editorPaddingX: 2,
+    outputPad: 1,
+    autocompleteMaxVisible: 7,
+    showHardwareCursor: false,
+    terminal: { showImages: false, imageWidthCells: 60, clearOnShrink: true },
+    markdown: { codeBlockIndent: "  " },
+    branchSummary: { skipPrompt: true },
+    shellCommandPrefix: "source ~/.profile",
+  });
+  assert.equal(configured.autocompleteMaxVisible, 7);
+  assert.equal(configured.shellCommandPrefix, "source ~/.profile");
+  assert.throws(() => parseHarnessConfig({ externalEditor: "code 'unfinished" }), /externalEditor contains an unfinished quote/u);
+  assert.throws(() => parseHarnessConfig({ outputPad: 2 }), /outputPad must be 0 or 1/u);
+  assert.throws(() => parseHarnessConfig({ terminal: { imageWidthCells: 0 } }), /integer >= 1/u);
+  assert.throws(() => parseHarnessConfig({ markdown: { codeBlockIndent: "\t" } }), /zero through eight spaces/u);
+});
+
+test("operator runtime controls are complete, bounded, and independently configurable", () => {
+  const defaults = parseHarnessConfig({});
+  assert.deepEqual(defaults.compaction, { reserveTokens: 16_384, keepRecentTokens: 20_000 });
+  assert.deepEqual(defaults.images, { autoResize: true });
+  assert.equal(defaults.enableSkillCommands, true);
+  assert.equal(defaults.showCacheMissNotices, false);
+  assert.deepEqual(defaults.warnings, { anthropicExtraUsage: true });
+  assert.equal(defaults.thinkingBudgets, undefined);
+  assert.deepEqual(defaults.promptRoots, []);
+  assert.deepEqual(defaults.themeRoots, []);
+
+  const configured = parseHarnessConfig({
+    compaction: { reserveTokens: 8_192, keepRecentTokens: 12_000 },
+    branchSummary: { reserveTokens: 4_096, skipPrompt: true },
+    images: { autoResize: false },
+    enableSkillCommands: false,
+    showCacheMissNotices: true,
+    warnings: { anthropicExtraUsage: false },
+    thinkingBudgets: { minimal: 512, low: 1_024, medium: 4_096, high: 16_384 },
+    promptRoots: ["~/prompts", "./shared/*.md"],
+    themeRoots: ["~/themes", "./shared/*.json"],
+  });
+  assert.deepEqual(configured.compaction, { reserveTokens: 8_192, keepRecentTokens: 12_000 });
+  assert.deepEqual(configured.branchSummary, { reserveTokens: 4_096, skipPrompt: true });
+  assert.deepEqual(configured.images, { autoResize: false });
+  assert.equal(configured.enableSkillCommands, false);
+  assert.equal(configured.showCacheMissNotices, true);
+  assert.deepEqual(configured.warnings, { anthropicExtraUsage: false });
+  assert.deepEqual(configured.thinkingBudgets, { minimal: 512, low: 1_024, medium: 4_096, high: 16_384 });
+  assert.deepEqual(configured.promptRoots, ["~/prompts", "./shared/*.md"]);
+  assert.deepEqual(configured.themeRoots, ["~/themes", "./shared/*.json"]);
+
+  assert.throws(() => parseHarnessConfig({ compaction: { reserveTokens: 0 } }), /integer >= 1/u);
+  assert.throws(() => parseHarnessConfig({ branchSummary: { reserveTokens: 0 } }), /integer >= 1/u);
+  assert.throws(() => parseHarnessConfig({ images: { autoResize: "yes" } }), /must be a boolean/u);
+  assert.throws(() => parseHarnessConfig({ thinkingBudgets: { high: 1_000_001 } }), /must not exceed 1000000/u);
+  assert.throws(() => parseHarnessConfig({ promptRoots: Array.from({ length: 33 }, (_, index) => `p${index}`) }), /at most 32/u);
+  assert.throws(() => parseHarnessConfig({ themeRoots: ["bad\0root"] }), /at most 32/u);
 });

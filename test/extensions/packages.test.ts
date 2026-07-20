@@ -42,7 +42,7 @@ async function writeReferencePackage(root: string, options: FixtureOptions): Pro
   await mkdir(join(root, "skills", "reference-skill"), { recursive: true });
   await mkdir(join(root, "templates"), { recursive: true });
   await mkdir(join(root, "themes"), { recursive: true });
-  await writeFile(join(root, "runtime", "index.mjs"), `await import("node:fs/promises").then(({ writeFile }) => writeFile(${JSON.stringify(join(root, "runtime-executed"))}, "bad"));\n`);
+  await writeFile(join(root, "runtime", "index.mjs"), `export default async (api) => { await import("node:fs/promises").then(({ writeFile }) => writeFile(api.workspace + "/runtime-executed", "ok")); };\n`);
   await writeFile(join(root, "skills", "reference-skill", "SKILL.md"), `---\nname: reference-skill\ndescription: ${options.word} skill\n---\n${options.word} instructions\n`);
   await writeFile(join(root, "templates", "prompt.md"), `${options.word} prompt {{input}}\n`);
   await writeFile(join(root, "templates", "command.md"), `${options.word} command {{args}}\n`);

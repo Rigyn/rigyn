@@ -9,6 +9,8 @@ export interface WorkspacePromptFiles {
 
 export interface WorkspacePromptFileDiscoveryOptions {
   includeSystemPrompt?: boolean;
+  /** Trusted user-level prompt files stored directly in this directory. */
+  globalDirectory?: string;
 }
 
 export async function discoverWorkspacePromptFiles(
@@ -16,16 +18,40 @@ export async function discoverWorkspacePromptFiles(
   trusted: boolean,
   options: WorkspacePromptFileDiscoveryOptions = {},
 ): Promise<WorkspacePromptFiles> {
-  if (!trusted) return {};
-  const boundary = await WorkspaceBoundary.create(workspaceRoot);
+  const boundary = trusted ? await WorkspaceBoundary.create(workspaceRoot) : undefined;
+  let globalBoundary: WorkspaceBoundary | undefined;
+  if (options.globalDirectory !== undefined) {
+    try {
+      globalBoundary = await WorkspaceBoundary.create(options.globalDirectory);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+  }
   const systemPrompt = options.includeSystemPrompt === false
     ? undefined
-    : await optionalPromptFile(boundary, ".rigyn/SYSTEM.md");
-  const appendSystemPrompt = await optionalPromptFile(boundary, ".rigyn/APPEND_SYSTEM.md");
+    : await firstPromptFile([
+        ...(boundary === undefined ? [] : [{ boundary, path: ".rigyn/SYSTEM.md" }]),
+        ...(globalBoundary === undefined ? [] : [{ boundary: globalBoundary, path: "SYSTEM.md" }]),
+      ]);
+  const appendSystemPrompt = await firstPromptFile([
+    ...(boundary === undefined ? [] : [{ boundary, path: ".rigyn/APPEND_SYSTEM.md" }]),
+    ...(globalBoundary === undefined ? [] : [{ boundary: globalBoundary, path: "APPEND_SYSTEM.md" }]),
+  ]);
   return {
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
     ...(appendSystemPrompt === undefined ? {} : { appendSystemPrompt: [appendSystemPrompt] }),
   };
+}
+
+async function firstPromptFile(
+  candidates: ReadonlyArray<{ boundary: WorkspaceBoundary; path: string }>,
+): Promise<{ text: string; source: string } | undefined> {
+  for (const candidate of candidates) {
+    const result = await optionalPromptFile(candidate.boundary, candidate.path);
+    if (result !== undefined) return result;
+  }
+  return undefined;
 }
 
 async function optionalPromptFile(

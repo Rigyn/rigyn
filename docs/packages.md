@@ -13,6 +13,7 @@ The repository examples below are protocol references, not preinstalled optional
 | Example | What it demonstrates | Network or credential requirement |
 | --- | --- | --- |
 | [Package starter](../examples/package-starter/README.md) | Minimal manifest, runtime entry, slash command, and startup status | None |
+| [Advanced UI](../examples/advanced-ui/README.md) | Permission-gated structural chrome, working presentation, tool expansion, and non-consuming key observation | None |
 | [Custom tool](../examples/custom-tool/README.md) | Narrow tool schema and deterministic model-visible observation | None |
 | [Custom provider](../examples/custom-provider/README.md) | Provider-neutral streaming adapter and model catalog | None |
 | [Brokered provider](../examples/brokered-provider/README.md) | Exact-origin authenticated requests without exposing credentials | Provider API when adapted |
@@ -23,6 +24,14 @@ The repository examples below are protocol references, not preinstalled optional
 | [Dynamic tools](../examples/dynamic-tools/README.md) | Session-local active-tool loader applied at provider-turn boundaries | None |
 | [MCP stdio](../examples/mcp-stdio/README.md) | Fixed external MCP process, protocol handshake, bounds, cancellation, and disposal | Local child process |
 | [Child coordinator](../examples/child-coordinator/README.md) | Parallel in-process child runs, native progress, settled results, and cancellation | Configured model provider |
+| [Child specialist](../examples/child-specialist/README.md) | Child-specific replacement or appended instructions with an explicit read-only tool allowlist | Configured model provider |
+| [Paged memory](../examples/paged-memory/README.md) | Namespaced durable messages and opaque backward pagination | None |
+| [Session analytics](../examples/session-analytics/README.md) | Durable token, cache, cost, and duration aggregates | None |
+| [Provider lifecycle](../examples/provider-lifecycle/README.md) | Ownership-scoped provider registration and awaited live disposal | None |
+| [Resource discovery](../examples/resource-discovery/README.md) | Unified command, prompt, and skill metadata | None |
+| [Prompt inspector](../examples/prompt-inspector/README.md) | Metadata-only use of a redacted system-prompt snapshot | None |
+| [Review workflow](../examples/review-workflow/README.md) | Tool-driven child review with bounded durable completion state | Configured model provider |
+| [Session tools](../examples/session-tools/README.md) | Workspace-scoped session listing, transcript paging, and naming | None |
 | [Approval gate](../examples/approval-gate/README.md) | Native confirmation with a fixed workspace action and headless fail-closed behavior | One fixed workspace file |
 | [Reference package](../examples/reference-package/README.md) | Integrated tool, provider, command, shortcut, flag, events, state, skill, prompt, and theme | None |
 | [Shared events](../examples/shared-events/README.md) | Bounded JSON coordination between two in-process runtime entries | None |
@@ -101,7 +110,7 @@ rigyn packages update NAME      # intentionally resolve selected declarations
 rigyn packages reconcile        # install only the existing immutable lock
 ```
 
-`update` resolves sources in private staging, validates manifests and host compatibility, records exact npm versions plus archive digests, exact Git revisions, local/source content digests, and manifest digests in `.rigyn/packages.lock.json`, then commits the installed set and lock with rollback. A partial update reuses a lock entry only when that entry's declaration is byte-for-byte canonical-equivalent; new or changed unrelated declarations require their own update or `--all`.
+`update` resolves sources in private staging, validates manifests and host compatibility, records exact npm versions plus archive digests, exact Git revisions, local/source content digests, and manifest digests in `.rigyn/packages.lock.json`, then commits the installed set and lock with rollback. Before any install directory or project lock is replaced, every enabled runtime entry must load and activate successfully both as an individual package and as the complete filtered project generation in a disposable candidate host. Disabled runtime resource keys are not imported by this check. The candidate host has private temporary workspace and data roots, no live session handler, a bounded 30-second activation window, and guaranteed disposal. An activation exception, timeout, cross-package diagnostic, or cleanup failure rejects the transaction; a prior installed version, declaration, and lock remain unchanged. A partial update reuses a lock entry only when that entry's declaration is byte-for-byte canonical-equivalent; new or changed unrelated declarations require their own update or `--all`.
 
 Normal startup and `/reload` reconcile a trusted declaration only from its existing lock. A healthy installed copy is left untouched, so local edits, tags, ranges, and branches are never followed implicitly. A missing or changed installed copy is rebuilt from the exact locked npm version or Git revision and verified against its digests; a changed local source fails closed until an intentional update. The complete declarative set lives under `.rigyn/packages`, separate from imperative project installs under `.rigyn/extensions`, and is swapped atomically. Interrupted transactions recover the old set unless the new lock was durably committed.
 
@@ -122,6 +131,8 @@ themes/       JSON theme definitions
 
 Convention runtime discovery excludes TypeScript declaration files (`.d.ts` and `.d.mts`). It loads direct files under `extensions/` and, for each immediate child directory, the first available `index.ts`, `index.mts`, `index.js`, or `index.mjs` in that order. Other immediate-child helpers and deeper files are libraries, not independent extensions. Declare an exact file or explicit `rigyn.extensions` glob when a nested file is intentionally an activation entry. Handwritten manifests reject declaration files as runtime entries too.
 
+Convention discovery skips hidden resource paths and honors hierarchical `.gitignore`, `.ignore`, and `.fdignore` files, including later negations. This keeps a local or Git install's generated manifest aligned with the package author's file-selection rules; an explicit handwritten `extension.json` remains authoritative.
+
 Use `rigyn` when the packed artifact needs explicit paths, globs, exclusions, or a host compatibility range:
 
 ```json
@@ -131,21 +142,23 @@ Use `rigyn` when the packed artifact needs explicit paths, globs, exclusions, or
   "type": "module",
   "files": ["dist", "skills", "prompts"],
   "rigyn": {
-    "hostVersion": ">=0.1.0 <0.3.0",
+    "hostVersion": ">=0.1.0 <0.4.0",
     "extensions": ["dist/extensions"],
     "skills": ["skills", "!skills/internal/**"],
     "prompts": ["prompts/*.md"],
     "themes": []
   },
   "peerDependencies": {
-    "rigyn": ">=0.1.0 <0.3.0"
+    "rigyn": ">=0.1.0 <0.4.0"
   }
 }
 ```
 
 The only accepted `rigyn` keys are `extensions`, `skills`, `prompts`, `themes`, and `hostVersion`; unknown keys fail installation. Resource fields are arrays of package-relative paths or globs and are applied sequentially. `!` or `-` removes matches selected earlier and `+` explicitly adds them again. Exact directory removals prune the whole selected subtree. Paths cannot be absolute or escape the package root. Declaring a field replaces discovery for that resource type, so an empty array intentionally disables it. Runtime selection accepts only executable JavaScript or TypeScript entries. Skill directory additions select direct root Markdown skills and recursively discovered `SKILL.md` roots; later file, glob, or directory exclusions remove those concrete candidates before the generated manifest is activated. Prompts accept Markdown, and themes accept validated JSON definitions.
 
-Runtime modules receive the host API during activation and must not bundle a separate Rigyn runtime. Managed packages may value-import the exact host-owned modules `rigyn/extensions`, `rigyn/providers`, and `rigyn/tui`; Rigyn maps those specifiers to the active host for supported ESM, scoped TypeScript, and CommonJS runtime entries. The root package and all other `rigyn/*` subpaths are intentionally unavailable from managed runtime code. Keep `rigyn` as a development and peer dependency for declarations and local authoring, not as a production dependency or nested runtime copy. Publish compiled JavaScript unless the documented scoped TypeScript transform is sufficient. Always inspect `npm pack --dry-run` and test the exact archive: files omitted by `files` or `.npmignore` do not exist after installation.
+Runtime modules receive the host API during activation and must not bundle a separate Rigyn runtime. Managed packages may value-import these exact host-owned modules: `rigyn/context`, `rigyn/core`, `rigyn/extensions`, `rigyn/images`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/testing`, `rigyn/tools`, and `rigyn/tui`. Rigyn maps those specifiers to the active host for supported ESM, scoped TypeScript, and CommonJS runtime entries. The root package and every unlisted or deeper `rigyn/*` subpath are intentionally unavailable from managed runtime code. Keep `rigyn` as a development and peer dependency for declarations and local authoring, not as a production dependency or nested runtime copy. Publish compiled JavaScript unless the documented scoped TypeScript transform is sufficient. Always inspect `npm pack --dry-run` and test the exact archive: files omitted by `files` or `.npmignore` do not exist after installation.
+
+A package using a privileged API must declare its exact manifest permission and must be accepted by the trusted local or managed-package policy. Available permissions are `advancedUi`, `nativeUi`, `unsafeTerminal`, `providerOverride`, `providerWire`, `credentialAccess`, `sessionRaw`, and `hostConfiguration`. The ordinary runtime API needs none of them. Permissions are generation-owned and do not make untrusted project code executable. Treat native UI, raw terminal access, provider transport, raw credentials/session data, and host configuration as security-review boundaries; do not request them for presentation or convenience. Start structural UI work from [`examples/advanced-ui`](../examples/advanced-ui/README.md), use [`examples/trusted-native-host`](../examples/trusted-native-host/README.md) only when a reviewed package genuinely needs privileged host authority, and review [the authentication threat model](extension-auth-threat-model.md) before granting provider authority.
 
 Runtime modules that need durable files use the host-created `api.dataPaths.user` or `api.dataPaths.workspace` directory. Installed builds keep these roots under harness state rather than inside the package, so an upgrade cannot overwrite them. Package removal currently leaves owned data intact for a later reinstall; remove it explicitly only as a separate user-approved data operation. These paths are not a credential store.
 
@@ -191,7 +204,7 @@ Deliberate interoperability limits are explicit: Git submodules and Git LFS are 
 
   ```json
   {
-    "compatibility": { "hostVersion": ">=0.1.0 <0.3.0" }
+    "compatibility": { "hostVersion": ">=0.1.0 <0.4.0" }
   }
   ```
 
@@ -217,7 +230,7 @@ Integrity detects changed bytes; it does not prove who authored a package. Manag
 
 ## Trust checklist
 
-Runtime extensions are ordinary trusted Node.js modules. They have the invoking user's filesystem, process, environment, and network access; the runtime API is an authoring contract, not a sandbox. Provider credentials remain behind the host-owned `api.auth.fetch` request broker and are not returned to extension code. Host validation and redaction reduce accidental disclosure through harness-managed output and persistence, but they cannot contain malicious extension code or prevent it from reading other data available to the invoking process. Before installation:
+Runtime extensions are ordinary trusted Node.js modules. They have the invoking user's filesystem, process, environment, and network access; the runtime API is an authoring contract, not a sandbox. Provider credentials remain behind the host-owned `api.auth.fetch` request broker for ordinary extensions. A separately reviewed package can explicitly request `credentialAccess` or provider-wire authority, which makes access credentials, managed provider refresh callbacks, or transport mutation normal extension values. Host validation and redaction reduce accidental disclosure through harness-managed output and persistence, but they cannot contain malicious extension code or prevent it from reading other data available to the invoking process. Before installation:
 
 1. Read `extension.json`, every runtime entry, and production dependency declaration. Before using `--allow-scripts`, also inspect the resolved dependency lifecycle scripts and native build chain.
 2. Confirm that tool schemas are closed and narrow, commands use argv execution rather than shell interpolation, and outputs are bounded.
@@ -225,7 +238,7 @@ Runtime extensions are ordinary trusted Node.js modules. They have the invoking 
 4. Confirm that durable entries use only the extension namespace and that renderers depend on stored data rather than process memory.
 5. Run the package's offline tests, install it in a disposable user or project scope, exercise failure and cancellation paths, and inspect `rigyn extensions doctor`.
 
-Project runtime code remains blocked until the workspace is trusted. User and explicit runtime extensions are trusted by the person loading them. Production dependencies execute as code too, so fewer dependencies reduce review and supply-chain surface.
+Project runtime code remains blocked until the workspace is trusted. User and explicit `--extension` runtime entries may return the bounded `project_trust` decision documented in [Runtime extension events](extension-events.md); project entries cannot participate in their own approval, and the same pre-trust generation is retained if project entries are appended. User and explicit runtime extensions are trusted by the person loading them. Production dependencies execute as code too, so fewer dependencies reduce review and supply-chain surface.
 
 ## Release checklist
 

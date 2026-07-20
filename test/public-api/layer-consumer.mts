@@ -54,9 +54,13 @@ import {
 } from "rigyn/providers";
 import {
   buildHarnessResourceCatalog,
+  createProviderAdapter,
   HarnessService,
+  runtimeProviderId,
+  runtimeProviderProtocolFamily,
   type HarnessOptions,
   type HarnessResourceCatalog,
+  type RuntimeRoutedProviderConfig,
 } from "rigyn/service";
 import {
   SessionStore,
@@ -86,6 +90,17 @@ const stackOptions = { gap: 1, maxLines: 5 } satisfies RuntimeUiStackOptions;
 const panelOptions = { title: "Consumer", padding: 1 } satisfies RuntimeUiPanelOptions;
 const rigynRpcOptions = { args: ["--workspace", process.cwd()] } satisfies SpawnRigynRpcClientOptions;
 void rigynRpcOptions;
+const routedProviderConfig = {
+  kind: "routed",
+  id: "consumer-router",
+  adapters: {
+    chat: { kind: "openai-compatible", baseUrl: "https://example.test/v1" },
+  },
+  routes: [{ model: "code", adapter: "chat", protocolFamily: "openai-chat-completions" }],
+} satisfies RuntimeRoutedProviderConfig;
+void runtimeProviderId(routedProviderConfig);
+void runtimeProviderProtocolFamily(routedProviderConfig.adapters.chat);
+void createProviderAdapter;
 const componentKitView: RuntimeUiView = uiPanel(uiStack([
   uiText("ready", textOptions),
   uiMarkdown("**public** view", markdownOptions),
@@ -138,7 +153,21 @@ export interface LayerConsumerContracts {
   core: ProviderAdapter & { childRuns?: ChildRunPolicy };
   extensions: ExtensionBundle;
   images: ClipboardImage;
-  interfaces: RpcRequest & { methods?: RpcMethodMap; notifications?: RpcNotificationMap };
+  interfaces: RpcRequest & {
+    methods?: RpcMethodMap;
+    notifications?: RpcNotificationMap;
+    client?: Pick<RpcClient,
+      | "currentSession"
+      | "newSession"
+      | "switchSession"
+      | "cloneSession"
+      | "forkSession"
+      | "forkMessages"
+      | "cycleModel"
+      | "cycleThinking"
+      | "setAutoCompaction"
+    >;
+  };
   net: NetworkTransport;
   process: ProcessRunner;
   providers: ModelCatalogStatus;

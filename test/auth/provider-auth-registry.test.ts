@@ -11,6 +11,7 @@ import {
   type ProviderAuthDescriptor,
 } from "../../src/auth/index.js";
 import { runtimeProviderAuthBinding } from "../../src/cli/runtime.js";
+import { XAI_OAUTH_REGISTRATION, XAI_OAUTH_REGISTRATION_ID } from "../../src/auth/xai.js";
 
 class MemoryCredentialStore implements CredentialStore {
   readonly values = new Map<string, AuthCredential>();
@@ -31,6 +32,19 @@ class MemoryCredentialStore implements CredentialStore {
     return operation();
   }
 }
+
+test("xAI's built-in subscription registration remains a device method alongside API keys", () => {
+  const registry = new ProviderAuthRegistry({
+    bindings: [{ providerId: "xai", credentialId: "xai", displayName: "xAI", secret: "api_key" }],
+    registrations: { [XAI_OAUTH_REGISTRATION_ID]: XAI_OAUTH_REGISTRATION },
+    store: new MemoryCredentialStore(),
+    environment: {},
+  });
+  const methods = registry.methods("xai");
+  assert.equal(methods.find((method) => method.kind === "oauth")?.label, "Sign in with SuperGrok or X Premium");
+  assert.ok(methods.some((method) => method.kind === "environment"));
+  assert.ok(methods.some((method) => method.kind === "api_key"));
+});
 
 test("provider auth state is secret-free and stored credentials intentionally shadow environment credentials", async () => {
   const store = new MemoryCredentialStore();
@@ -76,6 +90,24 @@ test("provider auth state is secret-free and stored credentials intentionally sh
   assert.equal(logout.state.environment.active, true);
 });
 
+test("provider auth state identifies the selected Xiaomi environment alias", async () => {
+  const registry = new ProviderAuthRegistry({
+    bindings: [{ providerId: "xiaomi", credentialId: "xiaomi", displayName: "Xiaomi MiMo", secret: "api_key" }],
+    store: new MemoryCredentialStore(),
+    environment: { XIAOMI_API_KEY: "legacy-secret" },
+  });
+
+  const state = await registry.state("xiaomi");
+  assert.equal(state.status, "connected");
+  assert.equal(state.source, "environment");
+  assert.equal(state.environment.variable, "XIAOMI_API_KEY");
+  assert.equal(state.environmentVariable, "XIAOMI_API_KEY");
+  const method = state.methods.find((entry) => entry.kind === "environment");
+  assert.equal(method?.kind === "environment" ? method.variable : undefined, "MIMO_API_KEY");
+  assert.equal(method?.detail, "MIMO_API_KEY or XIAOMI_API_KEY");
+  assert.doesNotMatch(JSON.stringify(state), /legacy-secret/u);
+});
+
 test("an unusable stored credential remains the selected source instead of silently changing accounts", async () => {
   const store = new MemoryCredentialStore();
   store.values.set("openai", {
@@ -99,7 +131,7 @@ test("an unusable stored credential remains the selected source instead of silen
   assert.match(state.error ?? "", /expired/u);
 });
 
-test("runtime auth bindings cover aliases, cloud bearer sources, local and remote Ollama", () => {
+test("runtime auth bindings cover aliases, cloud bearer sources, and local or remote model servers", () => {
   assert.deepEqual(runtimeProviderAuthBinding("openai-codex", { kind: "openai-codex" }, "openai-codex"), {
     providerId: "openai-codex",
     credentialId: "openai-codex",
@@ -115,6 +147,20 @@ test("runtime auth bindings cover aliases, cloud bearer sources, local and remot
     providerId: "corp",
     credentialId: "shared-account",
     displayName: "corp",
+    secret: "api_key",
+  });
+  assert.deepEqual(runtimeProviderAuthBinding("company-router", {
+    kind: "routed",
+    id: "company-router",
+    credentialProvider: "shared-router-account",
+    adapters: {
+      chat: { kind: "openai-compatible", baseUrl: "https://models.example.test/v1" },
+    },
+    routes: [{ model: "code", adapter: "chat", protocolFamily: "openai-chat-completions" }],
+  }, "company-router"), {
+    providerId: "company-router",
+    credentialId: "shared-router-account",
+    displayName: "company-router",
     secret: "api_key",
   });
   assert.deepEqual(runtimeProviderAuthBinding("bedrock", { kind: "bedrock", region: "us-east-1" }, "bedrock"), {
@@ -158,6 +204,26 @@ test("runtime auth bindings cover aliases, cloud bearer sources, local and remot
     displayName: "Ollama",
     secret: "bearer",
   });
+  assert.deepEqual(runtimeProviderAuthBinding("llama.cpp", {
+    kind: "llama-router",
+    id: "llama.cpp",
+    baseUrl: "http://127.0.0.1:8080",
+  }, "llama.cpp"), {
+    providerId: "llama.cpp",
+    credentialId: "llama.cpp",
+    displayName: "llama.cpp Router",
+    local: true,
+  });
+  assert.deepEqual(runtimeProviderAuthBinding("llama.cpp", {
+    kind: "llama-router",
+    id: "llama.cpp",
+    baseUrl: "https://router.example.test",
+  }, "llama.cpp"), {
+    providerId: "llama.cpp",
+    credentialId: "llama.cpp",
+    displayName: "llama.cpp Router",
+    secret: "bearer",
+  });
   assert.deepEqual(runtimeProviderAuthBinding("huggingface", {
     kind: "openai-compatible",
     id: "huggingface",
@@ -170,11 +236,10 @@ test("runtime auth bindings cover aliases, cloud bearer sources, local and remot
     secret: "api_key",
   });
   assert.deepEqual(runtimeProviderAuthBinding("kimi-coding", {
-    kind: "openai-compatible",
+    kind: "anthropic",
     id: "kimi-coding",
-    baseUrl: "https://api.kimi.com/coding/v1",
+    baseUrl: "https://api.kimi.com/coding",
     credentialProvider: "kimi-coding",
-    profile: "kimi-coding",
   }, "kimi-coding"), {
     providerId: "kimi-coding",
     credentialId: "kimi-coding",
@@ -401,6 +466,27 @@ test("generation-owned provider auth descriptors are detached, annotated, collis
   });
   assert.deepEqual(registry.methods("corp").map((method) => method.kind), ["external"]);
   assert.throws(() => registry.registration(oauth.registrationId), /not configured/u);
+});
+
+test("provider display-name overlays compose without changing credential metadata", () => {
+  const registry = new ProviderAuthRegistry({
+    bindings: [{ providerId: "corp", credentialId: "corp-account", displayName: "Corp", secret: "api_key" }],
+    store: new MemoryCredentialStore(),
+    environment: {},
+  });
+  const first = registry.overrideDisplayName("corp", "First Label");
+  const second = registry.overrideDisplayName("corp", "Second Label");
+  assert.deepEqual(registry.binding("corp"), {
+    providerId: "corp",
+    credentialId: "corp-account",
+    displayName: "Second Label",
+    secret: "api_key",
+  });
+  first();
+  assert.equal(registry.binding("corp").displayName, "Second Label");
+  second();
+  assert.equal(registry.binding("corp").displayName, "Corp");
+  assert.throws(() => registry.overrideDisplayName("missing", "Missing"), /not registered/u);
 });
 
 test("provider auth descriptors reject secret-bearing or unsafe OAuth configuration before registration", () => {

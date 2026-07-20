@@ -152,3 +152,31 @@ test("component may close during construction and is still disposed exactly once
   mount.close();
   assert.deepEqual(events, ["dispose", "ready:component"]);
 });
+
+test("component mounts support asynchronous factories and render after resolution", async () => {
+  const generation = new AbortController();
+  let resolveComponent!: (value: { render(): { lines: Array<{ spans: Array<{ text: string }> }> }; dispose(): void }) => void;
+  const component = new Promise<{ render(): { lines: Array<{ spans: Array<{ text: string }> }> }; dispose(): void }>((resolve) => {
+    resolveComponent = resolve;
+  });
+  const events: string[] = [];
+  const mount = RuntimeUiComponentMount.create(async () => await component, {
+    signal: generation.signal,
+    requestRender: () => events.push("render"),
+    onError: (cause) => events.push(`error:${cause.message}`),
+  });
+  assert.deepEqual(mount.render(context), { ok: true, block: { lines: [] } });
+  resolveComponent({
+    render: () => ({ lines: [{ spans: [{ text: "async ready" }] }] }),
+    dispose: () => events.push("dispose"),
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(mount.render(context), {
+    ok: true,
+    block: { lines: [{ spans: [{ text: "async ready" }] }] },
+  });
+  assert.deepEqual(events, ["render"]);
+  mount.close();
+  assert.deepEqual(events, ["render", "dispose"]);
+});

@@ -238,6 +238,60 @@ const GEMINI_FALLBACK = models("gemini", [
 ]);
 
 const OTHER_FALLBACKS = [
+  ...models("moonshotai", [
+    "kimi-k2-0711-preview",
+    "kimi-k2-0905-preview",
+    "kimi-k2-thinking",
+    "kimi-k2-thinking-turbo",
+    "kimi-k2-turbo-preview",
+    "kimi-k2.5",
+    "kimi-k2.6",
+    "kimi-k3",
+  ]),
+  ...models("moonshotai", ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"], {
+    reasoning: true,
+    reasoningEffortMap: { off: null },
+  }),
+  ...models("moonshotai-cn", [
+    "kimi-k2-0711-preview",
+    "kimi-k2-0905-preview",
+    "kimi-k2-thinking",
+    "kimi-k2-thinking-turbo",
+    "kimi-k2-turbo-preview",
+    "kimi-k2.5",
+    "kimi-k2.6",
+    "kimi-k3",
+  ]),
+  ...models("moonshotai-cn", ["kimi-k2.7-code", "kimi-k2.7-code-highspeed"], {
+    reasoning: true,
+    reasoningEffortMap: { off: null },
+  }),
+  ...["xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp"].flatMap((provider) => [
+    ...models(provider, ["mimo-v2-pro"], {
+      contextTokens: 262_144,
+      maxOutputTokens: 32_768,
+      tools: true,
+      reasoning: true,
+      images: false,
+      reasoningEfforts: ["off", "high"],
+    }),
+    ...models(provider, ["mimo-v2.5"], {
+      contextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      tools: true,
+      reasoning: true,
+      images: true,
+      reasoningEfforts: ["off", "high"],
+    }),
+    ...models(provider, ["mimo-v2.5-pro"], {
+      contextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      tools: true,
+      reasoning: true,
+      images: false,
+      reasoningEfforts: ["off", "high"],
+    }),
+  ]),
   ...models("mistral", [
     "codestral-latest",
     "devstral-2512",
@@ -268,14 +322,9 @@ const OTHER_FALLBACKS = [
   ...models("cerebras", ["gemma-4-31b", "gpt-oss-120b", "zai-glm-4.7"]),
   ...models("deepseek", ["deepseek-v4-flash", "deepseek-v4-pro"]),
   ...models("xai", [
-    "grok-3",
-    "grok-3-fast",
-    "grok-4.20-0309-non-reasoning",
-    "grok-4.20-0309-reasoning",
     "grok-4.3",
     "grok-4.5",
     "grok-build-0.1",
-    "grok-code-fast-1",
   ]),
   ...models("openrouter", ["auto", "moonshotai/kimi-k2.6", "moonshotai/kimi-k2.7-code"]),
   ...models("together", ["moonshotai/Kimi-K2.6", "openai/gpt-oss-120b"]),

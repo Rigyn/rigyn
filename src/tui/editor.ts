@@ -19,6 +19,43 @@ export interface EditorOptions {
   maxUndoEntries?: number;
 }
 
+/** Complete editor contract used by the interactive controller. */
+export interface TuiEditorImplementation {
+  readonly text: string;
+  /** Grapheme-indexed cursor. */
+  readonly cursor: number;
+  readonly length: number;
+  readonly empty: boolean;
+  snapshot(): EditorSnapshot;
+  restore(snapshot: EditorSnapshot): void;
+  setText(value: string, cursor?: number): void;
+  clear(options?: { recordUndo?: boolean }): void;
+  insert(value: string): void;
+  insertPaste(value: string): void;
+  backspace(): void;
+  deleteForward(): void;
+  deleteToLineStart(): void;
+  deleteToLineEnd(): void;
+  deleteWordBackward(): void;
+  deleteWordForward(): void;
+  moveLeft(word?: boolean): void;
+  moveRight(word?: boolean): void;
+  moveHome(document?: boolean): void;
+  moveEnd(document?: boolean): void;
+  moveUp(width?: number): void;
+  moveDown(width?: number): void;
+  movePage(direction: -1 | 1, width: number, rows: number): boolean;
+  hasMultipleVisualRows(width: number): boolean;
+  jumpToCharacter(value: string, direction: -1 | 1): boolean;
+  yank(): boolean;
+  yankPop(): boolean;
+  undo(): boolean;
+  redo(): boolean;
+  commitHistory(): string;
+  historyPrevious(): boolean;
+  historyNext(): boolean;
+}
+
 interface PasteMarker extends EditorPasteSnapshot {
   ordinal: number;
 }
@@ -88,7 +125,7 @@ function concatFragments(left: EditorFragment, right: EditorFragment): EditorFra
   };
 }
 
-export class MultilineEditor {
+export class MultilineEditor implements TuiEditorImplementation {
   readonly #maxBytes: number;
   readonly #maxHistory: number;
   readonly #maxUndo: number;

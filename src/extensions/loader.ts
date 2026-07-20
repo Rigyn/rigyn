@@ -311,6 +311,13 @@ async function materialize(
       resourceRoot: candidate.metadata.extensionRoot,
       scope: candidate.metadata.scope,
       trusted: candidate.metadata.trusted,
+      ...(Object.values(manifest.permissions).some(Boolean)
+        ? {
+            permissions: Object.fromEntries(
+              Object.entries(manifest.permissions).filter(([, enabled]) => enabled),
+            ),
+          }
+        : {}),
     });
   }
   return { skillRoots, prompts, commands, themes, runtime };
@@ -351,6 +358,8 @@ function cloneTheme(value: ExtensionTheme): ExtensionTheme {
     definition: {
       ...value.definition,
       styles: Object.fromEntries(Object.entries(value.definition.styles).map(([role, declaration]) => [role, { ...declaration }])),
+      ...(value.definition.tokens === undefined ? {} : { tokens: { ...value.definition.tokens } }),
+      ...(value.definition.export === undefined ? {} : { export: { ...value.definition.export } }),
     },
   };
 }
@@ -361,7 +370,10 @@ function cloneBundle(value: ExtensionBundle): ExtensionBundle {
     prompts: value.prompts.map((prompt) => ({ ...prompt })),
     commands: value.commands.map((command) => ({ ...command })),
     themes: value.themes.map(cloneTheme),
-    runtime: value.runtime.map((entry) => ({ ...entry })),
+    runtime: value.runtime.map((entry) => ({
+      ...entry,
+      ...(entry.permissions === undefined ? {} : { permissions: { ...entry.permissions } }),
+    })),
   };
 }
 

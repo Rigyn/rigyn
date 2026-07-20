@@ -60,6 +60,7 @@ export interface EmbeddingRunHandle {
   readonly threadId: string;
   readonly result: Promise<HarnessRun>;
   cancel(reason?: string): void;
+  cancelRetry(): boolean;
 }
 
 export interface EmbeddingModelSelection {
@@ -113,6 +114,7 @@ export interface EmbeddingSessionNavigateOptions {
   selection?: Pick<EmbeddingModelSelection, "provider" | "model">;
   summaryTokenBudget?: number;
   summaryInstructions?: string;
+  replaceInstructions?: boolean;
   label?: string;
   signal?: AbortSignal;
 }
@@ -484,6 +486,7 @@ class ConfiguredEmbeddingSession implements EmbeddingSession {
         ...(selection === undefined ? {} : { provider: selection.provider, model: selection.model }),
         ...(options.summaryTokenBudget === undefined ? {} : { summaryTokenBudget: options.summaryTokenBudget }),
         ...(options.summaryInstructions === undefined ? {} : { summaryInstructions: options.summaryInstructions }),
+        ...(options.replaceInstructions === undefined ? {} : { replaceInstructions: options.replaceInstructions }),
         ...(options.label === undefined ? {} : { label: options.label }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
@@ -578,6 +581,7 @@ class ConfiguredEmbeddingSession implements EmbeddingSession {
     };
     signal?.throwIfAborted();
     this.#assertOpen();
+    const previous = this.#runtime.store.getModelSelection(this.threadId, this.branch);
     if (persist) {
       this.#assertScope();
       this.#runtime.store.appendEvent({
@@ -595,6 +599,14 @@ class ConfiguredEmbeddingSession implements EmbeddingSession {
       threadId: this.threadId,
       branch: this.branch,
       selection: result,
+    });
+    await this.#runtime.service.publishRuntimeModelSelectionChange({
+      threadId: this.threadId,
+      branch: this.branch,
+      ...(previous === undefined ? {} : { previous }),
+      current: result,
+      source: "set",
+      ...(signal === undefined ? {} : { signal }),
     });
     return result;
   }
@@ -671,6 +683,7 @@ class OwnedInMemoryHarness implements InMemoryHarness {
         threadId,
         result,
         cancel: (reason?: string) => this.#service.cancel(threadId, reason),
+        cancelRetry: () => this.#service.cancelRetry(threadId),
       };
     });
   }
@@ -747,7 +760,12 @@ async function requireExactSelection(
 export async function createEmbeddingHarness(
   options: CreateHarnessRuntimeOptions = {},
 ): Promise<EmbeddingHarness> {
-  return new ConfiguredEmbeddingHarness(await createHarnessRuntime(options));
+  return createEmbeddingHarnessFromRuntime(await createHarnessRuntime(options));
+}
+
+/** Wraps and takes lifecycle ownership of an already-created configured runtime. */
+export function createEmbeddingHarnessFromRuntime(runtime: HarnessRuntime): EmbeddingHarness {
+  return new ConfiguredEmbeddingHarness(runtime);
 }
 
 /**

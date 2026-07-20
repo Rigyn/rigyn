@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import * as api from "rigyn";
 import * as embedding from "rigyn/embedding";
 import * as interfaces from "rigyn/interfaces";
+import * as modes from "rigyn/modes";
 import * as testing from "rigyn/testing";
 import * as tui from "rigyn/tui";
 
@@ -25,10 +26,12 @@ const LAYER_ENTRY_POINTS = {
   "rigyn/extensions": "ExtensionCatalog",
   "rigyn/images": "sniffImageMediaType",
   "rigyn/interfaces": "RpcClient",
+  "rigyn/modes": "runPrintMode",
   "rigyn/net": "createNetworkTransport",
   "rigyn/process": "DirectProcessRunner",
   "rigyn/prompts": "buildSystemPrompt",
   "rigyn/providers": "ProviderRegistry",
+  "rigyn/sdk": "createRigynSdk",
   "rigyn/service": "HarnessService",
   "rigyn/storage": "SessionStore",
   "rigyn/testing": "createScriptedProvider",
@@ -209,6 +212,7 @@ test("built testing subpath exposes the deterministic provider without changing 
 test("built embedding subpath owns a narrow deterministic in-memory run", async () => {
   assert.deepEqual(Object.keys(embedding).sort(), [
     "createEmbeddingHarness",
+    "createEmbeddingHarnessFromRuntime",
     "createInMemoryHarness",
   ]);
   const provider = testing.createScriptedProvider({
@@ -225,6 +229,19 @@ test("built embedding subpath owns a narrow deterministic in-memory run", async 
   }
   const run = await harness.run({ prompt: "offline" });
   assert.equal(run.results.at(-1)?.finalText, "embedded dist works");
+});
+
+test("built modes subpath exposes ready-made borrowed-owner adapters", () => {
+  assert.deepEqual(Object.keys(modes).sort(), [
+    "InteractiveMode",
+    "OWNED_INTERACTIVE_COMMANDS",
+    "RpcMode",
+    "createRpcMode",
+    "runInteractiveMode",
+    "runOwnedInteractiveMode",
+    "runPrintMode",
+    "runRpcMode",
+  ]);
 });
 
 test("built TUI subpath exposes bounded semantic component builders", () => {

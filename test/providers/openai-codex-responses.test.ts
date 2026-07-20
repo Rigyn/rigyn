@@ -8,6 +8,11 @@ import {
 } from "../../src/providers/openai-codex-responses.js";
 import type { NetworkWebSocket, NetworkWebSocketFactory } from "../../src/net/index.js";
 import type { ProviderRequest, ProviderState } from "../../src/core/types.js";
+import {
+  ProviderWireInterceptorRegistry,
+  type ProviderWireRequest,
+  type ProviderWireResponse,
+} from "../../src/providers/wire.js";
 import { collect, fakeFetch, request, streamResponse, terminalCount } from "./helpers.js";
 
 function sse(...values: unknown[]): Uint8Array[] {
@@ -212,10 +217,95 @@ test("OpenAI Codex WebSocket mode sends response.create without HTTP streaming f
   assert.equal(end?.type === "response_end" ? end.state.kind === "openai_responses" && end.state.previousResponseId : undefined, "response-ws");
 });
 
+test("OpenAI Codex WebSocket traffic uses redacted wire hooks for handshakes, frames, and diagnostics", async (t) => {
+  const socket = new FakeWebSocket();
+  socket.onSend = () => completed(socket, "response-wire", "patched");
+  const requests: ProviderWireRequest[] = [];
+  const responses: ProviderWireResponse[] = [];
+  const wire = new ProviderWireInterceptorRegistry();
+  wire.register("openai-codex", {
+    interceptRequest(observed) {
+      requests.push(observed);
+      assert.equal(observed.headers.authorization, undefined);
+      assert.equal(observed.headers["chatgpt-account-id"], undefined);
+      if (observed.phase === "handshake") return { headers: { "x-wire-handshake": "enabled" } };
+      if (observed.phase === "frame") {
+        return { body: { ...(observed.body as Record<string, unknown>), instructions: "wire-patched" } };
+      }
+    },
+    observeResponse(observed) {
+      responses.push(observed);
+    },
+  });
+  let handshakeHeaders: Headers | undefined;
+  const baseFactory = socketFactory(() => socket);
+  const adapter = new OpenAICodexResponsesAdapter({
+    credential: async () => ({ accessToken: "subscription-access", accountId: "chatgpt-account" }),
+    transport: "websocket",
+    webSocket: ((url, headers) => {
+      handshakeHeaders = new Headers(headers);
+      return baseFactory(url, headers);
+    }) as NetworkWebSocketFactory,
+    wire,
+  });
+  t.after(() => adapter.dispose());
+
+  const events = await collect(adapter.stream(request("openai-codex"), new AbortController().signal));
+
+  assert.deepEqual(requests.map(({ transport, phase }) => [transport, phase]), [
+    ["websocket", "handshake"],
+    ["websocket", "frame"],
+  ]);
+  assert.equal(handshakeHeaders?.get("authorization"), "Bearer subscription-access");
+  assert.equal(handshakeHeaders?.get("x-wire-handshake"), "enabled");
+  assert.equal(socket.sent[0]?.instructions, "wire-patched");
+  assert.equal(responses[0]?.phase, "open");
+  assert.deepEqual(
+    responses.filter((response) => response.phase === "frame").map((response) => response.frame?.type),
+    ["response.created", "response.output_text.delta", "response.completed"],
+  );
+  assert.equal(responses.every((response) => response.status === 101), true);
+  assert.equal(responses.every((response) => response.transport === "websocket"), true);
+  assert.equal(responses.filter((response) => response.phase === "frame").every((response) => (response.frame?.bytes ?? 0) > 0), true);
+  const start = events.find((event) => event.type === "response_start");
+  assert.deepEqual(start?.type === "response_start" ? start.diagnostics : undefined, { status: 101, headers: {} });
+});
+
+test("OpenAI Codex WebSocket frame hooks cannot mutate established handshake headers", async (t) => {
+  const socket = new FakeWebSocket();
+  const wire = new ProviderWireInterceptorRegistry();
+  wire.register("openai-codex", {
+    interceptRequest(observed) {
+      if (observed.phase === "frame") return { headers: { "x-too-late": "true" } };
+    },
+  });
+  const adapter = new OpenAICodexResponsesAdapter({
+    credential: async () => ({ accessToken: "subscription-access", accountId: "chatgpt-account" }),
+    transport: "websocket",
+    webSocket: socketFactory(() => socket),
+    wire,
+  });
+  t.after(() => adapter.dispose());
+
+  const events = await collect(adapter.stream(request("openai-codex"), new AbortController().signal));
+
+  assert.equal(socket.sent.length, 0);
+  const terminal = events.at(-1);
+  assert.equal(terminal?.type, "error");
+  assert.match(terminal?.type === "error" ? terminal.error.message : "", /cannot modify handshake headers/u);
+});
+
 test("cached Codex WebSocket continuation reuses one socket and sends only new input", async (t) => {
   const socket = new FakeWebSocket();
   socket.onSend = () => completed(socket, socket.sent.length === 1 ? "response-one" : "response-two", "");
   let factoryCalls = 0;
+  const wirePhases: Array<ProviderWireRequest["phase"]> = [];
+  const wire = new ProviderWireInterceptorRegistry();
+  wire.register("openai-codex", {
+    interceptRequest(observed) {
+      wirePhases.push(observed.phase);
+    },
+  });
   const adapter = new OpenAICodexResponsesAdapter({
     credential: async () => ({ accessToken: "subscription-access", accountId: "chatgpt-account" }),
     transport: "websocket-cached",
@@ -223,6 +313,7 @@ test("cached Codex WebSocket continuation reuses one socket and sends only new i
       factoryCalls += 1;
       return socket;
     }),
+    wire,
   });
   t.after(() => adapter.dispose());
 
@@ -245,6 +336,7 @@ test("cached Codex WebSocket continuation reuses one socket and sends only new i
   const secondEvents = await collect(adapter.stream(second, new AbortController().signal));
   assert.equal(terminalCount(secondEvents), 1);
   assert.equal(factoryCalls, 1);
+  assert.deepEqual(wirePhases, ["handshake", "frame", "frame"]);
   assert.equal(socket.sent[1]?.previous_response_id, "response-one");
   assert.deepEqual(socket.sent[1]?.input, [{ role: "user", content: "continue" }]);
 });

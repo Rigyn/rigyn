@@ -190,6 +190,7 @@ test("the approval gate example fails closed headlessly and deletes only after c
   assert.equal(headless.status, "error");
   await access(marker);
 
+  host.setHostContext({ mode: "tui" });
   host.setInteractiveUiHandler(() => commandUi({ async confirm() { return true; } }));
   const approved = await tool.execute({}, context);
   assert.equal(approved.status, "success");

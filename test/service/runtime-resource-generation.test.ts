@@ -89,7 +89,7 @@ test("runtime resources commit as one immutable generation and roll back by poin
 
   const skills = [skill("stable-skill")];
   const extraTools = [tool("stable-tool")];
-  const retry = { maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 100, jitter: 0 };
+  const retry = { enabled: false, maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 100, jitter: 0 };
   const childRuns = { defaultMaxSteps: 3, maxSteps: 4 };
   const packageDiagnostics = ["stable package warning"];
   await service.replaceRuntimeResources({
@@ -122,6 +122,7 @@ test("runtime resources commit as one immutable generation and roll back by poin
     ["stable package warning"],
   );
   assert.equal((await service.resolveModelSelection("stable-model", { provider: "stable" })).provider, "stable");
+  assert.equal(service.autoRetryEnabled, false);
 
   const rejectedProvider = new ScriptedProvider({ id: "rejected", models: [{ id: "rejected-model" }] });
   await assert.rejects(service.replaceRuntimeResources({
@@ -137,6 +138,7 @@ test("runtime resources commit as one immutable generation and roll back by poin
   const catalog = await service.resourceCatalog();
   assert.equal(catalog.tools.some((entry) => entry.name === "stable-tool"), true);
   assert.equal(catalog.tools.some((entry) => entry.name === "rejected-tool"), false);
+  assert.equal(service.autoRetryEnabled, false);
   await assert.rejects(
     service.resolveModelSelection("rejected-model", { provider: "rejected" }),
     /not registered/u,

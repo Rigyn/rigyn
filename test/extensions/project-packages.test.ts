@@ -47,7 +47,7 @@ async function writePackage(root: string, version: string, text: string): Promis
     id: "declared",
     name: "Declared package",
     version,
-    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.4.0" },
     contributions: { runtime: [{ path: "runtime/index.mjs" }] },
   }, null, 2)}\n`);
 }
@@ -74,6 +74,10 @@ test("declaration and lock schemas are strict, deterministic, and credential-fre
   });
   assert.deepEqual(declaration.packages.map((entry) => entry.id), ["a-npm", "m-local", "z-git"]);
   assert.deepEqual(declaration.packages[1]?.disabledResources, ["theme:ocean"]);
+  assert.equal(parseProjectPackageDeclaration({
+    schemaVersion: 1,
+    packages: [{ id: "range", source: { kind: "npm", package: "tools", selector: ">=1.2.0 <2.0.0" } }],
+  }).packages[0]?.source.kind, "npm");
   assert.throws(() => parseProjectPackageDeclaration({
     schemaVersion: 1,
     packages: [{ id: "bad", source: { kind: "git", repository: "https://token@example.com/tools.git" } }],
@@ -187,6 +191,84 @@ test("failed resolution and staging preserve the prior lock and active package",
   assert.equal((await manager.check()).status, "ready");
 });
 
+test("failed candidate activation preserves the project declaration, lock, and active package", async (context) => {
+  const workspace = await fixture(context);
+  const source = join(workspace, "package-source");
+  await mkdir(source);
+  await writePackage(source, "1.0.0", "first");
+  await writeDeclaration(workspace, []);
+  const manager = new ProjectPackageManager({ workspace, projectTrusted: true });
+  await manager.update({ all: true });
+  const before = await Promise.all([
+    readFile(join(workspace, PROJECT_PACKAGE_DECLARATION)),
+    readFile(join(workspace, PROJECT_PACKAGE_LOCK)),
+    readFile(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "extension.json")),
+    readFile(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "runtime", "index.mjs")),
+  ]);
+
+  await writePackage(source, "2.0.0", "second");
+  await writeFile(join(source, "runtime", "index.mjs"), `export default () => { throw new Error("project candidate activation failed"); };\n`);
+  await assert.rejects(manager.update({ all: true }), /project candidate activation failed/u);
+
+  assert.deepEqual(await Promise.all([
+    readFile(join(workspace, PROJECT_PACKAGE_DECLARATION)),
+    readFile(join(workspace, PROJECT_PACKAGE_LOCK)),
+    readFile(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "extension.json")),
+    readFile(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT, "declared", "runtime", "index.mjs")),
+  ]), before);
+  assert.equal((await manager.check()).status, "ready");
+  await assert.rejects(access(join(workspace, ".rigyn", ".packages-stage")), /ENOENT/u);
+  await assert.rejects(access(join(workspace, ".rigyn", ".packages-resolution")), /ENOENT/u);
+});
+
+test("disabled runtime resources are not executed during project candidate activation", async (context) => {
+  const workspace = await fixture(context);
+  const source = join(workspace, "package-source");
+  await mkdir(source);
+  await writePackage(source, "1.0.0", "unused");
+  await writeFile(join(source, "runtime", "index.mjs"), `throw new Error("disabled runtime must not execute");\n`);
+  await writeDeclaration(workspace, ["runtime:runtime/index.mjs"]);
+
+  const manager = new ProjectPackageManager({ workspace, projectTrusted: true });
+  const result = await manager.update({ all: true });
+  assert.equal(result.status, "ready");
+  assert.equal(result.packages[0]?.version, "1.0.0");
+  assert.equal((await manager.check()).status, "ready");
+});
+
+test("the complete project package generation is activation-tested before commit", async (context) => {
+  const workspace = await fixture(context);
+  for (const id of ["collision-a", "collision-b"]) {
+    const source = join(workspace, id);
+    await mkdir(join(source, "runtime"), { recursive: true });
+    await writeFile(join(source, "runtime", "index.mjs"), `
+export default (api) => api.registerTool({
+  name: "project_collision",
+  description: "Collision fixture",
+  inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  execute: () => ({ content: "ok", isError: false, status: "success", summary: "ok", nextActions: [] }),
+});
+`);
+    await writeFile(join(source, "extension.json"), JSON.stringify({
+      schemaVersion: 1,
+      id,
+      contributions: { runtime: [{ path: "runtime/index.mjs" }] },
+    }));
+  }
+  await writeFile(join(workspace, PROJECT_PACKAGE_DECLARATION), JSON.stringify({
+    schemaVersion: 1,
+    packages: ["collision-a", "collision-b"].map((id) => ({
+      id,
+      source: { kind: "local", path: id },
+    })),
+  }));
+
+  const manager = new ProjectPackageManager({ workspace, projectTrusted: true });
+  await assert.rejects(manager.update({ all: true }), /project_collision.*ignored|activation reported/u);
+  await assert.rejects(access(join(workspace, PROJECT_PACKAGE_LOCK)), /ENOENT/u);
+  await assert.rejects(access(join(workspace, PROJECT_PACKAGE_INSTALL_ROOT)), /ENOENT/u);
+});
+
 test("concurrent reconcilers serialize and repair only from the immutable lock", async (context) => {
   const workspace = await fixture(context);
   const source = join(workspace, "package-source");
@@ -212,11 +294,13 @@ test("a crashed project-package lease owner recovers without leaving repository 
   const leaseRoot = `${workspace}-leases`;
   context.after(async () => await rm(leaseRoot, { recursive: true, force: true }));
   const leasePath = await keyedSqliteLeasePath(leaseRoot, "project-packages", workspace);
+  const ready = join(workspace, "lease-ready");
   const moduleUrl = pathToFileURL(new URL("../../src/process/sqlite-lease.ts", import.meta.url).pathname).href;
   const source = `
+    import { writeFile } from "node:fs/promises";
     import { withSqliteProcessLease } from ${JSON.stringify(moduleUrl)};
     await withSqliteProcessLease(${JSON.stringify(leasePath)}, async () => {
-      process.stdout.write("locked\\n");
+      await writeFile(${JSON.stringify(ready)}, "locked\\n");
       setInterval(() => {}, 1000);
       await new Promise(() => {});
     }, { timeoutMs: 2000, retryMs: 5, label: "project crash fixture" });
@@ -228,16 +312,7 @@ test("a crashed project-package lease owner recovers without leaving repository 
   context.after(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   });
-  await new Promise<void>((resolveReady, reject) => {
-    const timer = setTimeout(() => reject(new Error("child did not acquire project package lease")), 2_000);
-    child.once("error", reject);
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      if (!chunk.includes("locked")) return;
-      clearTimeout(timer);
-      resolveReady();
-    });
-  });
+  await waitForFile(ready, 10_000);
 
   const manager = new ProjectPackageManager({ workspace, projectTrusted: true, operationLeaseRoot: leaseRoot });
   let completed = false;

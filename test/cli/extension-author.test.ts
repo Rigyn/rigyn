@@ -26,7 +26,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     description: "Author tooling fixture",
     type: "module",
     files: ["extension.json", "runtime"],
-    peerDependencies: { rigyn: ">=0.1.0 <0.3.0" },
+    peerDependencies: { rigyn: ">=0.1.0 <0.4.0" },
   }));
   await writeFile(join(root, "extension.json"), JSON.stringify({
     schemaVersion: 1,
@@ -34,7 +34,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     name: "Author tool fixture",
     version: "1.2.3",
     description: "Author tooling fixture",
-    compatibility: { hostVersion: ">=0.1.0 <0.3.0" },
+    compatibility: { hostVersion: ">=0.1.0 <0.4.0" },
     contributions: { runtime: [{ path: "runtime/index.mjs" }] },
   }));
   await writeFile(join(root, "runtime", "index.mjs"), `
@@ -86,7 +86,7 @@ test("extensions author dispatches as a CLI subcommand instead of model input", 
   assert.equal(result.stderr, "");
 });
 
-test("extension author smoke and reload use the in-process public runtime loader and dispose every generation", async (t) => {
+test("extension author smoke and reload dispose pre-commit probes and every author generation", async (t) => {
   const { root, log } = await fixture(t);
   assert.deepEqual(await smokeExtensionPackage(root), {
     packageId: "author-tool-fixture",
@@ -96,6 +96,10 @@ test("extension author smoke and reload use the in-process public runtime loader
     providerCount: 0,
     disposed: true,
   });
+  assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+    "disposed", // Managed-package pre-commit activation probe.
+    "disposed", // Author smoke activation.
+  ]);
   assert.deepEqual(await reloadExtensionPackage(root), {
     packageId: "author-tool-fixture",
     runtimeEntries: 1,
@@ -106,7 +110,13 @@ test("extension author smoke and reload use the in-process public runtime loader
     reloaded: true,
     warnings: [],
   });
-  assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), ["disposed", "disposed", "disposed"]);
+  assert.deepEqual((await readFile(log, "utf8")).trim().split("\n"), [
+    "disposed",
+    "disposed",
+    "disposed", // Managed-package pre-commit activation probe.
+    "disposed", // Reload's active generation.
+    "disposed", // Reload's candidate generation.
+  ]);
 });
 
 test("extension author pack emits one reviewed artifact and report aggregates every check", async (t) => {

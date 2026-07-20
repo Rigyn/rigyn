@@ -24,8 +24,11 @@ const DEFER = "defer" as const;
 export const INTERACTIVE_COMMANDS: readonly InteractiveCommandDefinition[] = [
   { name: "settings", syntax: "settings", activePolicy: DEFER, hidden: false, help: true, palette: { id: "settings", label: "Open settings menu", detail: "/settings", value: "/settings" } },
   { name: "model", syntax: "model [PROVIDER/MODEL]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "model", label: "Select model", detail: "/model", value: "/model" } },
+  { name: "llama", syntax: "llama", activePolicy: DEFER, hidden: false, help: true, palette: { id: "llama", label: "Manage local router models", detail: "/llama", value: "/llama" } },
   { name: "scoped-models", syntax: "scoped-models", activePolicy: DEFER, hidden: false, help: true, palette: { id: "scoped-models", label: "Configure model cycling", detail: "/scoped-models", value: "/scoped-models" } },
   { name: "export", syntax: "export [--redact] [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "export", label: "Export session", detail: "/export [--redact] [FILE]", value: "/export" } },
+  { name: "share", syntax: "share [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "share", label: "Create redacted share copy", detail: "/share [FILE]", value: "/share" } },
+  { name: "changelog", syntax: "changelog", activePolicy: DEFER, hidden: false, help: true, palette: { id: "changelog", label: "Show installed changelog", detail: "/changelog", value: "/changelog" } },
   { name: "import", syntax: "import [FILE]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "import", label: "Import session", detail: "/import [FILE]", value: "/import" } },
   { name: "copy", syntax: "copy", activePolicy: DEFER, hidden: false, help: true, palette: { id: "copy", label: "Copy last assistant message", detail: "/copy", value: "/copy" } },
   { name: "name", syntax: "name [NAME]", activePolicy: DEFER, hidden: false, help: true, palette: { id: "name", label: "Set session name", detail: "/name [NAME]", value: "/name" } },

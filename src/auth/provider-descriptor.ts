@@ -1,4 +1,54 @@
 import type { AmbientProvider } from "./types.js";
+import type { ModelInfo } from "../core/types.js";
+
+export interface ProviderManagedOAuthCredential {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+  tokenType?: "Bearer";
+  scopes?: readonly string[];
+  accountId?: string;
+  subject?: string;
+  providerData?: Readonly<Record<string, string>>;
+}
+
+export interface ProviderManagedAuthInteraction {
+  readonly signal: AbortSignal;
+  showAuthorization(input: { url: string | URL }): void | Promise<void>;
+  showDeviceCode(input: {
+    userCode: string;
+    verificationUri: string | URL;
+    intervalSeconds?: number;
+    expiresInSeconds?: number;
+  }): void | Promise<void>;
+  showProgress(message: string): void | Promise<void>;
+  prompt(input: { message: string }): Promise<string>;
+  select(input: {
+    message: string;
+    options: readonly { id: string; label: string; detail?: string }[];
+  }): Promise<string | undefined>;
+}
+
+/** Trusted provider-owned authentication for protocols that are not declarative OAuth. */
+export interface ProviderManagedOAuthAuthMethod {
+  kind: "managed_oauth";
+  id: string;
+  label?: string;
+  detail?: string;
+  login(interaction: ProviderManagedAuthInteraction): Promise<ProviderManagedOAuthCredential>;
+  refresh(
+    credential: ProviderManagedOAuthCredential,
+    signal: AbortSignal,
+  ): Promise<ProviderManagedOAuthCredential>;
+  /** Optional provider-specific bearer/API-key projection. Defaults to accessToken. */
+  getApiKey?(credential: ProviderManagedOAuthCredential): string;
+  /** Optional credential-conditioned catalog projection. */
+  modifyModels?(
+    models: readonly ModelInfo[],
+    credential: ProviderManagedOAuthCredential,
+    signal: AbortSignal,
+  ): readonly ModelInfo[] | Promise<readonly ModelInfo[]>;
+}
 
 export interface ProviderApiKeyAuthMethod {
   kind: "api_key";
@@ -39,6 +89,7 @@ export type ProviderAuthDescriptorMethod =
   | ProviderApiKeyAuthMethod
   | ProviderPkceAuthMethod
   | ProviderDeviceAuthMethod
+  | ProviderManagedOAuthAuthMethod
   | ProviderAmbientAuthMethod;
 
 export interface ProviderRequestHeaderAuth {
@@ -198,6 +249,12 @@ function authorizationParameters(value: unknown, label: string): Record<string, 
   return result;
 }
 
+function callback(value: unknown, label: string, required = true): Function | undefined {
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "function") throw new TypeError(`${label} must be a function`);
+  return value;
+}
+
 function requestOrigin(value: unknown, label: string): string {
   const selected = endpoint(value, label);
   const parsed = new URL(selected);
@@ -324,6 +381,25 @@ export function normalizeProviderAuthDescriptor(value: unknown): ProviderAuthDes
         deviceEndpoint: endpoint(method.deviceEndpoint, `${label}.deviceEndpoint`),
       };
     }
+    if (method.kind === "managed_oauth") {
+      allowed(method, ["kind", "id", "label", "detail", "login", "refresh", "getApiKey", "modifyModels"], label);
+      const id = identifier(method.id, `${label}.id`);
+      if (oauthIds.has(id)) throw new TypeError(`Duplicate provider OAuth method id: ${id}`);
+      oauthIds.add(id);
+      return {
+        kind: "managed_oauth",
+        id,
+        ...annotations(method, label),
+        login: callback(method.login, `${label}.login`) as ProviderManagedOAuthAuthMethod["login"],
+        refresh: callback(method.refresh, `${label}.refresh`) as ProviderManagedOAuthAuthMethod["refresh"],
+        ...(method.getApiKey === undefined
+          ? {}
+          : { getApiKey: callback(method.getApiKey, `${label}.getApiKey`) as NonNullable<ProviderManagedOAuthAuthMethod["getApiKey"]> }),
+        ...(method.modifyModels === undefined
+          ? {}
+          : { modifyModels: callback(method.modifyModels, `${label}.modifyModels`) as NonNullable<ProviderManagedOAuthAuthMethod["modifyModels"]> }),
+      };
+    }
     throw new TypeError(`${label}.kind is invalid`);
   });
 
@@ -333,5 +409,19 @@ export function normalizeProviderAuthDescriptor(value: unknown): ProviderAuthDes
     ...(displayName === undefined ? {} : { displayName }),
     methods,
     ...(request === undefined ? {} : { request }),
+  };
+}
+
+/** Detaches public metadata while retaining trusted provider callback identities. */
+export function cloneProviderAuthDescriptor(value: ProviderAuthDescriptor): ProviderAuthDescriptor {
+  return {
+    provider: value.provider,
+    ...(value.credentialId === undefined ? {} : { credentialId: value.credentialId }),
+    ...(value.displayName === undefined ? {} : { displayName: value.displayName }),
+    methods: value.methods.map((method) => {
+      if (method.kind === "managed_oauth") return { ...method };
+      return structuredClone(method);
+    }),
+    ...(value.request === undefined ? {} : { request: structuredClone(value.request) }),
   };
 }

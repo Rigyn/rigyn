@@ -14,9 +14,10 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
+import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { satisfies, valid as validSemver } from "semver";
 
@@ -32,7 +33,9 @@ import { parseThemeDefinition } from "../tui/theme.js";
 import { RIGYN_VERSION } from "../version.js";
 import { discoverExtensions } from "./loader.js";
 import { parseExtensionManifest, type ParsedExtensionManifest } from "./manifest.js";
-import type { ExtensionSource } from "./types.js";
+import { filterExtensionResources } from "./resources.js";
+import { loadRuntimeExtensions } from "./runtime.js";
+import type { ExtensionRuntimeEntry, ExtensionSource } from "./types.js";
 
 export const EXTENSION_PACKAGE_PROVENANCE = ".rigyn-package.json";
 export const DEFAULT_MAX_PACKAGE_ENTRIES = 4096;
@@ -40,6 +43,7 @@ export const DEFAULT_MAX_PACKAGE_FILE_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_MAX_PACKAGE_DEPTH = 64;
 export const DEFAULT_PACKAGE_SOURCE_TIMEOUT_MS = 120_000;
+export const DEFAULT_PACKAGE_ACTIVATION_TIMEOUT_MS = 30_000;
 export const DEFAULT_MAX_PACKAGE_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export const EXTENSION_PACKAGE_LOCK = ".rigyn-packages.lock";
 
@@ -57,6 +61,9 @@ const PACKAGE_REMOVE_PREFIX = ".rigyn-package-remove-";
 const PACKAGE_TRANSACTION = "transaction.json";
 const PACKAGE_TRANSACTION_BYTES = 1024;
 const PACKAGE_TASKKILL_TIMEOUT_MS = 5_000;
+const PACKAGE_COMMAND_DRAIN_TIMEOUT_MS = 1_000;
+const PACKAGE_IGNORE_FILE_BYTES = 1024 * 1024;
+const PACKAGE_IGNORE_FILES = [".gitignore", ".ignore", ".fdignore"] as const;
 
 export type ExtensionPackageScope = "user" | "project";
 
@@ -81,10 +88,13 @@ export interface ExtensionPackageCommands {
 
 export interface ExtensionPackageManagerOptions {
   operationLeaseRoot?: string;
+  activationTimeoutMs?: number;
 }
 
 export interface ExtensionPackageTransactionOptions {
   allowScripts?: boolean;
+  /** Resource keys disabled by the transaction's owning package policy. */
+  disabledResources?: readonly string[];
   signal?: AbortSignal;
 }
 
@@ -162,6 +172,36 @@ interface StagedPackage {
   container: string;
   packageRoot: string;
   manifest: ParsedExtensionManifest;
+}
+
+export async function smokeStagedPackageRuntime(
+  runtime: readonly ExtensionRuntimeEntry[],
+  activationTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (runtime.length === 0) return;
+  const workspace = await mkdtemp(join(tmpdir(), "rigyn-package-activation-"));
+  let host: Awaited<ReturnType<typeof loadRuntimeExtensions>> | undefined;
+  try {
+    host = await loadRuntimeExtensions(runtime, {
+      workspace,
+      dataRoot: join(workspace, "data"),
+      ...(signal === undefined ? {} : { signal }),
+      activationTimeoutMs,
+      loadTimeoutMs: activationTimeoutMs,
+      activationFailure: "throw",
+    });
+    const diagnostics = host.diagnostics();
+    if (diagnostics.length > 0) {
+      throw new Error(`Staged package activation reported: ${diagnostics.map((entry) => entry.message).join("; ")}`);
+    }
+  } finally {
+    try {
+      await host?.close();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  }
 }
 
 type SourceIdentity =
@@ -306,25 +346,59 @@ function packagePaths(value: unknown, label: string): string[] | undefined {
 
 async function packageFiles(root: string, maximum = DEFAULT_MAX_PACKAGE_ENTRIES): Promise<string[]> {
   const files: string[] = [];
-  const visit = async (relativePath: string, depth: number): Promise<void> => {
-    if (depth > DEFAULT_MAX_PACKAGE_DEPTH) throw new Error("Package resource discovery exceeds its depth limit");
-    const directory = await opendir(relativePath === "" ? root : join(root, relativePath));
-    try {
-      for await (const entry of directory) {
-        if (entry.name === ".git" || entry.name === EXTENSION_PACKAGE_PROVENANCE || entry.name === EXTENSION_PACKAGE_LOCK) continue;
-        const child = relativePath === "" ? entry.name : `${relativePath}/${entry.name}`;
-        const information = await lstat(join(root, ...child.split("/")));
-        if (information.isSymbolicLink()) throw new Error(`Package resource path is a symbolic link: ${child}`);
-        if (information.isDirectory()) await visit(child, depth + 1);
-        else if (information.isFile()) files.push(child);
-        else throw new Error(`Package resource path is not a regular file or directory: ${child}`);
-        if (files.length > maximum) throw new Error(`Package resource discovery exceeds ${maximum} files`);
+  type IgnoreScope = { base: string; matcher: ReturnType<typeof ignore> };
+  const ignored = (scopes: readonly IgnoreScope[], path: string, directory: boolean): boolean => {
+    let result = false;
+    for (const scope of scopes) {
+      if (scope.base !== "" && path !== scope.base && !path.startsWith(`${scope.base}/`)) continue;
+      const local = scope.base === "" ? path : path.slice(scope.base.length + 1);
+      const decision = scope.matcher.test(directory ? `${local}/` : local);
+      if (decision.ignored) result = true;
+      else if (decision.unignored) result = false;
+    }
+    return result;
+  };
+  const ignoreScopes = async (directory: string, base: string): Promise<IgnoreScope[]> => {
+    const scopes: IgnoreScope[] = [];
+    for (const name of PACKAGE_IGNORE_FILES) {
+      try {
+        const data = await readRegularFile(join(directory, name), PACKAGE_IGNORE_FILE_BYTES, `Package ignore file ${base === "" ? name : `${base}/${name}`}`);
+        scopes.push({
+          base,
+          matcher: ignore({ ignorecase: process.platform === "win32" }).add(decodeUtf8(data, `Package ignore file ${name}`)),
+        });
+      } catch (error) {
+        if (errno(error) !== "ENOENT") throw error;
       }
+    }
+    return scopes;
+  };
+  const visit = async (relativePath: string, depth: number, inheritedScopes: readonly IgnoreScope[]): Promise<void> => {
+    if (depth > DEFAULT_MAX_PACKAGE_DEPTH) throw new Error("Package resource discovery exceeds its depth limit");
+    const directoryPath = relativePath === "" ? root : join(root, relativePath);
+    const scopes = [...inheritedScopes, ...await ignoreScopes(directoryPath, relativePath)];
+    const entries: string[] = [];
+    const directory = await opendir(directoryPath);
+    try {
+      for await (const entry of directory) entries.push(entry.name);
     } finally {
       await directory.close().catch(() => undefined);
     }
+    entries.sort((left, right) => left.localeCompare(right));
+    for (const name of entries) {
+      if (name.startsWith(".") || name === EXTENSION_PACKAGE_PROVENANCE || name === EXTENSION_PACKAGE_LOCK) continue;
+      const child = relativePath === "" ? name : `${relativePath}/${name}`;
+      const information = await lstat(join(root, ...child.split("/")));
+      if (information.isSymbolicLink()) throw new Error(`Package resource path is a symbolic link: ${child}`);
+      if (information.isDirectory()) {
+        if (!ignored(scopes, child, true)) await visit(child, depth + 1, scopes);
+      } else if (information.isFile()) {
+        if (!ignored(scopes, child, false)) files.push(child);
+      } else throw new Error(`Package resource path is not a regular file or directory: ${child}`);
+      if (files.length > maximum) throw new Error(`Package resource discovery exceeds ${maximum} files`);
+    }
   };
-  await visit("", 0);
+  await visit("", 0, []);
   return files.sort((left, right) => left.localeCompare(right));
 }
 
@@ -626,7 +700,13 @@ function npmDependencySpec(value: unknown, label: string): string {
 }
 
 function npmRegistrySpecifier(value: string): string {
-  if (value.length === 0 || Buffer.byteLength(value) > 512 || /[\s\0\\]/u.test(value) || value.startsWith("-")) {
+  if (
+    value.length === 0
+    || value.trim() !== value
+    || Buffer.byteLength(value) > 512
+    || /[\u0000-\u001f\u007f\\]/u.test(value)
+    || value.startsWith("-")
+  ) {
     throw new Error("npm package specifier is invalid");
   }
   let name: string;
@@ -646,15 +726,10 @@ function npmRegistrySpecifier(value: string): string {
     selectorSpecified = at >= 0;
     npmPackageName(name, "npm package name");
   }
-  if (
-    selector.includes("/") ||
-    selector.includes("#") ||
-    selector.includes("?") ||
-    selector.includes(":") ||
-    (selectorSpecified && (selector === "" || !/^[A-Za-z0-9*+._~^<>=|,-]+$/u.test(selector)))
-  ) {
+  if (selectorSpecified && selector === "") {
     throw new Error("npm package selector is invalid");
   }
+  if (selectorSpecified) npmDependencySpec(selector, "npm package selector");
   return value;
 }
 
@@ -1003,13 +1078,45 @@ async function runBoundedCommand(
     let bytes = 0;
     let settled = false;
     let failure: Error | undefined;
+    let outcome: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let stdoutEnded = child.stdout === null;
+    let stderrEnded = child.stderr === null;
+    let drainTimeout: NodeJS.Timeout | undefined;
     const finish = (operation: () => void): void => {
       if (settled) return;
       settled = true;
       releaseProcessGroup();
       clearTimeout(timeout);
+      if (drainTimeout !== undefined) clearTimeout(drainTimeout);
       options.signal?.removeEventListener("abort", abort);
       operation();
+    };
+    const finishOutcome = (): void => {
+      if (outcome === undefined || !stdoutEnded || !stderrEnded) return;
+      finish(() => {
+        if (failure !== undefined) {
+          reject(failure);
+          return;
+        }
+        const detail = Buffer.concat(output).toString("utf8").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "?").trim().slice(-4096);
+        if (outcome!.code !== 0) {
+          reject(new Error(`${options.label} failed${outcome!.code === null ? ` with signal ${outcome!.signal ?? "unknown"}` : ` with exit ${outcome!.code}`}${detail === "" ? "" : `: ${detail}`}`));
+          return;
+        }
+        resolveResult(detail);
+      });
+    };
+    const beginDrain = (): void => {
+      if (settled || outcome === undefined || drainTimeout !== undefined) return;
+      clearTimeout(timeout);
+      drainTimeout = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(() => reject(
+          failure ?? new Error(`${options.label} output did not reach EOF after the process exited`),
+        ));
+      }, PACKAGE_COMMAND_DRAIN_TIMEOUT_MS);
+      finishOutcome();
     };
     const stop = (error: Error): void => {
       if (failure !== undefined || settled) return;
@@ -1036,19 +1143,26 @@ async function runBoundedCommand(
     timeout.unref();
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
+    child.stdout?.once("end", () => {
+      stdoutEnded = true;
+      finishOutcome();
+    });
+    child.stderr?.once("end", () => {
+      stderrEnded = true;
+      finishOutcome();
+    });
     child.once("error", (error) => finish(() => reject(new Error(`Unable to start ${options.label}: ${error.message}`, { cause: error }))));
-    child.once("close", (code, signal) => finish(() => {
-      if (failure !== undefined) {
-        reject(failure);
-        return;
-      }
-      const detail = Buffer.concat(output).toString("utf8").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "?").trim().slice(-4096);
-      if (code !== 0) {
-        reject(new Error(`${options.label} failed${code === null ? ` with signal ${signal ?? "unknown"}` : ` with exit ${code}`}${detail === "" ? "" : `: ${detail}`}`));
-        return;
-      }
-      resolveResult(detail);
-    }));
+    child.once("exit", (code, signal) => {
+      outcome = { code, signal };
+      beginDrain();
+    });
+    child.once("close", () => {
+      // Node guarantees real close after exit. Ignoring an earlier synthetic
+      // notification prevents forged success and truncated command output.
+      if (outcome === undefined) return;
+      beginDrain();
+      finishOutcome();
+    });
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted === true) abort();
   });
@@ -1757,6 +1871,24 @@ function packageTransactionAllowsScripts(options: ExtensionPackageTransactionOpt
   return options.allowScripts === true;
 }
 
+function packageTransactionDisabledResources(options: ExtensionPackageTransactionOptions): string[] {
+  if (options.disabledResources === undefined) return [];
+  if (!Array.isArray(options.disabledResources) || options.disabledResources.length > 512) {
+    throw new TypeError("disabledResources must be an array with at most 512 entries");
+  }
+  const selected: string[] = [];
+  for (const [index, entry] of options.disabledResources.entries()) {
+    if (typeof entry !== "string" || entry === "" || entry.includes("\0") || Buffer.byteLength(entry) > 4096) {
+      throw new TypeError(`disabledResources[${index}] must be a non-empty resource key no larger than 4096 bytes`);
+    }
+    if (!/^(?:runtime|skill|prompt|command|theme):/u.test(entry)) {
+      throw new TypeError(`disabledResources[${index}] must be a runtime, skill, prompt, command, or theme resource key`);
+    }
+    selected.push(entry);
+  }
+  return [...new Set(selected)].sort((left, right) => left.localeCompare(right));
+}
+
 function cloneProvenance(value: ExtensionPackageProvenance): ExtensionPackageProvenance {
   return { ...value };
 }
@@ -1805,6 +1937,7 @@ export class LocalExtensionPackageManager {
   readonly #limits: PackageLimits;
   readonly #commands: ExtensionPackageCommands;
   readonly #operationLeaseRoot: string;
+  readonly #activationTimeoutMs: number;
   #operations: Promise<void> = Promise.resolve();
 
   constructor(
@@ -1823,6 +1956,12 @@ export class LocalExtensionPackageManager {
       ...(commands.git === undefined ? {} : { git: { command: commands.git.command, prefix: [...(commands.git.prefix ?? [])] } }),
     };
     this.#operationLeaseRoot = resolve(options.operationLeaseRoot ?? defaultSqliteLeaseRoot());
+    this.#activationTimeoutMs = boundedInteger(
+      options.activationTimeoutMs,
+      DEFAULT_PACKAGE_ACTIVATION_TIMEOUT_MS,
+      300_000,
+      "activationTimeoutMs",
+    );
   }
 
   sources(projectTrusted: boolean): ExtensionSource[] {
@@ -1835,13 +1974,14 @@ export class LocalExtensionPackageManager {
     options: ExtensionPackageTransactionOptions = {},
   ): Promise<InstalledExtensionPackage> {
     const allowScripts = packageTransactionAllowsScripts(options);
+    const disabledResources = packageTransactionDisabledResources(options);
     return this.#serialized(async () => {
       options.signal?.throwIfAborted();
       scope(selectedScope);
       const root = await this.#root(selectedScope, true);
       if (root === undefined) throw new Error(`No ${selectedScope} package root is configured`);
       return await this.#withPackageLock(root, async () => {
-        const staged = await this.#stage(sourcePath, selectedScope, undefined, allowScripts, options.signal);
+        const staged = await this.#stage(sourcePath, selectedScope, undefined, allowScripts, disabledResources, options.signal);
         const target = join(root, staged.manifest.id);
         try {
           options.signal?.throwIfAborted();
@@ -1868,6 +2008,7 @@ export class LocalExtensionPackageManager {
     options: ExtensionPackageTransactionOptions = {},
   ): Promise<InstalledExtensionPackage> {
     const allowScripts = packageTransactionAllowsScripts(options);
+    const disabledResources = packageTransactionDisabledResources(options);
     return this.#serialized(async () => {
       options.signal?.throwIfAborted();
       id(packageId);
@@ -1882,6 +2023,7 @@ export class LocalExtensionPackageManager {
           selectedScope,
           current.provenance.installedAt,
           allowScripts,
+          disabledResources,
           options.signal,
         );
         if (staged.manifest.id !== packageId) {
@@ -2007,6 +2149,7 @@ export class LocalExtensionPackageManager {
     selectedScope: ExtensionPackageScope,
     installedAt?: string,
     allowScripts = false,
+    disabledResources: readonly string[] = [],
     signal?: AbortSignal,
   ): Promise<StagedPackage> {
     signal?.throwIfAborted();
@@ -2082,6 +2225,12 @@ export class LocalExtensionPackageManager {
         const diagnostic = catalog.doctor().diagnostics.find((entry) => entry.severity === "error");
         throw new Error(diagnostic?.message ?? `Package ${manifest.id} did not pass extension validation`);
       }
+      await smokeStagedPackageRuntime(
+        filterExtensionResources(catalog, { [manifest.id]: disabledResources })
+          .bundle().runtime.filter((entry) => entry.extensionId === manifest.id),
+        this.#activationTimeoutMs,
+        signal,
+      );
       signal?.throwIfAborted();
       return { container, packageRoot, manifest };
     } catch (error) {

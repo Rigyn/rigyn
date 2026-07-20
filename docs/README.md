@@ -31,6 +31,8 @@ Rigyn is a local-first terminal coding agent and an extensible agent runtime. If
 
 - [RPC protocol and typed client](rpc.md) — newline-delimited JSON-RPC, runs, events, sessions, cancellation, and reconnectable subscriptions.
 - [Embedding Rigyn](embedding.md) — owned in-process runtime lifecycle and task-focused examples.
+- [SDK composition](sdk.md) — compose providers, tools, extensions, resources, context defaults, and lifecycle without exposing runtime internals.
+- [In-process modes](modes.md) — ready-made print, terminal, and typed RPC adapters over an existing owner.
 - [Public Node.js API policy](public-api.md) — supported package exports and compatibility rules.
 - [External execution backends](execution-backends.md) — route declared model tools through an explicit external boundary.
 

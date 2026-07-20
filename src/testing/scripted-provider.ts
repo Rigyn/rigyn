@@ -83,7 +83,7 @@ export interface ScriptedToolCallBlock {
 export type ScriptedTurnBlock = ScriptedTextBlock | ScriptedReasoningBlock | ScriptedToolCallBlock;
 
 export type ScriptedTurnTerminal =
-  | { type: "finish"; reason?: FinishReason; rawReason?: string; state?: ProviderState }
+  | { type: "finish"; reason?: FinishReason; rawReason?: string; explanation?: string; state?: ProviderState }
   | { type: "error"; error: AdapterError };
 
 export interface ScriptedTurn {
@@ -366,6 +366,7 @@ function validateState(value: unknown, label: string): asserts value is Provider
       "bedrock-converse",
       "mistral-conversations",
       "ollama-chat",
+      "gateway-messages",
     ].includes(String(routed.protocolFamily))) throw new Error(`${label}.routed.protocolFamily is invalid`);
     if (
       typeof routed.scope !== "string" ||
@@ -402,6 +403,12 @@ function validateState(value: unknown, label: string): asserts value is Provider
       exactKeys(state, stateKeys(["kind", "parts"]), label);
       required(state, ["kind", "parts"], label);
       validateJsonArray(state.parts, `${label}.parts`);
+      break;
+    case "gateway_messages":
+      exactKeys(state, stateKeys(["kind", "assistantContent", "responseId"]), label);
+      required(state, ["kind", "assistantContent"], label);
+      validateJsonArray(state.assistantContent, `${label}.assistantContent`);
+      if (state.responseId !== undefined) boundedString(state.responseId, `${label}.responseId`, { maxBytes: 4_096 });
       break;
     case "bedrock_converse":
       exactKeys(state, stateKeys(["kind", "assistantMessage"]), label);
@@ -487,11 +494,12 @@ function validateEvent(value: unknown, label: string): asserts value is AdapterE
       validateJson(event.raw, `${label}.raw`);
       break;
     case "response_end":
-      exactKeys(event, ["type", "reason", "state", "rawReason"], label);
+      exactKeys(event, ["type", "reason", "state", "rawReason", "explanation"], label);
       required(event, ["type", "reason", "state"], label);
       if (!FINISH_REASONS.has(event.reason as FinishReason)) throw new Error(`${label}.reason is invalid`);
       validateState(event.state, `${label}.state`);
       if (event.rawReason !== undefined) boundedString(event.rawReason, `${label}.rawReason`, { maxBytes: 4_096 });
+      if (event.explanation !== undefined) boundedString(event.explanation, `${label}.explanation`, { maxBytes: 4_096 });
       break;
     case "error":
       exactKeys(event, ["type", "error"], label);
@@ -695,11 +703,12 @@ function validateTurn(value: unknown, defaultDelayMs: number, defaultFragmentCha
   if (turn.terminal !== undefined) {
     const terminal = record(turn.terminal, "turn script.terminal");
     if (terminal.type === "finish") {
-      exactKeys(terminal, ["type", "reason", "rawReason", "state"], "turn script.terminal");
+      exactKeys(terminal, ["type", "reason", "rawReason", "explanation", "state"], "turn script.terminal");
       if (terminal.reason !== undefined && !FINISH_REASONS.has(terminal.reason as FinishReason)) {
         throw new Error("turn script.terminal.reason is invalid");
       }
       if (terminal.rawReason !== undefined) boundedString(terminal.rawReason, "turn script.terminal.rawReason", { maxBytes: 4_096 });
+      if (terminal.explanation !== undefined) boundedString(terminal.explanation, "turn script.terminal.explanation", { maxBytes: 4_096 });
       if (terminal.state !== undefined) validateState(terminal.state, "turn script.terminal.state");
     } else if (terminal.type === "error") {
       exactKeys(terminal, ["type", "error"], "turn script.terminal");
@@ -1249,6 +1258,7 @@ export class ScriptedProvider implements ProviderAdapter {
         reason: terminal?.reason ?? (hasTools ? "tool_calls" : "stop"),
         state: terminal?.state === undefined ? defaultState(content, callCount) : structuredClone(terminal.state),
         ...(terminal?.rawReason === undefined ? {} : { rawReason: terminal.rawReason }),
+        ...(terminal?.explanation === undefined ? {} : { explanation: terminal.explanation }),
       });
     }
     const normalized = events.map((event) => ({ event, delayMs }));

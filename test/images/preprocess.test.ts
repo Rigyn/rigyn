@@ -88,6 +88,20 @@ test("pixel dimensions and encoded bytes are reduced within exact bounds", async
   assert.match(imageCoordinateHint(result.coordinates) ?? "", /Scale model coordinates/u);
 });
 
+test("automatic image resizing can be disabled without removing compiled edge guardrails", async () => {
+  const input = await sharp({
+    create: { width: 2_400, height: 10, channels: 3, background: { r: 20, g: 30, b: 40 } },
+  }).png().toBuffer();
+  const automatic = await preprocessImage(input);
+  const preserved = await preprocessImage(input, { autoResize: false });
+  assert.equal(automatic.coordinates.width, 2_000);
+  assert.equal(automatic.coordinates.resized, true);
+  assert.equal(preserved.coordinates.width, 2_400);
+  assert.equal(preserved.coordinates.height, 10);
+  assert.equal(preserved.coordinates.resized, false);
+  await assert.rejects(preprocessImage(input, { autoResize: "no" as unknown as boolean }), /autoResize must be a boolean/u);
+});
+
 test("unrecognized, over-pixel, aborted, and timed-out work fails closed", async () => {
   await assert.rejects(preprocessImage(Buffer.from("not an image")), /recognized image format/u);
   const image = await sharp({

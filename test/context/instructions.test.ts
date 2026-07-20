@@ -50,6 +50,26 @@ test("instructions load user then root-to-cwd with nearest override and provenan
   assert.doesNotMatch(renderInstructions(discovered), /ordinary nested rules/);
 });
 
+test("instructions include filesystem ancestors above a nested launch workspace", async () => {
+  const container = directory("harness-ancestor-instructions-");
+  const workspace = join(container, "repository", "packages", "app");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(container, "AGENTS.md"), "container rules");
+  writeFileSync(join(container, "repository", "AGENTS.md"), "repository rules");
+  writeFileSync(join(workspace, "AGENTS.md"), "application rules");
+
+  const discovered = await discoverInstructions({
+    workspaceRoot: workspace,
+    cwd: workspace,
+    trusted: true,
+  });
+  assert.deepEqual(discovered.entries.map((entry) => entry.text), [
+    "container rules",
+    "repository rules",
+    "application rules",
+  ]);
+});
+
 test("CLAUDE.md is a fallback when a directory has no AGENTS instruction file", async () => {
   const root = directory("harness-claude-instructions-");
   const nested = join(root, "nested");

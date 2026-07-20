@@ -179,6 +179,7 @@ type NativeProviderState =
   | { kind: "anthropic_messages"; assistantBlocks: JsonValue[] }
   | { kind: "gemini_interactions"; previousInteractionId?: string; steps: JsonValue[] }
   | { kind: "gemini_generate_content"; parts: JsonValue[] }
+  | { kind: "gateway_messages"; assistantContent: JsonValue[]; responseId?: string }
   | { kind: "bedrock_converse"; assistantMessage: JsonValue }
   | {
       kind: "mistral_conversations";
@@ -243,6 +244,8 @@ export type AdapterEvent =
       reason: FinishReason;
       state: ProviderState;
       rawReason?: string;
+      /** Bounded, provider-authored explanation for a non-success finish such as a refusal. */
+      explanation?: string;
     }
   | { type: "error"; error: AdapterError };
 
@@ -265,7 +268,8 @@ export type ModelProtocolFamily =
   | "gemini-interactions"
   | "bedrock-converse"
   | "mistral-conversations"
-  | "ollama-chat";
+  | "ollama-chat"
+  | "gateway-messages";
 
 export type ModelModality = "text" | "image" | "audio" | "video" | "file";
 export type ModelCacheMode = "none" | "automatic" | "explicit";
@@ -329,6 +333,76 @@ export interface ModelInfo {
   metadata?: JsonValue;
 }
 
+export type ModelReasoningFormat =
+  | "openai"
+  | "openrouter"
+  | "deepseek"
+  | "together"
+  | "zai"
+  | "qwen"
+  | "qwen-chat-template"
+  | "chat-template"
+  | "string-thinking"
+  | "ant-ling";
+
+export type ModelSessionAffinityFormat = "openai" | "openai-nosession" | "openrouter";
+
+export interface ModelChatTemplateVariable {
+  $var: "thinking.enabled" | "thinking.effort";
+  omitWhenOff?: boolean;
+}
+
+export type ModelChatTemplateValue = JsonValue | ModelChatTemplateVariable;
+
+export interface ModelOpenRouterRouting {
+  allow_fallbacks?: boolean;
+  require_parameters?: boolean;
+  data_collection?: "allow" | "deny";
+  zdr?: boolean;
+  enforce_distillable_text?: boolean;
+  order?: string[];
+  only?: string[];
+  ignore?: string[];
+  quantizations?: string[];
+  sort?: string | { by?: string; partition?: string | null };
+  max_price?: {
+    prompt?: number | string;
+    completion?: number | string;
+    image?: number | string;
+    audio?: number | string;
+    request?: number | string;
+  };
+  preferred_min_throughput?: number | { p50?: number; p75?: number; p90?: number; p99?: number };
+  preferred_max_latency?: number | { p50?: number; p75?: number; p90?: number; p99?: number };
+}
+
+export interface ModelVercelGatewayRouting {
+  only?: string[];
+  order?: string[];
+}
+
+/** Explicit wire differences for one configured Chat Completions model. */
+export interface ModelRequestCompatibility {
+  supportsUsageInStreaming?: boolean;
+  maxTokensField?: "max_completion_tokens" | "max_tokens";
+  supportsReasoningEffort?: boolean;
+  reasoningFormat?: ModelReasoningFormat;
+  chatTemplateParameters?: Record<string, ModelChatTemplateValue>;
+  cacheControlFormat?: "anthropic";
+  cacheControlTtl?: "5m" | "1h";
+  sendSessionAffinityHeaders?: boolean;
+  sessionAffinityFormat?: ModelSessionAffinityFormat;
+  openRouterRouting?: ModelOpenRouterRouting;
+  vercelGatewayRouting?: ModelVercelGatewayRouting;
+}
+
+/** Host-injected model settings. Authentication headers are never accepted here. */
+export interface ProviderModelRequestSettings {
+  headers?: Record<string, string>;
+  reasoningEffortMap?: Record<string, string | null>;
+  compatibility?: ModelRequestCompatibility;
+}
+
 export interface ProviderRequest {
   provider: ProviderId;
   model: string;
@@ -337,8 +411,19 @@ export interface ProviderRequest {
   providerState?: ProviderState;
   maxOutputTokens?: number;
   reasoningEffort?: string;
+  /** Optional operator budgets for provider protocols that express reasoning in tokens. */
+  thinkingBudgets?: ThinkingBudgets;
   metadata?: Record<string, string>;
   sessionId?: string;
+  /** Supplied by the provider registry after extension request reducers have completed. */
+  modelSettings?: ProviderModelRequestSettings;
+}
+
+export interface ThinkingBudgets {
+  minimal?: number;
+  low?: number;
+  medium?: number;
+  high?: number;
 }
 
 export interface ProviderAdapter {

@@ -14,11 +14,13 @@ rigyn/embedding
 rigyn/extensions
 rigyn/images
 rigyn/interfaces
+rigyn/modes
 rigyn/net
 rigyn/process
 rigyn/prompts
 rigyn/providers
 rigyn/service
+rigyn/sdk
 rigyn/storage
 rigyn/testing
 rigyn/tools
@@ -30,7 +32,7 @@ Public subpaths have these stability classes:
 
 | Stability class | Subpaths | Intended use |
 | --- | --- | --- |
-| Application stable | `rigyn`, `rigyn/embedding`, `rigyn/interfaces` | Task-level embedding and RPC clients. Prefer these boundaries for applications. |
+| Application stable | `rigyn`, `rigyn/embedding`, `rigyn/interfaces`, `rigyn/modes`, `rigyn/sdk` | Task-level embedding, ready-made modes, composition, and RPC clients. Prefer these boundaries for applications. |
 | Advanced stable | `rigyn/auth`, `rigyn/config`, `rigyn/context`, `rigyn/core`, `rigyn/extensions`, `rigyn/images`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/service`, `rigyn/storage`, `rigyn/tools`, `rigyn/tui` | Low-level composition. These APIs can carry more host authority and require the caller to own lifecycle and invariants. |
 | Test stable | `rigyn/testing` | Deterministic fixtures. Supported for tests, but not presented as production provider transports. |
 | Metadata stable | `rigyn/package.json` | Package metadata only. |
@@ -39,7 +41,7 @@ All four classes are covered by the compatibility rules below; “advanced” an
 
 The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/Rigyn/rigyn/blob/main/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
 
-The package export map above describes ordinary Node.js consumers. Managed extension runtime entries use a narrower host-owned value-import boundary: only `rigyn/extensions`, `rigyn/providers`, and `rigyn/tui` are resolved to the running host. This keeps one canonical host instance when an installed extension lives outside Rigyn's dependency tree. Managed runtimes cannot import the root package or any other `rigyn/*` subpath; type-only authoring imports remain governed by TypeScript and the package export map.
+The package export map above describes ordinary Node.js consumers. Managed extension runtime entries use a narrower host-owned value-import boundary: only `rigyn/context`, `rigyn/core`, `rigyn/extensions`, `rigyn/images`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/testing`, `rigyn/tools`, and `rigyn/tui` are resolved to the running host. This keeps one canonical host instance when an installed extension lives outside Rigyn's dependency tree. Managed runtimes cannot import the root package or any unlisted or deeper `rigyn/*` subpath; type-only authoring imports remain governed by TypeScript and the package export map.
 
 Each JavaScript entry point is ESM-only and Node-only and has a matching TypeScript declaration entry. No entry point is browser-safe. Browser clients should use the local RPC process or a reviewed loopback extension bridge. A browser-safe protocol/types package is a conditional non-goal until a concrete client requires it; do not bundle credential or filesystem authority into browser code.
 

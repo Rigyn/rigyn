@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, type ChildProcess, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import type { EventEnvelope } from "../core/events.js";
@@ -14,6 +15,8 @@ import type {
   RpcNotificationParams,
   RpcOversizedEvent,
   RpcThreadEventsPagedParams,
+  RpcUserShellRunParams,
+  RpcUserShellRunResult,
 } from "./rpc-protocol.js";
 
 export interface RpcClientOptions {
@@ -96,6 +99,12 @@ export interface RpcEventSubscriptionOptions extends RpcRequestOptions {
   onError?: (error: Error) => void;
   maxPendingEvents?: number;
   maxPendingBytes?: number;
+}
+
+export interface RpcUserShellRun {
+  readonly runId: string;
+  readonly result: Promise<RpcUserShellRunResult>;
+  cancel(reason?: string): Promise<{ accepted: true }>;
 }
 
 export const RPC_EVENT_CLIENT_DEFAULT_MAX_PENDING_EVENTS = 1_024;
@@ -209,6 +218,82 @@ export class RpcClient {
   ): Promise<RpcMethodResult<K>>;
   request(method: RpcMethod, ...args: unknown[]): Promise<unknown> {
     return this.#request(method, args);
+  }
+
+  currentSession(options?: RpcRequestOptions): Promise<RpcMethodResult<"session.current">> {
+    return this.request("session.current", options);
+  }
+
+  newSession(
+    params?: Exclude<RpcMethodParams<"session.new">, undefined>,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"session.new">> {
+    return this.request("session.new", params, options);
+  }
+
+  switchSession(
+    params: RpcMethodParams<"session.switch">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"session.switch">> {
+    return this.request("session.switch", params, options);
+  }
+
+  cloneSession(
+    params?: Exclude<RpcMethodParams<"session.clone">, undefined>,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"session.clone">> {
+    return this.request("session.clone", params, options);
+  }
+
+  forkSession(
+    params: RpcMethodParams<"session.fork">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"session.fork">> {
+    return this.request("session.fork", params, options);
+  }
+
+  forkMessages(
+    params: RpcMethodParams<"thread.forkMessages">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"thread.forkMessages">> {
+    return this.request("thread.forkMessages", params, options);
+  }
+
+  cycleModel(
+    params: RpcMethodParams<"thread.model.cycle">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"thread.model.cycle">> {
+    return this.request("thread.model.cycle", params, options);
+  }
+
+  cycleThinking(
+    params: RpcMethodParams<"thread.thinking.cycle">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"thread.thinking.cycle">> {
+    return this.request("thread.thinking.cycle", params, options);
+  }
+
+  setAutoCompaction(
+    params: RpcMethodParams<"thread.autoCompaction.set">,
+    options?: RpcRequestOptions,
+  ): Promise<RpcMethodResult<"thread.autoCompaction.set">> {
+    return this.request("thread.autoCompaction.set", params, options);
+  }
+
+  runShell(
+    params: Omit<RpcUserShellRunParams, "runId"> & { runId?: string },
+    options?: RpcRequestOptions,
+  ): RpcUserShellRun {
+    const runId = params.runId ?? `rpc_shell_${randomBytes(16).toString("hex")}`;
+    const result = this.request("shell.run", { ...params, runId }, options);
+    return {
+      runId,
+      result,
+      cancel: async (reason) => await this.request("shell.cancel", {
+        runId,
+        ...(reason === undefined ? {} : { reason }),
+      }),
+    };
   }
 
   onNotification<K extends RpcNotification>(method: K, listener: NotificationListener<K>): () => void {
