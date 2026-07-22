@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "description": "Executable coverage map for every public package entry declared by the Rigyn workspace manifests.",
+  "evidenceLimits": [
+    {
+      "scope": "rigyn/auth native secret backends",
+      "apis": ["KeychainCredentialStore", "PlatformKeychainAdapter", "probePlatformKeychain", "protectWindowsCredentialKey", "unprotectWindowsCredentialKey"],
+      "reason": "Real macOS Keychain and Windows DPAPI round trips require those operating systems; portable and failure behavior is exercised with bounded test doubles."
+    },
+    {
+      "scope": "rigyn/images native clipboard",
+      "apis": ["copyToNativeClipboard", "copyToClipboard", "readClipboardImage", "readClipboardText"],
+      "reason": "Tests use controlled clipboard processes and payloads rather than mutating the developer desktop clipboard."
+    },
+    {
+      "scope": "rigyn release lifecycle through main",
+      "apis": ["main: self-install", "main: self-update", "main: uninstall"],
+      "reason": "Release tests use temporary homes and staged artifacts; this suite never changes the active user installation."
+    },
+    {
+      "scope": "paid and interactive provider flows",
+      "apis": ["authorizeAnthropic", "authorizeGitHubCopilot", "authorizeOpenAICodex", "generateOpenRouterImages"],
+      "reason": "Protocol behavior is executed against deterministic transports; real account authorization and paid generation remain opt-in live tests."
+    },
+    {
+      "scope": "physical terminal integrations",
+      "apis": ["detectTerminalCapabilities", "encodeTerminalImage", "renderImage"],
+      "reason": "Encoders and virtual-terminal behavior execute in CI; physical Kitty, iTerm, Windows Terminal, IME, and resize evidence is platform CI or manual evidence."
+    }
+  ],
+  "packages": [
+    {
+      "name": "rigyn",
+      "manifest": "packages/rigyn/package.json",
+      "entries": [
+        { "subpath": ".", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation", "packages/rigyn/test/sdk/model-runtime.test.ts#createAgentSession accepts the public ModelRegistry facade"] },
+        { "subpath": "./auth", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./config", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./context", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./core", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./embedding", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./extensions", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./images", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./interfaces", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./rpc-entry", "kind": "executable", "tests": ["packages/rigyn/test/public-api-dist.test.mjs#built RPC executable export boots through the public CLI contract"] },
+        { "subpath": "./modes", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./net", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./process", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./prompts", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./providers", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation", "packages/rigyn/test/sdk/model-runtime.test.ts#ModelRuntime implements the public model, auth, streaming, and provider lifecycle contract"] },
+        { "subpath": "./service", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./sdk", "kind": "library", "tests": ["packages/rigyn/test/sdk/agent-session.test.ts#createAgentSession accepts the public extension result contract and zero-argument runtime", "packages/rigyn/test/sdk/model-runtime.test.ts#createAgentSession accepts the public ModelRegistry facade"] },
+        { "subpath": "./storage", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./testing", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./tools", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./tui", "kind": "library", "tests": ["packages/rigyn/test/public-api-subpaths.test.mjs#every published subpath performs a representative runtime operation"] },
+        { "subpath": "./package.json", "kind": "metadata", "tests": ["packages/rigyn/test/public-api/runtime-export-inventory.test.ts#runtime export inventory exactly covers every declared package entry"] }
+      ]
+    },
+    {
+      "name": "@rigyn/models",
+      "manifest": "packages/models/package.json",
+      "entries": [
+        { "subpath": ".", "kind": "library", "tests": ["packages/models/test/public-entrypoints.test.ts#root and compatibility entries share executable model semantics"] },
+        { "subpath": "./compat", "kind": "library", "tests": ["packages/models/test/public-entrypoints.test.ts#root and compatibility entries share executable model semantics"] },
+        { "subpath": "./providers/*", "kind": "wildcard-library", "tests": ["packages/models/test/model-data-validation.test.ts#generated provider data validates against structural shards and its manifest", "packages/models/test/provider-support.test.ts#provider model submodules expose the same immutable catalog objects"] },
+        { "subpath": "./api/*", "kind": "wildcard-library", "tests": ["packages/models/test/provider-portable-conformance.test.ts#complete malformed SSE is a protocol failure while a truncated final frame is retryable", "packages/models/test/lower-layer-semantic-conformance.test.ts#lower-layer semantic conformance matrix"] },
+        { "subpath": "./oauth", "kind": "library", "tests": ["packages/models/test/public-entrypoints.test.ts#root and compatibility entries share executable model semantics"] },
+        { "subpath": "./bedrock-provider", "kind": "library", "tests": ["packages/models/test/public-entrypoints.test.ts#bundled OAuth entry installs executable lazy loaders"] },
+        { "subpath": "./bun-oauth", "kind": "library", "tests": ["packages/models/test/public-entrypoints.test.ts#bundled OAuth entry installs executable lazy loaders"] },
+        { "subpath": "./package.json", "kind": "metadata", "tests": ["packages/models/test/public-entrypoints.test.ts#manifest metadata matches the public runtime"] }
+      ]
+    },
+    {
+      "name": "@rigyn/kernel",
+      "manifest": "packages/kernel/package.json",
+      "entries": [
+        { "subpath": ".", "kind": "library", "tests": ["packages/kernel/test/semantic/core.test.ts#loop emits the canonical prompt and turn lifecycle"] },
+        { "subpath": "./node", "kind": "library", "tests": ["packages/kernel/test/semantic/resources-platform.test.ts#Node execution environment covers symlinks, failures, timeouts, and callback errors"] },
+        { "subpath": "./package.json", "kind": "metadata", "tests": ["packages/rigyn/test/public-api/runtime-export-inventory.test.ts#runtime export inventory exactly covers every declared package entry"] }
+      ]
+    },
+    {
+      "name": "@rigyn/terminal",
+      "manifest": "packages/terminal/package.json",
+      "entries": [
+        { "subpath": ".", "kind": "library", "tests": ["packages/terminal/test/semantic-depth.test.mjs#deep terminal semantics", "packages/terminal/test/contract-matrix.test.mjs#published module contract"] },
+        { "subpath": "./package.json", "kind": "metadata", "tests": ["packages/rigyn/test/public-api/runtime-export-inventory.test.ts#runtime export inventory exactly covers every declared package entry"] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-dynamic-package",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime-discovered skill and prompt example for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

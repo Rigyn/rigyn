@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-subprocess-workers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bounded subprocess worker example for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

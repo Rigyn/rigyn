@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-provider-catalog",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Managed OAuth and refreshed model catalog example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

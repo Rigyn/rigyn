@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "platform": "darwin",
+      "arch": "x64",
+      "source": "native/darwin/src/darwin-modifiers.c",
+      "output": "native/darwin/prebuilds/darwin-x64/darwin-modifiers.node"
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "source": "native/darwin/src/darwin-modifiers.c",
+      "output": "native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node"
+    },
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "source": "native/win32/src/win32-console-mode.c",
+      "output": "native/win32/prebuilds/win32-x64/win32-console-mode.node"
+    },
+    {
+      "platform": "win32",
+      "arch": "arm64",
+      "source": "native/win32/src/win32-console-mode.c",
+      "output": "native/win32/prebuilds/win32-arm64/win32-console-mode.node"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-lifecycle-events",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generation and agent lifecycle observation example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

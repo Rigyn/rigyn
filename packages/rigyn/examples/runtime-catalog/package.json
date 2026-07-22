@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-runtime-catalog",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Active tool, model, command, and resource discovery example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

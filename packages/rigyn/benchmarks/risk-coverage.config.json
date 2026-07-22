@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "excludedTests": ["test/live/"],
+  "targets": [
+    {
+      "file": "src/extensions/runtime.ts",
+      "minimum": { "lines": 90, "branches": 68, "functions": 90 }
+    },
+    {
+      "file": "src/cli/main.ts",
+      "minimum": { "lines": 84, "branches": 68, "functions": 74 }
+    },
+    {
+      "file": "src/tui/controller.ts",
+      "minimum": { "lines": 91, "branches": 78, "functions": 85 }
+    },
+    {
+      "file": "src/service/agent-session.ts",
+      "minimum": { "lines": 94, "branches": 85, "functions": 90 }
+    },
+    {
+      "file": "src/storage/session-manager.ts",
+      "minimum": { "lines": 97, "branches": 88, "functions": 97 }
+    }
+  ],
+  "groups": [
+    {
+      "id": "extension-runtime",
+      "targets": ["src/extensions/runtime.ts"],
+      "testPrefixes": ["test/extensions/", "test/cli/", "test/service/", "test/storage/"],
+      "testExcludes": []
+    },
+    {
+      "id": "cli-tui",
+      "targets": ["src/cli/main.ts", "src/tui/controller.ts"],
+      "testPrefixes": ["test/cli/", "test/tui/"],
+      "testExcludes": []
+    },
+    {
+      "id": "service-storage",
+      "targets": ["src/service/agent-session.ts", "src/storage/session-manager.ts"],
+      "testPrefixes": ["test/storage/", "test/service/", "test/cli/", "test/core/", "test/extensions/", "test/tools/"],
+      "testExcludes": []
+    }
+  ]
+}

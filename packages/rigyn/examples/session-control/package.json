@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-session-control",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Explicit session navigation commands for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

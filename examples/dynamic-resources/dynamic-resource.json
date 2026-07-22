@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "name": "dynamic-resource",
-  "base": "dark",
-  "styles": {
-    "accent": { "foreground": "#56b6c2" }
-  }
-}

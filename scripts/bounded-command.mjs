@@ -4,7 +4,7 @@ import { mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { terminateLifecycleProcessTree } from "./lifecycle-common.mjs";
+import { terminateLifecycleProcessTree } from "../packages/rigyn/scripts/lifecycle-common.mjs";
 
 const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_OUTPUT_POLL_MS = 25;
@@ -263,7 +263,7 @@ export async function runBoundedCommand(command, args, options) {
   } finally {
     if (outputMonitor !== undefined) clearInterval(outputMonitor);
     await Promise.allSettled([stdoutFile?.close(), stderrFile?.close()].filter(Boolean));
-    await rm(outputRoot, { recursive: true, force: true });
+    await rm(outputRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     for (const [signal, handler] of signalHandlers) process.off(signal, handler);
   }
 }

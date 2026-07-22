@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-messages-bus",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Custom message rendering and in-process event bus example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

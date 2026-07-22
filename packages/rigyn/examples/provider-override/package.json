@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-provider-override",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local provider replacement example for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

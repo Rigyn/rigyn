@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-model-controls",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Model and thinking-level control example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

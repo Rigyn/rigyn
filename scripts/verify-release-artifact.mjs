@@ -2,16 +2,23 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { checkReleaseMetadata } from "./check-release-metadata.mjs";
 import { runBoundedCommand } from "./bounded-command.mjs";
-import { resolveNpmInvocation } from "./lifecycle-common.mjs";
+import {
+  releaseNpmResolutionArguments,
+  releaseNpmResolutionEnvironment,
+} from "./release-npm-resolution.mjs";
+import { inspectSourceArchive } from "./source-archive.mjs";
+import { assertSourceMetadata } from "./verify-source-archive.mjs";
+import { RIGYN_PACKAGE_GRAPH, resolveNpmInvocation } from "../packages/rigyn/scripts/lifecycle-common.mjs";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const REPOSITORY_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const PRODUCT_ROOT = resolve(REPOSITORY_ROOT, "packages/rigyn");
 const SENSITIVE_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const OUTPUT_MARKER = ".rigyn-release-output.json";
 const SHARP_SMOKE_PROGRAM = [
@@ -38,7 +45,7 @@ function parseArguments(argv) {
     if (!values.has(name)) throw new Error(`${name} is required`);
   }
   return {
-    directory: resolve(PROJECT_ROOT, values.get("--directory")),
+    directory: resolve(REPOSITORY_ROOT, values.get("--directory")),
     expectedPlatform: values.get("--expected-platform"),
     expectedArch: values.get("--expected-arch"),
   };
@@ -84,63 +91,135 @@ function isolatedEnvironment(paths) {
     npm_config_progress: "false",
     npm_config_update_notifier: "false",
     npm_config_userconfig: paths.npmUserConfig,
+    ...releaseNpmResolutionEnvironment(),
   };
 }
 
 function assertManifest(manifest, platformPolicy, expectedPlatform, expectedArch) {
-  assert.equal(manifest.schemaVersion, 1, "Unsupported release manifest schema");
+  assert.equal(manifest.schemaVersion, 4, "Unsupported release manifest schema");
   assert.equal(manifest.product, "rigyn");
   assert.equal(manifest.tag, `v${manifest.version}`);
-  assert.equal(manifest.packaging, "node-native-npm");
+  assert.equal(manifest.packaging, "npm-and-standalone");
   assert.equal(manifest.node, "^24.15.0 || >=26.0.0");
+  assert.equal(manifest.nodeRuntime, platformPolicy.nodeRuntime.version);
   assert.equal(manifest.checksumFile, "SHA256SUMS");
   assert.equal(manifest.releaseNotes, "RELEASE_NOTES.md");
   assert.deepEqual(manifest.targets, platformPolicy.targets, "Staged targets do not match release/platforms.json");
-  assert.equal(typeof manifest.archive?.file, "string");
-  assert.equal(basename(manifest.archive.file), manifest.archive.file, "Archive file must be a basename");
-  assert.match(manifest.archive.sha256, /^[0-9a-f]{64}$/u);
-  assert.match(manifest.archive.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/u);
-  assert.ok(Number.isSafeInteger(manifest.archive.bytes) && manifest.archive.bytes > 0, "Archive byte size must be positive");
+  assert.deepEqual(
+    manifest.archives?.map(({ name }) => name),
+    RIGYN_PACKAGE_GRAPH.map(({ name }) => name),
+    "Release manifest must contain the complete package graph in dependency order",
+  );
+  assert.deepEqual(
+    manifest.standalones?.map(({ platform, arch }) => ({ platform, arch })),
+    platformPolicy.targets.map(({ platform, arch }) => ({ platform, arch })),
+    "Release manifest must contain one standalone archive per target",
+  );
+  const files = new Set();
+  for (const archive of manifest.archives) {
+    assert.deepEqual(
+      Object.keys(archive).sort(),
+      ["name", "version", "file", "sha256", "integrity", "bytes"].sort(),
+      `Archive metadata for ${archive.name} must use the exact schema`,
+    );
+    assert.equal(archive.version, manifest.version, `${archive.name} version must match the release`);
+    assert.equal(typeof archive.file, "string");
+    assert.equal(basename(archive.file), archive.file, "Archive file must be a basename");
+    assert.equal(files.has(archive.file), false, `Archive filename must be unique: ${archive.file}`);
+    files.add(archive.file);
+    assert.match(archive.sha256, /^[0-9a-f]{64}$/u);
+    assert.match(archive.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/u);
+    assert.ok(Number.isSafeInteger(archive.bytes) && archive.bytes > 0, "Archive byte size must be positive");
+  }
+  assert.deepEqual(
+    manifest.archive,
+    manifest.archives.find(({ name }) => name === manifest.product),
+    "Primary archive must be the staged product archive",
+  );
+  assertSourceMetadata(manifest.source, manifest.version);
+  assert.equal(files.has(manifest.source.file), false, `Archive filename must be unique: ${manifest.source.file}`);
+  files.add(manifest.source.file);
   assert.ok(
     manifest.targets.some((target) => target.platform === expectedPlatform && target.arch === expectedArch),
     `Release manifest does not declare ${expectedPlatform}/${expectedArch}`,
   );
+  for (const standalone of manifest.standalones) {
+    assert.deepEqual(Object.keys(standalone).sort(), [
+      "arch", "bytes", "entrypoint", "file", "node", "platform", "product", "schemaVersion", "sha256", "version",
+    ].sort(), `Standalone metadata for ${standalone.platform}/${standalone.arch} must use the exact schema`);
+    assert.equal(standalone.schemaVersion, 1);
+    assert.equal(standalone.product, manifest.product);
+    assert.equal(standalone.version, manifest.version);
+    assert.equal(standalone.node, manifest.nodeRuntime);
+    assert.equal(basename(standalone.file), standalone.file);
+    assert.match(standalone.sha256, /^[0-9a-f]{64}$/u);
+    assert.ok(Number.isSafeInteger(standalone.bytes) && standalone.bytes > 0);
+  }
 }
 
 async function main() {
   const { directory, expectedPlatform, expectedArch } = parseArguments(process.argv.slice(2));
   assert.equal(process.platform, expectedPlatform, `Runner platform is ${process.platform}, expected ${expectedPlatform}`);
   assert.equal(process.arch, expectedArch, `Runner architecture is ${process.arch}, expected ${expectedArch}`);
-  const releasePolicy = await checkReleaseMetadata(PROJECT_ROOT);
-  const platformPolicy = JSON.parse(await readFile(resolve(PROJECT_ROOT, "release/platforms.json"), "utf8"));
+  const releasePolicy = await checkReleaseMetadata(REPOSITORY_ROOT);
+  const productManifest = JSON.parse(await readFile(resolve(PRODUCT_ROOT, "package.json"), "utf8"));
+  const platformPolicy = JSON.parse(await readFile(resolve(PRODUCT_ROOT, "release/platforms.json"), "utf8"));
   const manifest = JSON.parse(await readFile(resolve(directory, "release-manifest.json"), "utf8"));
   assertManifest(manifest, platformPolicy, expectedPlatform, expectedArch);
   assert.equal(manifest.version, releasePolicy.version, "Staged version does not match the checkout");
-  const archivePath = resolve(directory, manifest.archive.file);
-  assert.equal(dirname(archivePath), directory, "Archive path escapes the release directory");
-  const archive = await readFile(archivePath);
-  assert.equal(archive.byteLength, manifest.archive.bytes, "Archive size does not match the manifest");
-  const sha256 = createHash("sha256").update(archive).digest("hex");
-  const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
-  assert.equal(sha256, manifest.archive.sha256, "Archive SHA-256 does not match the manifest");
-  assert.equal(integrity, manifest.archive.integrity, "Archive SHA-512 integrity does not match the manifest");
+  const archivePaths = [];
+  for (const archiveMetadata of manifest.archives) {
+    const archivePath = resolve(directory, archiveMetadata.file);
+    assert.equal(dirname(archivePath), directory, "Archive path escapes the release directory");
+    const archive = await readFile(archivePath);
+    assert.equal(archive.byteLength, archiveMetadata.bytes, `${archiveMetadata.name} archive size does not match the manifest`);
+    const sha256 = createHash("sha256").update(archive).digest("hex");
+    const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
+    assert.equal(sha256, archiveMetadata.sha256, `${archiveMetadata.name} archive SHA-256 does not match the manifest`);
+    assert.equal(integrity, archiveMetadata.integrity, `${archiveMetadata.name} archive SHA-512 integrity does not match the manifest`);
+    archivePaths.push(archivePath);
+  }
+  const sourcePath = resolve(directory, manifest.source.file);
+  assert.equal(dirname(sourcePath), directory, "Source archive path escapes the release directory");
+  const sourceArchive = await readFile(sourcePath);
+  assert.equal(sourceArchive.byteLength, manifest.source.bytes, "Source archive size does not match the manifest");
+  assert.equal(createHash("sha256").update(sourceArchive).digest("hex"), manifest.source.sha256,
+    "Source archive SHA-256 does not match the manifest");
+  await inspectSourceArchive(sourcePath, { root: manifest.source.root });
+  for (const standalone of manifest.standalones) {
+    const archivePath = resolve(directory, standalone.file);
+    assert.equal(dirname(archivePath), directory, "Standalone archive path escapes the release directory");
+    const archive = await readFile(archivePath);
+    assert.equal(archive.byteLength, standalone.bytes, `${standalone.file} size does not match the manifest`);
+    assert.equal(createHash("sha256").update(archive).digest("hex"), standalone.sha256,
+      `${standalone.file} SHA-256 does not match the manifest`);
+  }
   const outputMarker = JSON.parse(await readFile(resolve(directory, OUTPUT_MARKER), "utf8"));
   assert.deepEqual(Object.keys(outputMarker).sort(), [
     "product",
     "schemaVersion",
     "version",
-    "archive",
-    "archiveSha256",
+    "archives",
   ].sort(), "Release output ownership marker must use the exact schema");
   assert.equal(outputMarker.product, "rigyn");
-  assert.equal(outputMarker.schemaVersion, 1);
+  assert.equal(outputMarker.schemaVersion, 2);
   assert.equal(outputMarker.version, manifest.version);
-  assert.equal(outputMarker.archive, manifest.archive.file);
-  assert.equal(outputMarker.archiveSha256, sha256);
+  assert.deepEqual(
+    outputMarker.archives,
+    [
+      ...manifest.archives.map(({ file, sha256 }) => ({ file, sha256 })),
+      { file: manifest.source.file, sha256: manifest.source.sha256 },
+      ...manifest.standalones.map(({ file, sha256 }) => ({ file, sha256 })),
+    ],
+  );
   assert.equal(
     await readFile(resolve(directory, manifest.checksumFile), "utf8"),
-    `${sha256}  ${manifest.archive.file}\n`,
-    "SHA256SUMS does not match the archive",
+    [
+      ...manifest.archives.map(({ file, sha256 }) => ({ file, sha256 })),
+      { file: manifest.source.file, sha256: manifest.source.sha256 },
+      ...manifest.standalones.map(({ file, sha256 }) => ({ file, sha256 })),
+    ].map(({ file, sha256 }) => `${sha256}  ${file}\n`).join(""),
+    "SHA256SUMS does not match the archives",
   );
   assert.equal(
     await readFile(resolve(directory, manifest.releaseNotes), "utf8"),
@@ -158,7 +237,9 @@ async function main() {
     config: join(root, "config"),
     state: join(root, "state"),
     temporary: join(root, "tmp"),
-    npmCache: join(root, "npm-cache"),
+    npmCache: process.env.npm_config_cache ?? (process.platform === "win32"
+      ? join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "npm-cache")
+      : join(homedir(), ".npm")),
     npmLogs: join(root, "npm-logs"),
     npmUserConfig: join(root, "npmrc"),
     npmGlobalConfig: join(root, "npmrc-global"),
@@ -173,26 +254,97 @@ async function main() {
       paths.config,
       paths.state,
       paths.temporary,
-      paths.npmCache,
       paths.npmLogs,
       paths.install,
     ].map(async (path) => await mkdir(path, { recursive: true, mode: 0o700 })));
     await Promise.all([
       writeFile(paths.npmUserConfig, "", { mode: 0o600 }),
       writeFile(paths.npmGlobalConfig, "", { mode: 0o600 }),
+      writeFile(resolve(paths.install, "package.json"), `${JSON.stringify({
+        name: "rigyn-release-verification",
+        private: true,
+        version: "0.0.0",
+        overrides: { "@types/node": productManifest.devDependencies["@types/node"] },
+      }, null, 2)}\n`, { mode: 0o600 }),
     ]);
     const environment = isolatedEnvironment(paths);
+    const standalone = manifest.standalones.find(({ platform, arch }) =>
+      platform === expectedPlatform && arch === expectedArch);
+    assert.ok(standalone, `Missing standalone archive for ${expectedPlatform}/${expectedArch}`);
+    const extracted = resolve(root, "standalone");
+    await mkdir(extracted, { recursive: true, mode: 0o700 });
+    const archiveListing = await runBoundedCommand("tar", ["-tzf", resolve(directory, standalone.file)], {
+      cwd: extracted,
+      env: environment,
+      timeoutMs: 120_000,
+      label: "standalone archive path verification",
+    });
+    const expectedRoot = standalone.file.slice(0, -".tar.gz".length);
+    const archiveEntries = archiveListing.stdout.split(/\r?\n/u).filter(Boolean);
+    assert.ok(archiveEntries.length > 0, "Standalone archive is empty");
+    assert.ok(archiveEntries.every((entry) => entry === `${expectedRoot}/` || entry.startsWith(`${expectedRoot}/`)),
+      "Standalone archive contains an entry outside its target root");
+    await runBoundedCommand("tar", ["-xzf", resolve(directory, standalone.file), "-C", extracted], {
+      cwd: extracted,
+      env: environment,
+      timeoutMs: 120_000,
+      label: "standalone archive extraction",
+    });
+    const standaloneRoot = resolve(extracted, expectedRoot);
+    const buildMetadata = JSON.parse(await readFile(resolve(standaloneRoot, "BUILD-METADATA.json"), "utf8"));
+    assert.deepEqual(buildMetadata, Object.fromEntries(Object.entries(standalone).filter(([key]) =>
+      !["bytes", "file", "sha256"].includes(key))));
+    const standaloneRuntime = resolve(standaloneRoot, "bin", expectedPlatform === "win32" ? "node.exe" : "node");
+    assert.ok((await stat(standaloneRuntime)).size >= 10 * 1024 * 1024, "Standalone Node runtime is unexpectedly small");
+    await Promise.all([
+      access(resolve(standaloneRoot, "LICENSES/rigyn.txt")),
+      access(resolve(standaloneRoot, "LICENSES/node.txt")),
+      access(resolve(standaloneRoot, standalone.entrypoint)),
+    ]);
+    const standaloneCli = resolve(standaloneRoot, "lib/node_modules/rigyn/dist/bin/rigyn.js");
+    const standaloneVersion = await runBoundedCommand(standaloneRuntime, [standaloneCli, "--version"], {
+      cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted CLI version check",
+    });
+    assert.equal(standaloneVersion.stdout, `${manifest.version}\n`);
+    assert.equal(standaloneVersion.stderr, "");
+    const standaloneLauncher = resolve(standaloneRoot, standalone.entrypoint);
+    const launcherCommand = expectedPlatform === "win32"
+      ? {
+          command: environment.ComSpec ?? environment.COMSPEC ?? "cmd.exe",
+          args: ["/d", "/s", "/v:off", "/c", standaloneLauncher, "--version"],
+        }
+      : { command: standaloneLauncher, args: ["--version"] };
+    const launcherVersion = await runBoundedCommand(launcherCommand.command, launcherCommand.args, {
+      cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted launcher version check",
+    });
+    assert.equal(launcherVersion.stdout, `${manifest.version}\n`);
+    assert.equal(launcherVersion.stderr, "");
+    const standaloneHelp = await runBoundedCommand(standaloneRuntime, [standaloneCli, "--help"], {
+      cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted CLI help check",
+    });
+    assert.match(standaloneHelp.stdout, /^Rigyn\b/mu);
+    assert.equal(standaloneHelp.stderr, "");
+    const standaloneRpc = await runBoundedCommand(standaloneRuntime, [standaloneCli,
+      "--mode", "rpc", "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {
+      cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted offline RPC startup check",
+    });
+    assert.equal(standaloneRpc.stdout, "");
+    assert.equal(standaloneRpc.stderr, "");
     const invocation = await resolveNpmInvocation([
       "install",
       "--global=false",
       "--omit=dev",
+      "--omit=peer",
       "--include=optional",
+      "--legacy-peer-deps",
       "--no-audit",
       "--no-fund",
       "--package-lock=false",
+      "--ignore-scripts",
       "--prefix",
       paths.install,
-      archivePath,
+      ...releaseNpmResolutionArguments(),
+      ...archivePaths,
     ]);
     await runBoundedCommand(invocation.command, invocation.args, {
       cwd: paths.install,
@@ -200,10 +352,47 @@ async function main() {
       timeoutMs: 300_000,
       label: "release archive install",
     });
-    const packageRoot = resolve(paths.install, "node_modules", "rigyn");
-    const packageManifest = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
-    assert.equal(packageManifest.name, manifest.product);
-    assert.equal(packageManifest.version, manifest.version);
+    const installedPackages = new Map();
+    for (const { name } of RIGYN_PACKAGE_GRAPH) {
+      const root = resolve(paths.install, "node_modules", ...name.split("/"));
+      const installedManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+      assert.equal(installedManifest.name, name);
+      assert.equal(installedManifest.version, manifest.version);
+      const entry = installedManifest.exports?.["."]?.import ?? installedManifest.main;
+      assert.equal(typeof entry, "string", `${name} must expose an importable main entry`);
+      const entryPath = resolve(root, entry);
+      assert.equal(
+        entryPath.startsWith(`${root}/`) || entryPath.startsWith(`${root}\\`),
+        true,
+        `${name} main entry escapes its package root`,
+      );
+      await import(`${pathToFileURL(entryPath).href}?release-package=${encodeURIComponent(name)}`);
+      installedPackages.set(name, { root, manifest: installedManifest });
+    }
+    const tuiPackage = installedPackages.get("@rigyn/terminal");
+    assert.ok(tuiPackage);
+    const nativeVerification = await runBoundedCommand(
+      process.execPath,
+      [resolve(tuiPackage.root, "scripts/verify-native.mjs"), "--release"],
+      {
+        cwd: tuiPackage.root,
+        env: environment,
+        timeoutMs: 30_000,
+        label: "packed native helper verification",
+      },
+    );
+    assert.match(nativeVerification.stdout, /all native release artifacts verified/u);
+    if (expectedPlatform === "darwin" || expectedPlatform === "win32") {
+      assert.match(
+        nativeVerification.stdout,
+        new RegExp(`runtime verified for ${expectedPlatform}-${expectedArch}`, "u"),
+        "The packed matching native helper was not loaded",
+      );
+    }
+    assert.equal(nativeVerification.stderr, "");
+    const productPackage = installedPackages.get("rigyn");
+    assert.ok(productPackage);
+    const { root: packageRoot, manifest: packageManifest } = productPackage;
 
     const cli = await runBoundedCommand(process.execPath, [resolve(packageRoot, packageManifest.bin["rigyn"]), "--version"], {
       cwd: paths.install,
@@ -223,6 +412,18 @@ async function main() {
       assert.equal(typeof exported?.import, "string", `Missing import target for ${subpath}`);
       const target = resolve(packageRoot, exported.import);
       assert.equal(target.startsWith(`${packageRoot}/`) || target.startsWith(`${packageRoot}\\`), true, `${subpath} escapes the package root`);
+      if (subpath === "./rpc-entry") {
+        const rpcEntry = await runBoundedCommand(process.execPath, [target,
+          "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {
+          cwd: paths.install,
+          env: environment,
+          timeoutMs: 30_000,
+          label: "release RPC entry check",
+        });
+        assert.equal(rpcEntry.stdout, "");
+        assert.equal(rpcEntry.stderr, "");
+        continue;
+      }
       await import(`${pathToFileURL(target).href}?release-verification=${encodeURIComponent(subpath)}`);
     }
 
@@ -255,7 +456,8 @@ async function main() {
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
-  writeFileSync(1, `Verified ${manifest.archive.file} on ${expectedPlatform}/${expectedArch}.\n`);
+  writeFileSync(1,
+    `Verified ${manifest.archives.length} npm archives, the source archive, and the ${expectedPlatform}/${expectedArch} standalone archive.\n`);
 }
 
 try {

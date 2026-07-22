@@ -21,38 +21,113 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 24
-          package-manager-cache: false
+          node-version: 24.15.0
       - run: npm ci --ignore-scripts
       - run: npm run test:coverage:risk
       - run: npm run benchmark:runtime
 
+  native-build:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            arch: x64
+            runner: macos-15-intel
+            output: native/darwin/prebuilds/darwin-x64/darwin-modifiers.node
+          - platform: darwin
+            arch: arm64
+            runner: macos-15
+            output: native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node
+          - platform: win32
+            arch: x64
+            runner: windows-2025
+            msvc_arch: x64
+            output: native/win32/prebuilds/win32-x64/win32-console-mode.node
+          - platform: win32
+            arch: arm64
+            runner: windows-11-arm
+            msvc_arch: arm64
+            output: native/win32/prebuilds/win32-arm64/win32-console-mode.node
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.15.0
+      - run: npm ci --ignore-scripts
+      - name: Configure native compiler on Windows
+        if: matrix.platform == 'win32'
+        uses: TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c # v4.0.0
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - name: Build native helper
+        run: npm run native:build --workspace @rigyn/terminal
+      - name: Load native helper on its matching runner
+        run: npm run native:verify --workspace @rigyn/terminal
+      - name: Upload native helper
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rigyn-native-${{ matrix.platform }}-${{ matrix.arch }}
+          path: packages/terminal/${{ matrix.output }}
+          if-no-files-found: error
+          retention-days: 1
+
   stage:
-    needs: regression-guards
+    needs:
+      - regression-guards
+      - native-build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 24
-          package-manager-cache: false
+          node-version: 24.15.0
       - name: Verify release tag
         if: github.event_name == 'push'
-        run: node --eval "const expected='v'+require('./package.json').version; if (process.env.GITHUB_REF_NAME !== expected) throw new Error('Expected tag '+expected+', received '+process.env.GITHUB_REF_NAME)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --eval "const expected='v'+require('./package.json').version; if (process.env.GITHUB_REF_NAME !== expected) throw new Error('Expected tag '+expected+', received '+process.env.GITHUB_REF_NAME)"
+          test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"
       - run: npm ci --ignore-scripts
+      - name: Download darwin-x64 native helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-native-darwin-x64
+          path: packages/terminal/native/darwin/prebuilds/darwin-x64
+      - name: Download darwin-arm64 native helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-native-darwin-arm64
+          path: packages/terminal/native/darwin/prebuilds/darwin-arm64
+      - name: Download win32-x64 native helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-native-win32-x64
+          path: packages/terminal/native/win32/prebuilds/win32-x64
+      - name: Download win32-arm64 native helper
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-native-win32-arm64
+          path: packages/terminal/native/win32/prebuilds/win32-arm64
+      - run: npm run native:verify --workspace @rigyn/terminal -- --release
       - run: npm run check
-      - run: npm run release:stage -- --output .release
+      - run: npm run build
+      - run: npm run release:stage -- --output .release --source-ref "$GITHUB_SHA"
       - name: Upload staged release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rigyn-release-${{ github.run_id }}
+          name: rigyn-release-stage-${{ github.run_id }}
           path: .release/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
-  verify:
+  standalone-build:
     needs: stage
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -80,14 +155,94 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 24
-          package-manager-cache: false
+          node-version: 24.15.0
+      - run: npm ci --ignore-scripts
+      - name: Download staged npm archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-release-stage-${{ github.run_id }}
+          path: .release
+      - name: Build and runtime-verify standalone archive
+        run: npm run release:standalone -- --directory .release --output .standalone
+      - name: Upload standalone archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rigyn-standalone-${{ matrix.platform }}-${{ matrix.arch }}
+          path: .standalone/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  finalize:
+    needs:
+      - stage
+      - standalone-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.15.0
+      - name: Download staged npm archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rigyn-release-stage-${{ github.run_id }}
+          path: .release
+      - name: Download standalone archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rigyn-standalone-*
+          path: .standalone
+          merge-multiple: true
+      - run: npm run release:finalize -- --directory .release --standalone-directory .standalone
+      - name: Upload finalized release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rigyn-release-${{ github.run_id }}
+          path: .release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: finalize
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            runner: ubuntu-24.04
+          - platform: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin
+            arch: x64
+            runner: macos-15-intel
+          - platform: darwin
+            arch: arm64
+            runner: macos-15
+          - platform: win32
+            arch: x64
+            runner: windows-2025
+          - platform: win32
+            arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.15.0
       - run: npm ci --ignore-scripts
       - name: Download staged release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rigyn-release-${{ github.run_id }}
           path: .release
+      - name: Extract and build the release source archive
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
+        run: node scripts/verify-source-archive.mjs --directory .release --build
       - name: Verify Node-native release
         run: >-
           node scripts/verify-release-artifact.mjs
@@ -108,9 +263,8 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: 24
+          node-version: 24.15.0
           registry-url: https://registry.npmjs.org
-          package-manager-cache: false
       - name: Download staged release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -132,27 +286,30 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md
           fi
-          gh release upload "$GITHUB_REF_NAME" .release/*.tgz .release/SHA256SUMS .release/release-manifest.json .release/RELEASE_NOTES.md --clobber
-      - name: Publish exact staged archive to npm
+          gh release upload "$GITHUB_REF_NAME" .release/*.tgz .release/*.tar.gz .release/SHA256SUMS .release/release-manifest.json .release/RELEASE_NOTES.md --clobber
+      - name: Publish exact staged package graph to npm
         if: vars.NPM_PUBLISH_ENABLED == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          package="$(node -p "require('./.release/release-manifest.json').product")"
-          version="$(node -p "require('./.release/release-manifest.json').version")"
-          archive="$(node -p "require('./.release/release-manifest.json').archive.file")"
-          expected="$(node -p "require('./.release/release-manifest.json').archive.integrity")"
-          if published="$(npm view "$package@$version" dist.integrity --json 2>/dev/null)"; then
-            PUBLISHED_INTEGRITY="$published" EXPECTED_INTEGRITY="$expected" node --eval '
-              const published = JSON.parse(process.env.PUBLISHED_INTEGRITY);
-              if (published !== process.env.EXPECTED_INTEGRITY) {
-                throw new Error("Published npm integrity differs from the staged archive");
-              }
-            '
-            echo "$package@$version already contains the staged bytes"
-          else
-            npm publish ".release/$archive" --access public --provenance
-          fi
+          node --input-type=module --eval '
+            const manifest = (await import("./.release/release-manifest.json", { with: { type: "json" } })).default;
+            for (const archive of manifest.archives) {
+              process.stdout.write([archive.name, archive.version, archive.file, archive.integrity].join("\t") + "\n");
+            }
+          ' | while IFS=$'\t' read -r package version archive expected; do
+            if published="$(npm view "$package@$version" dist.integrity --json 2>/dev/null)"; then
+              PUBLISHED_INTEGRITY="$published" EXPECTED_INTEGRITY="$expected" node --eval '
+                const published = JSON.parse(process.env.PUBLISHED_INTEGRITY);
+                if (published !== process.env.EXPECTED_INTEGRITY) {
+                  throw new Error("Published npm integrity differs from the staged archive");
+                }
+              '
+              echo "$package@$version already contains the staged bytes"
+            else
+              npm publish ".release/$archive" --access public --provenance
+            fi
+          done
       - name: Publish GitHub release
         shell: bash
         env:

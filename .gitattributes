@@ -1,0 +1,2 @@
+packages/models/src/providers/data/*.json text eol=lf
+packages/models/src/cli-bin.ts text eol=lf

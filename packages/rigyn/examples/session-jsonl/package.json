@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-session-jsonl",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only current-session inspection example for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

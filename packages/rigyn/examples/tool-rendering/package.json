@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-tool-rendering",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Built-in tool replacement and structural rendering example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

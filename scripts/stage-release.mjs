@@ -7,27 +7,40 @@ import { fileURLToPath } from "node:url";
 
 import { checkReleaseMetadata } from "./check-release-metadata.mjs";
 import { runBoundedCommand } from "./bounded-command.mjs";
-import { inside, resolveNpmInvocation, withLifecycleLock } from "./lifecycle-common.mjs";
+import { createSourceArchive } from "./source-archive.mjs";
+import {
+  RIGYN_PACKAGE_GRAPH,
+  inside,
+  resolveNpmInvocation,
+  withLifecycleLock,
+} from "../packages/rigyn/scripts/lifecycle-common.mjs";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const REPOSITORY_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const PRODUCT_ROOT = resolve(REPOSITORY_ROOT, "packages/rigyn");
+const TUI_ROOT = resolve(REPOSITORY_ROOT, "packages/terminal");
 const SENSITIVE_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const OUTPUT_MARKER = ".rigyn-release-output.json";
 const MAX_MARKER_BYTES = 16 * 1024;
 
 function parseArguments(argv) {
-  let output = resolve(PROJECT_ROOT, ".release");
+  let output = resolve(REPOSITORY_ROOT, ".release");
+  let sourceRef = "HEAD";
+  const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument !== "--output") throw new Error(`Unknown argument: ${argument}`);
+    if (!["--output", "--source-ref"].includes(argument)) throw new Error(`Unknown argument: ${argument}`);
     const value = argv[index + 1];
-    if (value === undefined || value === "") throw new Error("--output requires a directory");
-    output = resolve(PROJECT_ROOT, value);
+    if (value === undefined || value === "") throw new Error(`${argument} requires a value`);
+    if (seen.has(argument)) throw new Error(`${argument} may be specified only once`);
+    seen.add(argument);
+    if (argument === "--output") output = resolve(REPOSITORY_ROOT, value);
+    else sourceRef = value;
     index += 1;
   }
-  if (output === PROJECT_ROOT || output === parse(output).root) {
+  if (output === REPOSITORY_ROOT || output === parse(output).root) {
     throw new Error("Release output cannot be the project or filesystem root");
   }
-  return { output };
+  return { output, sourceRef };
 }
 
 function releaseEnvironment() {
@@ -70,7 +83,7 @@ async function physicalTarget(target) {
 
 async function assertSafeOutputPath(output) {
   const physicalOutput = await physicalTarget(output);
-  const physicalProject = await realpath(PROJECT_ROOT);
+  const physicalProject = await realpath(REPOSITORY_ROOT);
   if (physicalOutput === parse(physicalOutput).root || inside(physicalOutput, physicalProject)) {
     throw new Error("Release output cannot be the project, filesystem root, or an ancestor of the project");
   }
@@ -92,19 +105,42 @@ async function readOutputMarker(storagePath) {
   } catch (error) {
     throw new Error(`Release output marker is invalid: ${path}`, { cause: error });
   }
-  const keys = Object.keys(marker).sort();
-  const expectedKeys = ["product", "schemaVersion", "version", "archive", "archiveSha256"].sort();
-  if (keys.length !== expectedKeys.length || !keys.every((key, index) => key === expectedKeys[index])
-    || marker.product !== "rigyn"
-    || marker.schemaVersion !== 1
-    || typeof marker.version !== "string" || marker.version === ""
-    || typeof marker.archive !== "string" || basename(marker.archive) !== marker.archive
-    || !/^[a-f0-9]{64}$/u.test(marker.archiveSha256 ?? "")) {
+  if (marker.product !== "rigyn" || typeof marker.version !== "string" || marker.version === "") {
     throw new Error(`Release output marker is invalid: ${path}`);
   }
-  const archive = await readFile(resolve(storagePath, marker.archive));
-  if (createHash("sha256").update(archive).digest("hex") !== marker.archiveSha256) {
-    throw new Error(`Release output archive does not match its ownership marker: ${storagePath}`);
+  let archives;
+  if (marker.schemaVersion === 1) {
+    const keys = Object.keys(marker).sort();
+    const expectedKeys = ["product", "schemaVersion", "version", "archive", "archiveSha256"].sort();
+    if (keys.length !== expectedKeys.length || !keys.every((key, index) => key === expectedKeys[index])) {
+      throw new Error(`Release output marker is invalid: ${path}`);
+    }
+    archives = [{ file: marker.archive, sha256: marker.archiveSha256 }];
+  } else if (marker.schemaVersion === 2) {
+    const keys = Object.keys(marker).sort();
+    const expectedKeys = ["product", "schemaVersion", "version", "archives"].sort();
+    if (keys.length !== expectedKeys.length || !keys.every((key, index) => key === expectedKeys[index])
+      || !Array.isArray(marker.archives) || marker.archives.length < 1 || marker.archives.length > 64) {
+      throw new Error(`Release output marker is invalid: ${path}`);
+    }
+    archives = marker.archives;
+  } else {
+    throw new Error(`Release output marker is invalid: ${path}`);
+  }
+  const files = new Set();
+  for (const archive of archives) {
+    if (archive === null || typeof archive !== "object" || Array.isArray(archive)
+      || Object.keys(archive).sort().join("\0") !== ["file", "sha256"].sort().join("\0")
+      || typeof archive.file !== "string" || basename(archive.file) !== archive.file
+      || files.has(archive.file)
+      || !/^[a-f0-9]{64}$/u.test(archive.sha256 ?? "")) {
+      throw new Error(`Release output marker is invalid: ${path}`);
+    }
+    files.add(archive.file);
+    const contents = await readFile(resolve(storagePath, archive.file));
+    if (createHash("sha256").update(contents).digest("hex") !== archive.sha256) {
+      throw new Error(`Release output archive does not match its ownership marker: ${storagePath}`);
+    }
   }
   return marker;
 }
@@ -128,62 +164,92 @@ async function recoverPreviousOutput(output, previous) {
   await rm(previous, { recursive: true, force: true });
 }
 
-async function stage(output) {
+async function stage(output, sourceRef) {
   const previous = `${output}.previous`;
   await recoverPreviousOutput(output, previous);
-  const metadata = await checkReleaseMetadata(PROJECT_ROOT);
-  const manifest = JSON.parse(await readFile(resolve(PROJECT_ROOT, "package.json"), "utf8"));
-  const platformPolicy = JSON.parse(await readFile(resolve(PROJECT_ROOT, "release/platforms.json"), "utf8"));
+  const metadata = await checkReleaseMetadata(REPOSITORY_ROOT);
+  const nativeTargets = JSON.parse(await readFile(resolve(TUI_ROOT, "native/targets.json"), "utf8"));
+  await runBoundedCommand(process.execPath, [resolve(TUI_ROOT, "scripts/verify-native.mjs"), "--release"], {
+    cwd: TUI_ROOT,
+    env: releaseEnvironment(),
+    timeoutMs: 30_000,
+    label: "native release artifact verification",
+  });
+  const packageManifests = new Map(await Promise.all(RIGYN_PACKAGE_GRAPH.map(async ({ name, directory }) => [
+    name,
+    JSON.parse(await readFile(resolve(REPOSITORY_ROOT, directory, "package.json"), "utf8")),
+  ])));
+  const manifest = packageManifests.get("rigyn");
+  const platformPolicy = JSON.parse(await readFile(resolve(PRODUCT_ROOT, "release/platforms.json"), "utf8"));
   await mkdir(dirname(output), { recursive: true });
   const staging = `${output}.staging-${process.pid}-${randomBytes(6).toString("hex")}`;
   await mkdir(staging, { recursive: true, mode: 0o700 });
   try {
-    const invocation = await resolveNpmInvocation([
-      "pack",
-      "--json",
-      "--ignore-scripts",
-      "--pack-destination",
-      staging,
-      PROJECT_ROOT,
-    ]);
-    const packedOutput = await runBoundedCommand(invocation.command, invocation.args, {
-      cwd: PROJECT_ROOT,
-      env: releaseEnvironment(),
-      timeoutMs: 120_000,
-      label: "npm pack",
-    });
-    const packed = JSON.parse(packedOutput.stdout);
-    assert.equal(packed.length, 1, "npm pack must produce exactly one archive");
-    assert.equal(packed[0]?.name, manifest.name, "Packed package name does not match package.json");
-    assert.equal(packed[0]?.version, manifest.version, "Packed package version does not match package.json");
-    const archiveFile = packed[0]?.filename;
-    assert.equal(typeof archiveFile, "string", "npm pack did not report an archive filename");
-    assert.equal(archiveFile.includes("/") || archiveFile.includes("\\"), false, "Archive filename must be a basename");
-    const archive = await readFile(resolve(staging, archiveFile));
-    const sha256 = createHash("sha256").update(archive).digest("hex");
-    const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
-    if (packed[0]?.integrity !== undefined) {
-      assert.equal(packed[0].integrity, integrity, "npm pack integrity does not match the staged archive");
+    const archives = [];
+    for (const { name, directory } of RIGYN_PACKAGE_GRAPH) {
+      const packageManifest = packageManifests.get(name);
+      const packageRoot = resolve(REPOSITORY_ROOT, directory);
+      const invocation = await resolveNpmInvocation([
+        "pack",
+        "--json",
+        "--ignore-scripts",
+        "--pack-destination",
+        staging,
+        packageRoot,
+      ]);
+      const packedOutput = await runBoundedCommand(invocation.command, invocation.args, {
+        cwd: packageRoot,
+        env: releaseEnvironment(),
+        timeoutMs: 120_000,
+        label: `npm pack ${name}`,
+      });
+      const packed = JSON.parse(packedOutput.stdout);
+      assert.equal(packed.length, 1, `npm pack must produce exactly one archive for ${name}`);
+      assert.equal(packed[0]?.name, packageManifest.name, `Packed package name does not match ${directory}/package.json`);
+      assert.equal(packed[0]?.version, packageManifest.version, `Packed package version does not match ${directory}/package.json`);
+      if (name === "@rigyn/terminal") {
+        const packedFiles = new Set((packed[0]?.files ?? []).map(({ path }) => path));
+        for (const target of nativeTargets.targets) {
+          assert.ok(packedFiles.has(target.output), `Packed @rigyn/terminal archive is missing ${target.output}`);
+        }
+      }
+      const file = packed[0]?.filename;
+      assert.equal(typeof file, "string", `npm pack did not report an archive filename for ${name}`);
+      assert.equal(file.includes("/") || file.includes("\\"), false, "Archive filename must be a basename");
+      const archive = await readFile(resolve(staging, file));
+      const sha256 = createHash("sha256").update(archive).digest("hex");
+      const integrity = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
+      if (packed[0]?.integrity !== undefined) {
+        assert.equal(packed[0].integrity, integrity, `npm pack integrity does not match the staged ${name} archive`);
+      }
+      archives.push({ name, version: packageManifest.version, file, sha256, integrity, bytes: archive.byteLength });
     }
+    const archive = archives.find(({ name }) => name === manifest.name);
+    const source = await createSourceArchive({
+      repositoryRoot: REPOSITORY_ROOT,
+      version: manifest.version,
+      ref: sourceRef,
+      output: resolve(staging, `rigyn-v${manifest.version}-source.tar.gz`),
+    });
     const releaseManifest = {
-      schemaVersion: 1,
+      schemaVersion: 4,
       product: manifest.name,
       version: manifest.version,
       tag: `v${manifest.version}`,
       packaging: platformPolicy.packaging,
       node: manifest.engines.node,
-      archive: {
-        file: archiveFile,
-        sha256,
-        integrity,
-        bytes: archive.byteLength,
-      },
+      nodeRuntime: platformPolicy.nodeRuntime.version,
+      archive,
+      archives,
+      source,
+      standalones: [],
       checksumFile: "SHA256SUMS",
       releaseNotes: "RELEASE_NOTES.md",
       targets: platformPolicy.targets,
     };
+    const checksums = [...archives, source].map(({ file, sha256 }) => `${sha256}  ${file}\n`).join("");
     await Promise.all([
-      writeFile(resolve(staging, "SHA256SUMS"), `${sha256}  ${archiveFile}\n`, { mode: 0o600 }),
+      writeFile(resolve(staging, "SHA256SUMS"), checksums, { mode: 0o600 }),
       writeFile(
         resolve(staging, "RELEASE_NOTES.md"),
         `# Rigyn ${manifest.version}\n\n${metadata.releaseBody}\n`,
@@ -198,10 +264,9 @@ async function stage(output) {
         resolve(staging, OUTPUT_MARKER),
         `${JSON.stringify({
           product: "rigyn",
-          schemaVersion: 1,
+          schemaVersion: 2,
           version: manifest.version,
-          archive: archiveFile,
-          archiveSha256: sha256,
+          archives: [...archives, source].map(({ file, sha256 }) => ({ file, sha256 })),
         }, null, 2)}\n`,
         { mode: 0o600 },
       ),
@@ -215,7 +280,7 @@ async function stage(output) {
       throw error;
     }
     if (hadOutput) await rm(previous, { recursive: true, force: true });
-    writeFileSync(1, `Staged ${archiveFile} and release metadata in ${output}\n`);
+    writeFileSync(1, `Staged ${archives.length} package archives, one source archive, and release metadata in ${output}\n`);
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
@@ -223,9 +288,9 @@ async function stage(output) {
 }
 
 async function main() {
-  const { output } = parseArguments(process.argv.slice(2));
+  const { output, sourceRef } = parseArguments(process.argv.slice(2));
   await assertSafeOutputPath(output);
-  await withLifecycleLock(output, async () => await stage(output));
+  await withLifecycleLock(output, async () => await stage(output, sourceRef));
 }
 
 try {

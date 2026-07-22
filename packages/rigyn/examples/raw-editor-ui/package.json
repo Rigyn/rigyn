@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-raw-editor-ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Trusted editor replacement example for Rigyn",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

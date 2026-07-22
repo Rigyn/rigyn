@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 1,
+  "hosts": ["tui", "print", "json", "rpc", "embedding"],
+  "capabilities": [
+    {
+      "id": "direct-package-loading",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": [],
+      "docs": ["docs/packages.md", "docs/extensions.md"],
+      "examples": ["examples/starter"],
+      "tests": ["test/core/package-manager-activation.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "lifecycle-events-and-disposal",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on", "onDispose"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/lifecycle-events"],
+      "tests": ["test/extensions/runtime.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "commands-shortcuts-and-flags",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerCommand", "registerShortcut", "registerFlag", "getFlag", "getCommands"],
+      "docs": ["docs/extensions.md"],
+      "examples": ["examples/command-controls"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "tools-and-renderers",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerTool", "getActiveTools", "getAllTools", "setActiveTools"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/tool-rendering"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "input-and-tool-guards",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/input-guard"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "trusted-ui-surfaces",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/ui-surfaces"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "context-and-compaction",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on", "getContextUsage", "compact", "getSystemPrompt"],
+      "docs": ["docs/extensions.md", "docs/compaction.md"],
+      "examples": ["examples/context-compaction"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "custom-messages-and-events",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["events", "sendMessage", "registerMessageRenderer"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/messages-bus"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "model-and-thinking-controls",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["setModel", "getThinkingLevel", "setThinkingLevel"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/model-controls"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "provider-replacement",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerProvider", "unregisterProvider"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/provider-override"],
+      "tests": ["test/cli/runtime-provider-overlay.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "trusted-editor-ui",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui", "setEditorComponent"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/raw-editor-ui"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "current-session-inspection",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["sessionManager"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-jsonl"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "session-flow-controls",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["newSession", "fork", "navigateTree", "switchSession", "reload"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-control"],
+      "tests": ["test/extensions/direct-example-packages.test.ts", "test/cli/runtime-direct-extensions.test.ts"]
+    },
+    {
+      "id": "session-metadata-and-entries",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["appendEntry", "setSessionName", "getSessionName", "setLabel", "registerEntryRenderer"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-metadata"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "bounded-process-execution",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["exec"],
+      "docs": ["docs/extensions.md", "docs/packages.md"],
+      "examples": ["examples/subprocess-workers"],
+      "tests": ["test/extensions/direct-example-packages.test.ts", "test/process/command.test.ts"]
+    },
+    {
+      "id": "dynamic-and-unified-resource-discovery",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on", "getDiscoveryView"],
+      "docs": ["docs/extensions.md", "docs/packages.md"],
+      "examples": ["examples/dynamic-package"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts", "test/core/resource-loader.test.ts"]
+    },
+    {
+      "id": "provider-wire-lifecycle",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/provider-hooks"],
+      "tests": ["test/extensions/direct-event-conformance.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "runtime-catalog-and-message-delivery",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["getActiveTools", "getAllTools", "setActiveTools", "getCommands", "getDiscoveryView", "setModel", "sendUserMessage"],
+      "docs": ["docs/extensions.md", "docs/resource-catalog.md"],
+      "examples": ["examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "session-transition-lifecycle",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on", "compact", "navigateTree"],
+      "docs": ["docs/extensions.md", "docs/session-jsonl.md"],
+      "examples": ["examples/session-lifecycle"],
+      "tests": ["test/extensions/direct-event-conformance.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "managed-provider-catalog",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["registerProvider"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/provider-catalog"],
+      "tests": ["test/extensions/runtime-managed-provider-auth.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "terminal-workbench-ui",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui"],
+      "docs": ["docs/tui.md", "docs/themes.md", "docs/keybindings.md"],
+      "examples": ["examples/terminal-workbench"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "project-trust-decision",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "embedding"],
+      "apiMembers": ["on"],
+      "docs": ["docs/extensions.md", "docs/configuration.md"],
+      "examples": ["examples/project-trust"],
+      "tests": ["test/extensions/runtime-project-trust.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    }
+  ]
+}

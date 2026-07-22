@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
+import { RIGYN_PACKAGE_GRAPH } from "../packages/rigyn/scripts/lifecycle-common.mjs";
+
+const REPOSITORY_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const RELEASE_CATEGORIES = new Set([
   "Added",
@@ -16,15 +18,19 @@ const RELEASE_CATEGORIES = new Set([
   "Removed",
   "Security",
 ]);
-const REQUIRED_FILES = [
+const REQUIRED_PRODUCT_FILES = [
   "CHANGELOG.md",
-  "CODE_OF_CONDUCT.md",
-  "CONTRIBUTING.md",
   "LICENSE",
   "SECURITY.md",
   "docs/install.md",
   "docs/public-api.md",
   "docs/releasing.md",
+];
+const REQUIRED_REPOSITORY_FILES = [
+  "CODE_OF_CONDUCT.md",
+  "CONTRIBUTING.md",
+  "LICENSE",
+  "SECURITY.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
   ".github/ISSUE_TEMPLATE/feature_request.yml",
   ".github/PULL_REQUEST_TEMPLATE.md",
@@ -73,6 +79,7 @@ export function extractReleaseNotes(changelog, version) {
 
 function expectedExport(subpath) {
   if (subpath === "./package.json") return "./package.json";
+  if (subpath === "./rpc-entry") return { import: "./dist/rpc-entry.js" };
   const layer = subpath === "." ? "" : `${subpath.slice(2)}/`;
   return {
     types: `./dist/${layer}index.d.ts`,
@@ -112,31 +119,100 @@ function validateIssueTemplate(path, document) {
   );
 }
 
-export async function checkReleaseMetadata(root = PROJECT_ROOT) {
-  const projectRoot = resolve(root);
-  const [manifest, lockfile, changelog, subpathPolicy, platformPolicy] = await Promise.all([
-    readJson(projectRoot, "package.json"),
-    readJson(projectRoot, "package-lock.json"),
-    readText(projectRoot, "CHANGELOG.md"),
-    readJson(projectRoot, "release/public-subpaths.json"),
-    readJson(projectRoot, "release/platforms.json"),
+export function assertWorkspaceLockIdentity(lockfile, { name, directory }) {
+  const workspaceEntry = lockfile.packages?.[directory];
+  assert.ok(workspaceEntry, `package-lock must contain ${directory}`);
+  const canonicalUnscopedPath = !name.includes("/") && directory === `packages/${name}`;
+  if (workspaceEntry.name !== undefined || !canonicalUnscopedPath) {
+    assert.equal(workspaceEntry.name, name, `package-lock ${directory} name must match package.json`);
+  }
+
+  const linkEntry = lockfile.packages?.[`node_modules/${name}`];
+  assert.equal(linkEntry?.link, true, `package-lock node_modules/${name} must be a workspace link`);
+  assert.equal(linkEntry?.resolved, directory, `package-lock node_modules/${name} must resolve to ${directory}`);
+}
+
+export function assertRootLockIdentity(lockfile, rootManifest, productVersion) {
+  assert.equal(rootManifest.version, productVersion, "Root package version must match rigyn");
+  const rootEntry = lockfile.packages?.[""];
+  assert.ok(rootEntry, "package-lock must contain the repository root");
+  assert.equal(rootEntry.name, rootManifest.name, "package-lock root name must match package.json");
+  assert.equal(rootEntry.version, rootManifest.version, "package-lock root version must match package.json");
+}
+
+export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
+  const repositoryRoot = resolve(root);
+  const productRoot = resolve(repositoryRoot, "packages/rigyn");
+  const workspaceDirectories = (await readdir(resolve(repositoryRoot, "packages"), { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => `packages/${entry.name}`)
+    .sort();
+  const [rootManifest, packageManifests, workspaceManifests, lockfile, changelog, subpathPolicy, platformPolicy, nativeTargets] = await Promise.all([
+    readJson(repositoryRoot, "package.json"),
+    Promise.all(RIGYN_PACKAGE_GRAPH.map(async ({ directory }) => await readJson(repositoryRoot, `${directory}/package.json`))),
+    Promise.all(workspaceDirectories.map(async (directory) => await readJson(repositoryRoot, `${directory}/package.json`))),
+    readJson(repositoryRoot, "package-lock.json"),
+    readText(productRoot, "CHANGELOG.md"),
+    readJson(productRoot, "release/public-subpaths.json"),
+    readJson(productRoot, "release/platforms.json"),
+    readJson(repositoryRoot, "packages/terminal/native/targets.json"),
   ]);
+  const manifests = new Map(packageManifests.map((manifest) => [manifest.name, manifest]));
+  const manifest = manifests.get("rigyn");
+
+  assert.equal(manifests.size, RIGYN_PACKAGE_GRAPH.length, "Release package names must be unique");
+  assert.deepEqual(
+    [...manifests.keys()].sort(),
+    workspaceManifests
+      .filter((workspaceManifest) => workspaceManifest.publishConfig?.access === "public")
+      .map((workspaceManifest) => workspaceManifest.name)
+      .sort(),
+    "Release graph must contain every public workspace package",
+  );
+  assert.ok(manifest, "packages/rigyn/package.json must declare rigyn");
+  assertRootLockIdentity(lockfile, rootManifest, manifest.version);
+  assert.match(manifest.devDependencies?.["@types/node"] ?? "", VERSION_PATTERN, "rigyn must pin @types/node exactly");
+  for (const { name, directory } of RIGYN_PACKAGE_GRAPH) {
+    const packageManifest = manifests.get(name);
+    assert.ok(packageManifest, `${directory}/package.json must declare ${name}`);
+    assert.equal(packageManifest.version, manifest.version, `${name} version must match rigyn`);
+    assertWorkspaceLockIdentity(lockfile, { name, directory });
+    assert.equal(lockfile.packages?.[directory]?.version, packageManifest.version, `package-lock ${directory} version must match package.json`);
+    assert.equal(packageManifest.license, "MIT", `${name} must declare the MIT license`);
+    assert.equal(packageManifest.publishConfig?.access, "public", `${name} releases must be explicitly public`);
+  }
+  const expectedInternalDependencies = new Map([
+    ["@rigyn/terminal", []],
+    ["@rigyn/models", []],
+    ["@rigyn/kernel", ["@rigyn/models"]],
+    ["rigyn", ["@rigyn/kernel", "@rigyn/models", "@rigyn/terminal"]],
+  ]);
+  const internalNames = new Set(RIGYN_PACKAGE_GRAPH.map(({ name }) => name));
+  for (const { name, directory } of RIGYN_PACKAGE_GRAPH) {
+    const packageManifest = manifests.get(name);
+    const actual = Object.keys(packageManifest.dependencies ?? {}).filter((dependency) => internalNames.has(dependency)).sort();
+    assert.deepEqual(actual, expectedInternalDependencies.get(name), `${name} internal dependency graph is invalid`);
+    for (const dependency of actual) {
+      const version = manifests.get(dependency).version;
+      assert.equal(packageManifest.dependencies[dependency], version, `${name} must pin ${dependency} exactly`);
+      assert.equal(lockfile.packages?.[directory]?.dependencies?.[dependency], version, `package-lock ${directory} must pin ${dependency} exactly`);
+    }
+  }
 
   assert.equal(typeof manifest.version, "string");
   assert.match(manifest.version, VERSION_PATTERN, "package.json version must be semantic");
-  assert.equal(lockfile.version, manifest.version, "package-lock.json version must match package.json");
-  assert.equal(lockfile.packages?.[""]?.version, manifest.version, "package-lock root version must match package.json");
+  assert.equal(lockfile.packages?.["packages/rigyn"]?.version, manifest.version, "package-lock product version must match package.json");
   assert.equal(manifest.license, "MIT", "package.json must declare the MIT license");
-  assert.equal(lockfile.packages?.[""]?.license, manifest.license, "package-lock root license must match package.json");
+  assert.equal(lockfile.packages?.["packages/rigyn"]?.license, manifest.license, "package-lock product license must match package.json");
   assert.equal(manifest.homepage, "https://github.com/Rigyn/rigyn#readme", "package.json homepage must target the public repository");
   assert.deepEqual(manifest.bugs, { url: "https://github.com/Rigyn/rigyn/issues" }, "package.json bugs URL must target the public repository");
   assert.deepEqual(
     manifest.repository,
-    { type: "git", url: "git+https://github.com/Rigyn/rigyn.git" },
+    { type: "git", url: "git+https://github.com/Rigyn/rigyn.git", directory: "packages/rigyn" },
     "package.json repository must target the public repository",
   );
   assert.equal(manifest.publishConfig?.access, "public", "npm releases must be explicitly public");
-  const versionSource = await readText(projectRoot, "src/version.ts");
+  const versionSource = await readText(productRoot, "src/version.ts");
   assert.equal(
     versionSource.trim(),
     `export const RIGYN_VERSION = ${JSON.stringify(manifest.version)};`,
@@ -164,33 +240,65 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
   }
 
   assert.equal(platformPolicy.schemaVersion, 1, "Unsupported platform policy schema");
-  assert.equal(platformPolicy.packaging, "node-native-npm");
+  assert.equal(platformPolicy.packaging, "npm-and-standalone");
+  assert.deepEqual(platformPolicy.nodeRuntime, {
+    version: "24.15.0",
+    source: "official-node-distribution",
+  }, "Standalone releases must pin the official Node runtime");
   assert.deepEqual(platformPolicy.targets, EXPECTED_TARGETS, "Release targets must cover the declared x64/arm64 matrix");
   const targetKeys = platformPolicy.targets.map((target) => `${target.platform}/${target.arch}`);
   assert.equal(new Set(targetKeys).size, targetKeys.length, "Release targets must be unique");
+  assert.equal(nativeTargets.schemaVersion, 1, "Unsupported native target manifest schema");
+  assert.ok(Array.isArray(nativeTargets.targets), "Native target manifest must contain targets");
+  assert.equal(nativeTargets.targets.length, 4, "Native target manifest must contain four targets");
+  const nativeTargetKeys = nativeTargets.targets.map((target) => `${target.platform}/${target.arch}`);
+  assert.equal(new Set(nativeTargetKeys).size, nativeTargetKeys.length, "Native targets must be unique");
+  for (const target of nativeTargets.targets) {
+    assert.ok(
+      platformPolicy.targets.some((candidate) => candidate.platform === target.platform && candidate.arch === target.arch),
+      `Native target ${target.platform}/${target.arch} is outside the release matrix`,
+    );
+    assert.match(target.output, /^native\/(?:darwin|win32)\/prebuilds\/(?:darwin|win32)-(?:arm64|x64)\/[\w-]+\.node$/u);
+  }
 
-  const requiredContents = new Map();
-  for (const path of REQUIRED_FILES) requiredContents.set(path, await readText(projectRoot, path));
-  const publicApi = requiredContents.get("docs/public-api.md");
+  const productContents = new Map();
+  for (const path of REQUIRED_PRODUCT_FILES) productContents.set(path, await readText(productRoot, path));
+  const repositoryContents = new Map();
+  for (const path of REQUIRED_REPOSITORY_FILES) repositoryContents.set(path, await readText(repositoryRoot, path));
+  assert.equal(productContents.get("LICENSE"), repositoryContents.get("LICENSE"), "Package LICENSE must match the repository license");
+  assert.equal(productContents.get("SECURITY.md"), repositoryContents.get("SECURITY.md"), "Package SECURITY.md must match repository policy");
+  const publicApi = productContents.get("docs/public-api.md");
   for (const subpath of subpathPolicy.subpaths) {
     const display = subpath === "." ? "rigyn" : `rigyn/${subpath.slice(2)}`;
     assert.ok(publicApi.includes(display), `docs/public-api.md must list ${display}`);
   }
-  assert.match(requiredContents.get("SECURITY.md"), /private vulnerability-reporting/iu);
-  assert.match(requiredContents.get("CONTRIBUTING.md"), /npm run check/u);
-  assert.match(requiredContents.get("LICENSE"), /^MIT License$/mu);
-  assert.match(requiredContents.get("CODE_OF_CONDUCT.md"), /Report conduct concerns privately/u);
-  assert.match(requiredContents.get("docs/install.md"), /## Windows/u);
-  assert.match(requiredContents.get("docs/install.md"), /## Termux/u);
-  assert.match(requiredContents.get("docs/install.md"), /## tmux/u);
-  assert.match(requiredContents.get("docs/releasing.md"), /Node-native npm archive/u);
+  assert.match(repositoryContents.get("SECURITY.md"), /private vulnerability-reporting/iu);
+  assert.match(repositoryContents.get("CONTRIBUTING.md"), /npm run check/u);
+  assert.match(repositoryContents.get("LICENSE"), /^MIT License$/mu);
+  assert.match(repositoryContents.get("CODE_OF_CONDUCT.md"), /Report conduct concerns privately/u);
+  assert.match(productContents.get("docs/install.md"), /## Windows/u);
+  assert.match(productContents.get("docs/install.md"), /## Termux/u);
+  assert.match(productContents.get("docs/install.md"), /## tmux/u);
+  assert.match(productContents.get("docs/releasing.md"), /standalone runtime archive/u);
+  assert.match(productContents.get("docs/releasing.md"), /versioned source archive/u);
 
   for (const path of [
     ".github/ISSUE_TEMPLATE/bug_report.yml",
     ".github/ISSUE_TEMPLATE/feature_request.yml",
-  ]) validateIssueTemplate(path, parseYaml(requiredContents.get(path)));
+  ]) validateIssueTemplate(path, parseYaml(repositoryContents.get(path)));
 
-  const releaseWorkflow = await readText(projectRoot, ".github/workflows/release.yml");
+  const ciWorkflow = await readText(repositoryRoot, ".github/workflows/ci.yml");
+  const ciCheck = parseYaml(ciWorkflow)?.jobs?.check;
+  const ciCheckText = JSON.stringify(ciCheck);
+  assert.ok(
+    ciCheckText.includes("npm run native:build --workspace @rigyn/terminal"),
+    "ci.yml check must build the matching native helper before verification",
+  );
+  assert.ok(
+    ciCheckText.includes("TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c"),
+    "ci.yml Windows check must initialize the native compiler with a pinned action",
+  );
+  const releaseWorkflow = await readText(repositoryRoot, ".github/workflows/release.yml");
   for (const target of EXPECTED_TARGETS) assert.ok(releaseWorkflow.includes(target.runner), `release.yml must use ${target.runner}`);
   const releaseDocument = parseYaml(releaseWorkflow);
   const releaseGuards = releaseDocument?.jobs?.["regression-guards"];
@@ -200,11 +308,91 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
   for (const command of ["npm run test:coverage:risk", "npm run benchmark:runtime"]) {
     assert.ok(releaseGuardCommands.has(command), `release.yml regression-guards must run ${command}`);
   }
-  assert.equal(
-    releaseDocument?.jobs?.stage?.needs,
-    "regression-guards",
-    "release staging must wait for the regression guards",
+  const nativeBuild = releaseDocument?.jobs?.["native-build"];
+  const nativeMatrix = nativeBuild?.strategy?.matrix?.include;
+  assert.ok(Array.isArray(nativeMatrix), "release.yml native-build must use an explicit target matrix");
+  assert.deepEqual(
+    nativeMatrix.map(({ platform, arch, runner, output }) => ({ platform, arch, runner, output })),
+    nativeTargets.targets.map((target) => ({
+      platform: target.platform,
+      arch: target.arch,
+      runner: platformPolicy.targets.find((candidate) =>
+        candidate.platform === target.platform && candidate.arch === target.arch)?.runner,
+      output: target.output,
+    })),
+    "release.yml native-build matrix must match native/targets.json",
   );
+  const standaloneBuild = releaseDocument?.jobs?.["standalone-build"];
+  const standaloneMatrix = standaloneBuild?.strategy?.matrix?.include;
+  assert.ok(Array.isArray(standaloneMatrix), "release.yml standalone-build must use an explicit target matrix");
+  assert.deepEqual(standaloneMatrix, EXPECTED_TARGETS, "release.yml standalone-build matrix must match release/platforms.json");
+  const standaloneBuildText = JSON.stringify(standaloneBuild);
+  for (const fragment of [
+    '"node-version":"24.15.0"',
+    "npm run release:standalone -- --directory .release --output .standalone",
+    "rigyn-standalone-${{ matrix.platform }}-${{ matrix.arch }}",
+  ]) assert.ok(standaloneBuildText.includes(fragment), `release.yml standalone-build must contain ${fragment}`);
+  const standaloneUpload = standaloneBuild?.steps?.find((step) => step?.name === "Upload standalone archive");
+  assert.equal(
+    standaloneUpload?.with?.["include-hidden-files"],
+    true,
+    "release.yml must preserve archives written beneath the hidden standalone directory",
+  );
+  assert.deepEqual(
+    releaseDocument?.jobs?.finalize?.needs,
+    ["stage", "standalone-build"],
+    "release finalization must wait for npm staging and every standalone build",
+  );
+  const finalizeText = JSON.stringify(releaseDocument?.jobs?.finalize);
+  for (const fragment of [
+    '"pattern":"rigyn-standalone-*"',
+    '"merge-multiple":true',
+    "npm run release:finalize -- --directory .release --standalone-directory .standalone",
+  ]) assert.ok(finalizeText.includes(fragment), `release.yml finalize must contain ${fragment}`);
+  assert.equal(releaseDocument?.jobs?.verify?.needs, "finalize", "release verification must use finalized artifacts");
+  const sourceBuildStep = releaseDocument?.jobs?.verify?.steps?.find((step) =>
+    step?.name === "Extract and build the release source archive");
+  assert.equal(sourceBuildStep?.if, "matrix.platform == 'linux' && matrix.arch == 'x64'",
+    "release source verification must run on exactly one Linux target");
+  assert.equal(sourceBuildStep?.run, "node scripts/verify-source-archive.mjs --directory .release --build",
+    "release source verification must extract and build the staged archive");
+  for (const target of nativeMatrix.filter(({ platform }) => platform === "win32")) {
+    assert.equal(target.msvc_arch, target.arch, `Windows native compiler architecture must match ${target.arch}`);
+  }
+  const nativeBuildText = JSON.stringify(nativeBuild);
+  for (const fragment of [
+    "TheMrMilchmann/setup-msvc-dev@79dac248aac9d0059f86eae9d8b5bfab4e95e97c",
+    "npm run native:build --workspace @rigyn/terminal",
+    "npm run native:verify --workspace @rigyn/terminal",
+    "rigyn-native-${{ matrix.platform }}-${{ matrix.arch }}",
+  ]) assert.ok(nativeBuildText.includes(fragment), `release.yml native-build must contain ${fragment}`);
+  assert.deepEqual(
+    releaseDocument?.jobs?.stage?.needs,
+    ["regression-guards", "native-build"],
+    "release staging must wait for regression guards and every native build",
+  );
+  const stageCommands = new Set(
+    (releaseDocument?.jobs?.stage?.steps ?? []).map((step) => step?.run).filter((command) => typeof command === "string"),
+  );
+  for (const command of [
+    "npm run native:verify --workspace @rigyn/terminal -- --release",
+    "npm run check",
+    "npm run build",
+    'npm run release:stage -- --output .release --source-ref "$GITHUB_SHA"',
+  ]) {
+    assert.ok(stageCommands.has(command), `release.yml stage must run ${command}`);
+  }
+  const stageSteps = releaseDocument?.jobs?.stage?.steps ?? [];
+  for (const target of nativeTargets.targets) {
+    const key = `${target.platform}-${target.arch}`;
+    const download = stageSteps.find((step) => step?.name === `Download ${key} native helper`);
+    assert.equal(download?.with?.name, `rigyn-native-${key}`, `release.yml must download the ${key} native helper`);
+    assert.equal(
+      download?.with?.path,
+      `packages/terminal/${target.output.slice(0, target.output.lastIndexOf("/"))}`,
+      `release.yml must collect the ${key} helper at its declared package path`,
+    );
+  }
   const stagedUpload = releaseDocument?.jobs?.stage?.steps?.find((step) => step?.name === "Upload staged release");
   assert.equal(
     stagedUpload?.with?.["include-hidden-files"],
@@ -213,9 +401,12 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
   );
   for (const fragment of [
     "npm run release:stage",
+    "scripts/verify-source-archive.mjs",
     "scripts/verify-release-artifact.mjs",
     "SHA256SUMS",
     "RELEASE_NOTES.md",
+    "manifest.archives",
+    "*.tar.gz",
     'gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft',
     "npm publish",
     "--provenance",
@@ -224,7 +415,7 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
     !releaseWorkflow.includes('releases/tags/$GITHUB_REF_NAME'),
     "release.yml must not use the published-tag endpoint to inspect draft releases",
   );
-  const actionCount = await checkActionPins(projectRoot);
+  const actionCount = await checkActionPins(repositoryRoot);
 
   return {
     version: manifest.version,
@@ -232,7 +423,9 @@ export async function checkReleaseMetadata(root = PROJECT_ROOT) {
     releaseBody: release.body,
     subpathCount: subpathPolicy.subpaths.length,
     targetCount: platformPolicy.targets.length,
+    nativeTargetCount: nativeTargets.targets.length,
     actionCount,
+    packageCount: RIGYN_PACKAGE_GRAPH.length,
   };
 }
 
@@ -241,7 +434,7 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
     const result = await checkReleaseMetadata();
     writeFileSync(1,
-      `Release metadata policy passed for ${result.version}: ${result.subpathCount} public subpaths, ${result.targetCount} platform targets, ${result.actionCount} pinned action uses.\n`,
+      `Release metadata policy passed for ${result.version}: ${result.packageCount} packages, ${result.subpathCount} public subpaths, ${result.targetCount} platform targets, ${result.nativeTargetCount} native artifacts, ${result.actionCount} pinned action uses.\n`,
     );
   } catch (error) {
     writeFileSync(2, `${error instanceof Error ? error.message : String(error)}\n`);

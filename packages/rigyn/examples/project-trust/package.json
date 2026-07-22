@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-project-trust",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive project trust decision example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

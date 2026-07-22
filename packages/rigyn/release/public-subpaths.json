@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "runtime": "^24.15.0 || >=26.0.0",
+  "module": "esm",
+  "subpaths": [
+    ".",
+    "./auth",
+    "./config",
+    "./context",
+    "./core",
+    "./embedding",
+    "./extensions",
+    "./images",
+    "./interfaces",
+    "./rpc-entry",
+    "./modes",
+    "./net",
+    "./process",
+    "./prompts",
+    "./providers",
+    "./service",
+    "./sdk",
+    "./storage",
+    "./testing",
+    "./tools",
+    "./tui",
+    "./package.json"
+  ]
+}

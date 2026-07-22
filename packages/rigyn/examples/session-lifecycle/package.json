@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-session-lifecycle",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Session transition and tree lifecycle example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@rigyn/example-starter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Rigyn command and tool extension",
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

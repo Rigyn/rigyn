@@ -1,0 +1,66 @@
+{
+  "name": "@rigyn/models",
+  "version": "0.5.0",
+  "description": "Provider-neutral model, streaming, authentication, and image primitives for Rigyn",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "rigyn-models": "./dist/cli-bin.js"
+  },
+  "sideEffects": [
+    "./dist/compat.js",
+    "./dist/images.js",
+    "./dist/providers/images/register-builtins.js"
+  ],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./compat": { "types": "./dist/compat.d.ts", "import": "./dist/compat.js" },
+    "./providers/*": { "types": "./dist/providers/*.d.ts", "import": "./dist/providers/*.js" },
+    "./api/*": { "types": "./dist/api/*.d.ts", "import": "./dist/api/*.js" },
+    "./oauth": { "types": "./dist/oauth.d.ts", "import": "./dist/oauth.js" },
+    "./bedrock-provider": { "types": "./dist/bedrock-provider.d.ts", "import": "./dist/bedrock-provider.js" },
+    "./bun-oauth": { "types": "./dist/bun-oauth.d.ts", "import": "./dist/bun-oauth.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": { "access": "public" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rigyn/rigyn.git",
+    "directory": "packages/models"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "generate:provider-models": "node --import tsx ../../scripts/generate-provider-models.mjs --strict",
+    "hydrate:model-data": "node --import tsx ../../scripts/generate-provider-models.mjs --strict --data-only",
+    "generate:image-models": "tsx scripts/generate-image-models.ts --strict",
+    "check:provider-models": "node --import tsx ../../scripts/generate-provider-models.mjs --check",
+    "check:model-data": "node scripts/check-model-data.mjs",
+    "build": "npm run hydrate:model-data && npm run build:offline",
+    "build:offline": "npm run check:model-data && tsc -p tsconfig.build.json && node scripts/copy-model-data.mjs && node scripts/prepare-cli.mjs",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.public-types.json",
+    "test": "node --import tsx --test --experimental-test-isolation=none test/*.test.ts",
+    "check": "npm run check:provider-models && npm run check:model-data && npm run typecheck && npm test"
+  },
+  "engines": { "node": ">=22.19.0" },
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.112.3",
+    "@aws-sdk/client-bedrock-runtime": "3.1048.0",
+    "@google/genai": "1.52.0",
+    "@mistralai/mistralai": "2.2.6",
+    "@smithy/node-http-handler": "4.7.3",
+    "http-proxy-agent": "7.0.2",
+    "https-proxy-agent": "7.0.6",
+    "openai": "6.48.0",
+    "partial-json": "0.1.7",
+    "typebox": "1.1.38",
+    "undici": "8.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
+  }
+}

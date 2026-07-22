@@ -1,0 +1,8 @@
+{
+  "name": "@rigyn/example-ui-surfaces",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Widget, status, header, and custom overlay example for Rigyn",
+  "rigyn": { "extensions": ["extensions/index.mjs"] }
+}

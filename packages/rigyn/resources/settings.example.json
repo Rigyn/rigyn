@@ -1,0 +1,11 @@
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "MODEL_ID",
+  "defaultThinkingLevel": "high",
+  "theme": "dark",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}

@@ -1,8 +1,8 @@
 # Development Rules
 
-- Keep provider wire formats inside `src/providers/`.
-- Keep credentials behind `src/auth/`; never log, persist, or return secret values.
-- Keep filesystem boundary checks centralized in `src/tools/paths.ts`.
+- Keep application provider integration in `packages/rigyn/src/providers/` and protocol transports in `packages/models/src/providers/`.
+- Keep credentials behind `packages/rigyn/src/auth/`; never log, persist, or return secret values.
+- Keep tool filesystem boundary checks centralized in `packages/rigyn/src/tools/paths.ts`.
 - A requested sandbox must fail closed if isolation cannot be established.
 - Tool failures are model-visible results; invariant failures stop the run.
 - Session events are append-only. Derived context may be rebuilt at any time.
