@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from "node:fs";
+import { lstatSync, watch, type FSWatcher } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import type { ExtensionTheme } from "../extensions/types.js";
@@ -6,6 +6,15 @@ import { parseThemeDefinition, type ThemeDefinition } from "../tui/theme.js";
 
 const MAX_THEME_BYTES = 1024 * 1024;
 const RELOAD_DEBOUNCE_MS = 100;
+
+function fileSignature(sourcePath: string): string | undefined {
+  try {
+    const information = lstatSync(sourcePath, { bigint: true });
+    return `${information.ino}:${information.size}:${information.mtimeNs}`;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface ThemeHotReloadCallbacks {
   apply(definition: ThemeDefinition): void;
@@ -37,6 +46,7 @@ export class ThemeHotReloader {
     if (this.#selected === undefined) return;
     const selected = this.#selected;
     const generation = this.#generation;
+    const initialSignature = fileSignature(selected.sourcePath);
     try {
       this.#watcher = watch(dirname(selected.sourcePath), { persistent: false }, (_event, filename) => {
         if (generation !== this.#generation) return;
@@ -46,6 +56,14 @@ export class ThemeHotReloader {
       this.#watcher.on("error", () => {
         if (generation === this.#generation) this.#stop();
       });
+      this.#timer = setTimeout(() => {
+        this.#timer = undefined;
+        if (
+          generation === this.#generation
+          && initialSignature !== fileSignature(selected.sourcePath)
+        ) void this.#reload(generation);
+      }, RELOAD_DEBOUNCE_MS);
+      this.#timer.unref();
     } catch {
       this.#watcher = undefined;
     }

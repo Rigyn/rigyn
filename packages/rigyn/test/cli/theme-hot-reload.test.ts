@@ -49,6 +49,26 @@ test("active loose themes hot-reload atomically and retain the last valid defini
   assert.equal(applied.length, 1);
 });
 
+test("watcher startup reconciliation does not reapply an unchanged theme", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-theme-watch-unchanged-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const sourcePath = join(root, "ocean.json");
+  await writeFile(sourcePath, JSON.stringify({
+    schemaVersion: 1,
+    name: "ocean",
+    base: "dark",
+    styles: { accent: { foreground: "#001122" } },
+  }));
+
+  const applied: ThemeDefinition[] = [];
+  const reloader = new ThemeHotReloader({ apply: (definition) => applied.push(definition) });
+  context.after(() => reloader.close());
+  reloader.select({ name: "ocean", sourcePath });
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  assert.equal(applied.length, 0);
+});
+
 test("a watcher that could not start can be selected again after its directory appears", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-theme-watch-retry-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
