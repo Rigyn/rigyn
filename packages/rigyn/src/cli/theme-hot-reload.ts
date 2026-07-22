@@ -27,6 +27,7 @@ export class ThemeHotReloader {
   #watcher: FSWatcher | undefined;
   #timer: NodeJS.Timeout | undefined;
   #selected: Pick<ExtensionTheme, "name" | "sourcePath"> | undefined;
+  #signature: string | undefined;
   #generation = 0;
 
   constructor(callbacks: ThemeHotReloadCallbacks) {
@@ -46,7 +47,7 @@ export class ThemeHotReloader {
     if (this.#selected === undefined) return;
     const selected = this.#selected;
     const generation = this.#generation;
-    const initialSignature = fileSignature(selected.sourcePath);
+    this.#signature = fileSignature(selected.sourcePath);
     try {
       this.#watcher = watch(dirname(selected.sourcePath), { persistent: false }, (_event, filename) => {
         if (generation !== this.#generation) return;
@@ -56,14 +57,7 @@ export class ThemeHotReloader {
       this.#watcher.on("error", () => {
         if (generation === this.#generation) this.#stop();
       });
-      this.#timer = setTimeout(() => {
-        this.#timer = undefined;
-        if (
-          generation === this.#generation
-          && initialSignature !== fileSignature(selected.sourcePath)
-        ) void this.#reload(generation);
-      }, RELOAD_DEBOUNCE_MS);
-      this.#timer.unref();
+      this.#schedule(generation);
     } catch {
       this.#watcher = undefined;
     }
@@ -78,6 +72,11 @@ export class ThemeHotReloader {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
+      const selected = this.#selected;
+      if (selected === undefined || generation !== this.#generation) return;
+      const signature = fileSignature(selected.sourcePath);
+      if (signature === this.#signature) return;
+      this.#signature = signature;
       void this.#reload(generation);
     }, RELOAD_DEBOUNCE_MS);
     this.#timer.unref();
@@ -103,6 +102,7 @@ export class ThemeHotReloader {
     this.#generation += 1;
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+    this.#signature = undefined;
     this.#watcher?.close();
     this.#watcher = undefined;
   }
