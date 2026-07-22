@@ -7,6 +7,7 @@ import test from "node:test";
 import type { EventEnvelope } from "../../src/core/events.js";
 import {
   bindInteractiveSessionPresentation,
+  INTERACTIVE_TRANSCRIPT_SCAN_MS,
   interactiveTranscriptHistory,
 } from "../../src/interactive/session-presentation.js";
 import type { AgentSession, AgentSessionEvent, AgentSessionEventListener } from "../../src/service/agent-session.js";
@@ -131,7 +132,7 @@ test("history replay finalizes each assistant before its tool and later assistan
   assert.deepEqual(model.committableEntries().map((entry) => entry.id), model.entries.map((entry) => entry.id));
 });
 
-test("non-display entry floods do not crowd visible resume history out", async () => {
+test("non-display entry floods do not crowd visible resume history out", async (context) => {
   const storage = await manager();
   storage.appendMessage({
     id: "retained-user-message",
@@ -141,8 +142,15 @@ test("non-display entry floods do not crowd visible resume history out", async (
   });
   for (let index = 0; index < 2_000; index += 1) storage.appendThinkingLevelChange("off");
 
+  let now = 0;
+  context.mock.method(performance, "now", () => {
+    now += 0.01;
+    return now;
+  });
+
   const projected = interactiveTranscriptHistory(fakeSession(storage).session);
 
+  assert.ok(now > INTERACTIVE_TRANSCRIPT_SCAN_MS);
   assert.equal(projected.length, 1);
   const retained = projected[0];
   assert.ok(retained !== undefined && "event" in retained && retained.event.type === "message_appended");

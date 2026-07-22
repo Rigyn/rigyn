@@ -70,10 +70,14 @@ function recentDisplayEntries(session: AgentSession): SessionEntry[] {
     && selected.length < INTERACTIVE_TRANSCRIPT_ENTRY_LIMIT
     && scanned < INTERACTIVE_TRANSCRIPT_SCAN_LIMIT
     && bytes < INTERACTIVE_TRANSCRIPT_SCAN_BYTES
-    && performance.now() < deadline
+    && (selected.length === 0 || performance.now() < deadline)
   ) {
     scanned += 1;
-    bytes += boundedValueBytes(entry, INTERACTIVE_TRANSCRIPT_SCAN_BYTES - bytes, deadline);
+    bytes += boundedValueBytes(
+      entry,
+      INTERACTIVE_TRANSCRIPT_SCAN_BYTES - bytes,
+      selected.length === 0 ? Number.POSITIVE_INFINITY : deadline,
+    );
     if (
       isDisplayEntry(entry)
       || (entry.type === "message" && DISPLAY_MESSAGE_ROLES.has(entry.message.role))

@@ -1,4 +1,5 @@
-import { watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import type { ExtensionTheme } from "../extensions/types.js";
@@ -6,6 +7,18 @@ import { parseThemeDefinition, type ThemeDefinition } from "../tui/theme.js";
 
 const MAX_THEME_BYTES = 1024 * 1024;
 const RELOAD_DEBOUNCE_MS = 100;
+
+function fileSignature(sourcePath: string): string | undefined {
+  try {
+    const information = lstatSync(sourcePath);
+    if (information.isFile() && information.size <= MAX_THEME_BYTES) {
+      return createHash("sha256").update(readFileSync(sourcePath)).digest("hex");
+    }
+    return `${information.ino}:${information.size}:${information.mtimeMs}`;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface ThemeHotReloadCallbacks {
   apply(definition: ThemeDefinition): void;
@@ -18,6 +31,7 @@ export class ThemeHotReloader {
   #watcher: FSWatcher | undefined;
   #timer: NodeJS.Timeout | undefined;
   #selected: Pick<ExtensionTheme, "name" | "sourcePath"> | undefined;
+  #signature: string | undefined;
   #generation = 0;
 
   constructor(callbacks: ThemeHotReloadCallbacks) {
@@ -37,6 +51,7 @@ export class ThemeHotReloader {
     if (this.#selected === undefined) return;
     const selected = this.#selected;
     const generation = this.#generation;
+    this.#signature = fileSignature(selected.sourcePath);
     try {
       this.#watcher = watch(dirname(selected.sourcePath), { persistent: false }, (_event, filename) => {
         if (generation !== this.#generation) return;
@@ -46,6 +61,7 @@ export class ThemeHotReloader {
       this.#watcher.on("error", () => {
         if (generation === this.#generation) this.#stop();
       });
+      this.#schedule(generation);
     } catch {
       this.#watcher = undefined;
     }
@@ -60,6 +76,11 @@ export class ThemeHotReloader {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
+      const selected = this.#selected;
+      if (selected === undefined || generation !== this.#generation) return;
+      const signature = fileSignature(selected.sourcePath);
+      if (signature === this.#signature) return;
+      this.#signature = signature;
       void this.#reload(generation);
     }, RELOAD_DEBOUNCE_MS);
     this.#timer.unref();
@@ -85,6 +106,7 @@ export class ThemeHotReloader {
     this.#generation += 1;
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
+    this.#signature = undefined;
     this.#watcher?.close();
     this.#watcher = undefined;
   }
