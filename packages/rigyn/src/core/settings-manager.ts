@@ -40,6 +40,13 @@ export interface RetrySettings {
   provider?: ProviderRetrySettings;
 }
 
+interface ResolvedRetrySettings {
+  enabled: boolean;
+  maxRetries: number;
+  baseDelayMs: number;
+  provider: { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number };
+}
+
 export interface TerminalSettings {
   showImages?: boolean;
   imageWidthCells?: number;
@@ -57,6 +64,8 @@ export interface ThinkingBudgetsSettings {
   low?: number;
   medium?: number;
   high?: number;
+  xhigh?: number;
+  max?: number;
 }
 
 export interface MarkdownSettings {
@@ -66,6 +75,13 @@ export interface MarkdownSettings {
 export interface WarningSettings {
   anthropicExtraUsage?: boolean;
 }
+
+export interface ToolSettings {
+  enabled?: string[];
+  excluded?: string[];
+}
+
+export type KeybindingSettings = Record<string, string | string[]>;
 
 export type PackageSource = string | {
   source: string;
@@ -104,6 +120,7 @@ export interface Settings {
   prompts?: string[];
   themes?: string[];
   enableSkillCommands?: boolean;
+  tools?: ToolSettings;
   terminal?: TerminalSettings;
   images?: ImageSettings;
   enabledModels?: string[];
@@ -120,7 +137,67 @@ export interface Settings {
   httpProxy?: string;
   httpIdleTimeoutMs?: number | string;
   websocketConnectTimeoutMs?: number | string;
+  keybindings?: KeybindingSettings;
 }
+
+type PersistedSetting<T> = T extends readonly unknown[]
+  ? T | null
+  : T extends object
+    ? { [K in keyof T]?: PersistedSetting<T[K]> | null } | null
+    : T | null;
+
+/** JSON input accepted by persisted settings APIs. Null inherits the lower-precedence or runtime default. */
+export type PersistedSettings = { [K in keyof Settings]?: PersistedSetting<Settings[K]> | null };
+
+const SETTINGS_KEY_MAP = {
+  lastChangelogVersion: true,
+  defaultProvider: true,
+  defaultModel: true,
+  defaultThinkingLevel: true,
+  transport: true,
+  steeringMode: true,
+  followUpMode: true,
+  theme: true,
+  compaction: true,
+  branchSummary: true,
+  retry: true,
+  hideThinkingBlock: true,
+  showCacheMissNotices: true,
+  externalEditor: true,
+  shellPath: true,
+  quietStartup: true,
+  defaultProjectTrust: true,
+  shellCommandPrefix: true,
+  npmCommand: true,
+  collapseChangelog: true,
+  packages: true,
+  extensions: true,
+  skills: true,
+  prompts: true,
+  themes: true,
+  enableSkillCommands: true,
+  tools: true,
+  terminal: true,
+  images: true,
+  enabledModels: true,
+  doubleEscapeAction: true,
+  treeFilterMode: true,
+  thinkingBudgets: true,
+  editorPaddingX: true,
+  outputPad: true,
+  autocompleteMaxVisible: true,
+  showHardwareCursor: true,
+  markdown: true,
+  warnings: true,
+  sessionDir: true,
+  httpProxy: true,
+  httpIdleTimeoutMs: true,
+  websocketConnectTimeoutMs: true,
+  keybindings: true,
+} satisfies Record<keyof Settings, true>;
+
+/** @internal Exact persisted-key inventory used to keep the installed template complete. */
+export const SETTINGS_KEYS = Object.freeze(Object.keys(SETTINGS_KEY_MAP)) as readonly (keyof Settings)[];
 
 export type SettingsScope = "global" | "project";
 
@@ -137,17 +214,66 @@ export interface SettingsError {
   error: Error;
 }
 
-function mergeSettings(base: Settings, overlay: Settings): Settings {
+export interface SettingsReloadOptions {
+  validate?(settings: Readonly<Settings>): void | Promise<void>;
+}
+
+function isSettingsRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeSettingRecords(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>,
+): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(overlay)) {
     if (value === undefined) continue;
     const prior = result[key];
-    result[key] = (
-      value !== null && typeof value === "object" && !Array.isArray(value) &&
-      prior !== null && typeof prior === "object" && !Array.isArray(prior)
-    ) ? { ...(prior as Record<string, unknown>), ...(value as Record<string, unknown>) } : value;
+    result[key] = isSettingsRecord(value)
+      ? mergeSettingRecords(isSettingsRecord(prior) ? prior : {}, value)
+      : value;
   }
-  return result as Settings;
+  return result;
+}
+
+function applySettingPatch(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete result[key];
+      continue;
+    }
+    const prior = result[key];
+    result[key] = isSettingsRecord(value)
+      ? applySettingPatch(isSettingsRecord(prior) ? prior : {}, value)
+      : structuredClone(value);
+  }
+  return result;
+}
+
+function mergeSettingPatches(
+  base: Record<string, unknown>,
+  overlay: Record<string, unknown>,
+): Record<string, unknown> {
+  const result = structuredClone(base);
+  for (const [key, value] of Object.entries(overlay)) {
+    const prior = result[key];
+    result[key] = isSettingsRecord(value) && isSettingsRecord(prior)
+      ? mergeSettingPatches(prior, value)
+      : structuredClone(value);
+  }
+  return result;
+}
+
+function mergeSettings(base: Settings, overlay: Settings): Settings {
+  return mergeSettingRecords(
+    base as Record<string, unknown>,
+    overlay as Record<string, unknown>,
+  ) as Settings;
 }
 
 function migrateSettings(value: unknown): Settings {
@@ -192,8 +318,32 @@ function migrateSettings(value: unknown): Settings {
   return settings as Settings;
 }
 
-function parseSettings(content: string | undefined): Settings {
-  return content === undefined || content === "" ? {} : migrateSettings(JSON.parse(content));
+function omitNullSettings(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined;
+  if (Array.isArray(value)) return structuredClone(value);
+  if (!isSettingsRecord(value)) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const resolved = omitNullSettings(item);
+    if (resolved !== undefined) result[key] = resolved;
+  }
+  return result;
+}
+
+function resolveSettings(raw: Record<string, unknown>): Settings {
+  return omitNullSettings(migrateSettings(raw)) as Settings;
+}
+
+interface ParsedSettings {
+  raw: Record<string, unknown>;
+  value: Settings;
+}
+
+function parseSettings(content: string | undefined): ParsedSettings {
+  const parsed: unknown = content === undefined || content === "" ? {} : JSON.parse(content);
+  if (!isSettingsRecord(parsed)) throw new Error("Settings must contain a JSON object");
+  const raw = structuredClone(parsed);
+  return { raw, value: resolveSettings(raw) };
 }
 
 export class FileSettingsStorage implements SettingsStorage {
@@ -281,14 +431,13 @@ export class InMemorySettingsStorage implements SettingsStorage {
 }
 
 interface ScopeState {
+  raw: Record<string, unknown>;
   value: Settings;
   loadError: Error | undefined;
-  changed: Set<keyof Settings>;
-  nested: Map<keyof Settings, Set<string>>;
 }
 
 function emptyScope(): ScopeState {
-  return { value: {}, loadError: undefined, changed: new Set(), nested: new Map() };
+  return { raw: {}, value: {}, loadError: undefined };
 }
 
 export class SettingsManager {
@@ -299,6 +448,8 @@ export class SettingsManager {
   #projectTrusted: boolean;
   #writeQueue: Promise<void> = Promise.resolve();
   #errors: SettingsError[] = [];
+  #revision = 0;
+  #failedWritePatches: Record<SettingsScope, Record<string, unknown>> = { global: {}, project: {} };
 
   private constructor(storage: SettingsStorage, projectTrusted: boolean) {
     this.#storage = storage;
@@ -320,10 +471,14 @@ export class SettingsManager {
     return new SettingsManager(storage, options.projectTrusted ?? true);
   }
 
-  static inMemory(settings: Partial<Settings> = {}, options: SettingsManagerCreateOptions = {}): SettingsManager {
+  static inMemory(settings: PersistedSettings = {}, options: SettingsManagerCreateOptions = {}): SettingsManager {
     const storage = new InMemorySettingsStorage();
     storage.withLock("global", () => JSON.stringify(settings, null, 2));
-    return SettingsManager.fromStorage(storage, options);
+    const manager = SettingsManager.fromStorage(storage, options);
+    manager.#global.raw = structuredClone(settings) as Record<string, unknown>;
+    manager.#global.value = resolveSettings(manager.#global.raw);
+    manager.#recompute();
+    return manager;
   }
 
   #loadScope(scope: SettingsScope): ScopeState {
@@ -333,11 +488,11 @@ export class SettingsManager {
         content = current;
         return undefined;
       });
-      return { value: parseSettings(content), loadError: undefined, changed: new Set(), nested: new Map() };
+      return { ...parseSettings(content), loadError: undefined };
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       this.#errors.push({ scope, error });
-      return { value: {}, loadError: error, changed: new Set(), nested: new Map() };
+      return { raw: {}, value: {}, loadError: error };
     }
   }
 
@@ -345,125 +500,158 @@ export class SettingsManager {
     this.#effective = mergeSettings(this.#global.value, this.#project.value);
   }
 
-  #mark(state: ScopeState, field: keyof Settings, nested?: string): void {
-    state.changed.add(field);
-    if (nested !== undefined) {
-      const keys = state.nested.get(field) ?? new Set<string>();
-      keys.add(nested);
-      state.nested.set(field, keys);
-    }
-  }
-
-  #save(scope: SettingsScope): void {
+  #save(scope: SettingsScope, patch: Record<string, unknown>): void {
     const state = scope === "global" ? this.#global : this.#project;
     if (state.loadError !== undefined) return;
-    const snapshot = structuredClone(state.value);
-    const changed = new Set(state.changed);
-    const nested = new Map([...state.nested].map(([key, keys]) => [key, new Set(keys)]));
+    const snapshot = structuredClone(patch);
     this.#writeQueue = this.#writeQueue.then(() => {
       if (scope === "project" && !this.#projectTrusted) throw new Error("Project is not trusted");
-      this.#storage.withLock(scope, (content) => {
-        const disk = parseSettings(content);
-        const output = { ...disk } as Record<string, unknown>;
-        for (const field of changed) {
-          const fieldName = String(field);
-          const value = snapshot[field];
-          const nestedKeys = nested.get(field);
-          if (nestedKeys !== undefined && value !== null && typeof value === "object" && !Array.isArray(value)) {
-            const diskValue = disk[field];
-            const merged = diskValue !== null && typeof diskValue === "object" && !Array.isArray(diskValue)
-              ? { ...(diskValue as Record<string, unknown>) }
-              : {};
-            for (const key of nestedKeys) merged[key] = (value as Record<string, unknown>)[key];
-            output[fieldName] = merged;
-          } else {
-            output[fieldName] = value;
-          }
-        }
-        return JSON.stringify(output, null, 2);
-      });
-      state.changed.clear();
-      state.nested.clear();
+      const pending = mergeSettingPatches(this.#failedWritePatches[scope], snapshot);
+      try {
+        this.#storage.withLock(scope, (content) => {
+          const disk = parseSettings(content).raw;
+          return JSON.stringify(applySettingPatch(disk, pending), null, 2);
+        });
+        this.#failedWritePatches[scope] = {};
+      } catch (error) {
+        this.#failedWritePatches[scope] = pending;
+        throw error;
+      }
     }).catch((cause) => {
       this.#errors.push({ scope, error: cause instanceof Error ? cause : new Error(String(cause)) });
     });
   }
 
   #setGlobal<K extends keyof Settings>(field: K, value: Settings[K], nested?: string): void {
-    this.#global.value[field] = value;
-    this.#mark(this.#global, field, nested);
+    const fieldName = String(field);
+    this.#global.raw[fieldName] = structuredClone(value);
+    this.#global.value = resolveSettings(this.#global.raw);
+    this.#revision += 1;
     this.#recompute();
-    this.#save("global");
+    this.#save("global", nested === undefined
+      ? { [fieldName]: structuredClone(value) }
+      : { [fieldName]: { [nested]: structuredClone((value as Record<string, unknown>)[nested]) } });
   }
 
   #setProject<K extends keyof Settings>(field: K, value: Settings[K]): void {
     if (!this.#projectTrusted) throw new Error("Project is not trusted; refusing to write project settings");
-    this.#project.value[field] = value;
-    this.#mark(this.#project, field);
+    this.#project.raw[String(field)] = structuredClone(value);
+    this.#project.value = resolveSettings(this.#project.raw);
+    this.#revision += 1;
     this.#recompute();
-    this.#save("project");
+    this.#save("project", { [String(field)]: structuredClone(value) });
   }
 
-  #updateScope(scope: SettingsScope, patch: Partial<Settings>): void {
+  #updateScope(scope: SettingsScope, patch: PersistedSettings): void {
     if (scope === "project" && !this.#projectTrusted) {
       throw new Error("Project is not trusted; refusing to write project settings");
     }
     const state = scope === "global" ? this.#global : this.#project;
-    state.value = mergeSettings(state.value, patch);
-    for (const [name, value] of Object.entries(patch)) {
-      if (value === undefined) continue;
-      const field = name as keyof Settings;
-      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        for (const nested of Object.keys(value)) this.#mark(state, field, nested);
-      } else {
-        this.#mark(state, field);
-      }
-    }
+    const rawPatch = mergeSettingRecords({}, patch as Record<string, unknown>);
+    state.raw = mergeSettingRecords(state.raw, rawPatch);
+    state.value = resolveSettings(state.raw);
+    this.#revision += 1;
     this.#recompute();
-    this.#save(scope);
+    this.#save(scope, rawPatch);
   }
 
   getGlobalSettings(): Settings { return structuredClone(this.#global.value); }
   getProjectSettings(): Settings { return structuredClone(this.#project.value); }
   getSettings(): Settings { return structuredClone(this.#effective); }
-  updateGlobalSettings(patch: Partial<Settings>): void { this.#updateScope("global", structuredClone(patch)); }
-  updateProjectSettings(patch: Partial<Settings>): void { this.#updateScope("project", structuredClone(patch)); }
+  updateGlobalSettings(patch: PersistedSettings): void { this.#updateScope("global", structuredClone(patch)); }
+  updateProjectSettings(patch: PersistedSettings): void { this.#updateScope("project", structuredClone(patch)); }
   isProjectTrusted(): boolean { return this.#projectTrusted; }
 
   setProjectTrusted(trusted: boolean): void {
     if (trusted === this.#projectTrusted) return;
     this.#projectTrusted = trusted;
+    this.#revision += 1;
     const replacement = trusted ? this.#loadScope("project") : emptyScope();
+    this.#project.raw = replacement.raw;
     this.#project.value = replacement.value;
     this.#project.loadError = replacement.loadError;
-    this.#project.changed.clear();
-    this.#project.nested.clear();
+    this.#failedWritePatches.project = {};
     this.#recompute();
   }
 
-  async reload(): Promise<void> {
+  async reload(options: SettingsReloadOptions = {}): Promise<void> {
+    await this.reloadForTransaction(options);
+  }
+  /** @internal Reloads settings and returns the committed revision for coordinated rollback. */
+  async reloadForTransaction(options: SettingsReloadOptions = {}): Promise<number> {
     await this.flush();
+    const revision = this.#revision;
     const global = this.#loadScope("global");
     const project = this.#projectTrusted ? this.#loadScope("project") : emptyScope();
+    const nextEffective = mergeSettings(
+      global.loadError === undefined ? global.value : this.#global.value,
+      !this.#projectTrusted || project.loadError === undefined ? project.value : this.#project.value,
+    );
+    await options.validate?.(structuredClone(nextEffective));
+    if (revision !== this.#revision) {
+      throw new Error("Settings changed while reload validation was in progress");
+    }
     if (global.loadError === undefined) {
       Object.assign(this.#global, global);
     } else {
       this.#global.loadError = global.loadError;
-      this.#global.changed.clear();
-      this.#global.nested.clear();
     }
+    this.#failedWritePatches.global = {};
     if (!this.#projectTrusted || project.loadError === undefined) {
       Object.assign(this.#project, project);
     } else {
       this.#project.loadError = project.loadError;
-      this.#project.changed.clear();
-      this.#project.nested.clear();
     }
-    this.#recompute();
+    this.#failedWritePatches.project = {};
+    this.#effective = nextEffective;
+    this.#revision += 1;
+    return this.#revision;
   }
 
-  applyOverrides(overrides: Partial<Settings>): void { this.#effective = mergeSettings(this.#effective, overrides); }
-  async flush(): Promise<void> { await this.#writeQueue; }
+  applyOverrides(overrides: Partial<Settings>): void {
+    const resolved = omitNullSettings(structuredClone(overrides)) as Settings;
+    this.#effective = mergeSettings(this.#effective, resolved);
+    this.#revision += 1;
+  }
+  async flush(): Promise<void> {
+    while (true) {
+      const pending = this.#writeQueue;
+      await pending;
+      if (pending === this.#writeQueue) return;
+    }
+  }
+  /** @internal Captures settled in-memory state for a larger reload transaction. */
+  createRollback(): (expectedRevision?: number) => boolean {
+    const revision = this.#revision;
+    const global = {
+      raw: structuredClone(this.#global.raw),
+      value: structuredClone(this.#global.value),
+      loadError: this.#global.loadError,
+    };
+    const project = {
+      raw: structuredClone(this.#project.raw),
+      value: structuredClone(this.#project.value),
+      loadError: this.#project.loadError,
+    };
+    const effective = structuredClone(this.#effective);
+    const projectTrusted = this.#projectTrusted;
+    const errors = [...this.#errors];
+    const failedWritePatches = structuredClone(this.#failedWritePatches);
+    let active = true;
+    return (expectedRevision = revision) => {
+      if (!active) return true;
+      active = false;
+      if (this.#revision !== expectedRevision) return false;
+      Object.assign(this.#global, global);
+      Object.assign(this.#project, project);
+      this.#effective = effective;
+      this.#projectTrusted = projectTrusted;
+      this.#errors = errors;
+      this.#failedWritePatches = failedWritePatches;
+      this.#revision += 1;
+      return true;
+    };
+  }
   drainErrors(): SettingsError[] { const errors = this.#errors; this.#errors = []; return errors; }
 
   getLastChangelogVersion(): string | undefined { return this.#global.value.lastChangelogVersion; }
@@ -474,12 +662,12 @@ export class SettingsManager {
   setDefaultProvider(value: string): void { this.#setGlobal("defaultProvider", value); }
   setDefaultModel(value: string): void { this.#setGlobal("defaultModel", value); }
   setDefaultModelAndProvider(provider: string, model: string): void {
-    this.#global.value.defaultProvider = provider;
-    this.#global.value.defaultModel = model;
-    this.#mark(this.#global, "defaultProvider");
-    this.#mark(this.#global, "defaultModel");
+    this.#global.raw.defaultProvider = provider;
+    this.#global.raw.defaultModel = model;
+    this.#global.value = resolveSettings(this.#global.raw);
+    this.#revision += 1;
     this.#recompute();
-    this.#save("global");
+    this.#save("global", { defaultProvider: provider, defaultModel: model });
   }
   getSteeringMode(): QueueSetting { return this.#effective.steeringMode ?? "one-at-a-time"; }
   setSteeringMode(value: QueueSetting): void { this.#setGlobal("steeringMode", value); }
@@ -505,18 +693,18 @@ export class SettingsManager {
     return { reserveTokens: this.#effective.branchSummary?.reserveTokens ?? 16_384, skipPrompt: this.#effective.branchSummary?.skipPrompt ?? false };
   }
   getBranchSummarySkipPrompt(): boolean { return this.getBranchSummarySettings().skipPrompt; }
-  getRetryEnabled(): boolean { return this.#effective.retry?.enabled ?? true; }
+  getRetryEnabled(): boolean { return resolvedRetrySettings(this.#effective.retry).enabled; }
   setRetryEnabled(value: boolean): void {
     this.#setGlobal("retry", { ...(this.#global.value.retry ?? {}), enabled: value }, "enabled");
   }
   getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
-    return { enabled: this.getRetryEnabled(), maxRetries: this.#effective.retry?.maxRetries ?? 3, baseDelayMs: this.#effective.retry?.baseDelayMs ?? 2_000 };
+    const { enabled, maxRetries, baseDelayMs } = resolvedRetrySettings(this.#effective.retry);
+    return { enabled, maxRetries, baseDelayMs };
   }
   getHttpIdleTimeoutMs(): number { return timeoutSetting(this.#effective.httpIdleTimeoutMs, 300_000, "httpIdleTimeoutMs"); }
   setHttpIdleTimeoutMs(value: number): void { this.#setGlobal("httpIdleTimeoutMs", validTimeout(value, 0, "httpIdleTimeoutMs")); }
   getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
-    const value = this.#effective.retry?.provider;
-    return { ...(value?.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }), ...(value?.maxRetries === undefined ? {} : { maxRetries: value.maxRetries }), maxRetryDelayMs: value?.maxRetryDelayMs ?? 60_000 };
+    return resolvedRetrySettings(this.#effective.retry).provider;
   }
   getWebSocketConnectTimeoutMs(): number | undefined {
     return this.#effective.websocketConnectTimeoutMs === undefined
@@ -563,6 +751,28 @@ export class SettingsManager {
   setProjectThemePaths(value: string[]): void { this.#setProject("themes", [...value]); }
   getEnableSkillCommands(): boolean { return this.#effective.enableSkillCommands ?? true; }
   setEnableSkillCommands(value: boolean): void { this.#setGlobal("enableSkillCommands", value); }
+  getToolSettings(): ToolSettings {
+    const value = this.#effective.tools;
+    if (value === undefined) return {};
+    if (!isSettingsRecord(value)) throw new Error("tools must be an object or null");
+    const toolNames = (name: "enabled" | "excluded"): string[] | undefined => {
+      const entries = value[name];
+      if (entries === undefined) return undefined;
+      if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+        throw new Error(`tools.${name} must be an array of non-empty tool names or null`);
+      }
+      return [...new Set(entries as string[])];
+    };
+    const enabled = toolNames("enabled");
+    const excluded = toolNames("excluded");
+    return {
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(excluded === undefined ? {} : { excluded }),
+    };
+  }
+  getKeybindings(): KeybindingSettings {
+    return structuredClone(this.#effective.keybindings ?? {});
+  }
   getThinkingBudgets(): ThinkingBudgetsSettings | undefined { return structuredClone(this.#effective.thinkingBudgets); }
   getShowImages(): boolean { return this.#effective.terminal?.showImages ?? true; }
   setShowImages(value: boolean): void { this.#setGlobal("terminal", { ...(this.#global.value.terminal ?? {}), showImages: value }, "showImages"); }
@@ -606,6 +816,73 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
   return value === undefined || !Number.isFinite(value)
     ? fallback
     : Math.max(minimum, Math.min(maximum, Math.floor(value)));
+}
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function optionalNonNegativeInteger(
+  value: unknown,
+  fallback: number | undefined,
+  name: string,
+  maximum: number,
+): number | undefined {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > maximum) {
+    throw new Error(`Invalid ${name} setting: ${String(value)}`);
+  }
+  return value as number;
+}
+
+function resolvedRetrySettings(value: unknown): ResolvedRetrySettings {
+  if (value !== undefined && !isSettingsRecord(value)) throw new Error("retry must be an object or null");
+  const retry = value ?? {};
+  const enabled = retry.enabled ?? true;
+  if (typeof enabled !== "boolean") throw new Error(`Invalid retry.enabled setting: ${String(enabled)}`);
+  const maxRetries = optionalNonNegativeInteger(
+    retry.maxRetries,
+    3,
+    "retry.maxRetries",
+    Number.MAX_SAFE_INTEGER - 1,
+  )!;
+  const baseDelayMs = optionalNonNegativeInteger(
+    retry.baseDelayMs,
+    2_000,
+    "retry.baseDelayMs",
+    MAX_TIMER_DELAY_MS,
+  )!;
+  const providerValue = retry.provider;
+  if (providerValue !== undefined && !isSettingsRecord(providerValue)) {
+    throw new Error("retry.provider must be an object or null");
+  }
+  const provider = providerValue ?? {};
+  const timeoutMs = optionalNonNegativeInteger(
+    provider.timeoutMs,
+    undefined,
+    "retry.provider.timeoutMs",
+    MAX_TIMER_DELAY_MS,
+  );
+  const providerMaxRetries = optionalNonNegativeInteger(
+    provider.maxRetries,
+    undefined,
+    "retry.provider.maxRetries",
+    Number.MAX_SAFE_INTEGER - 1,
+  );
+  const maxRetryDelayMs = optionalNonNegativeInteger(
+    provider.maxRetryDelayMs,
+    60_000,
+    "retry.provider.maxRetryDelayMs",
+    MAX_TIMER_DELAY_MS,
+  )!;
+  return {
+    enabled,
+    maxRetries,
+    baseDelayMs,
+    provider: {
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(providerMaxRetries === undefined ? {} : { maxRetries: providerMaxRetries }),
+      maxRetryDelayMs,
+    },
+  };
 }
 
 function validTimeout(value: number | undefined, fallback: number, name: string): number {

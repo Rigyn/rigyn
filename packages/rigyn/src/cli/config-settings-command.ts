@@ -1,5 +1,5 @@
 import { lstatSync, type Stats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { TrustStore } from "../config/trust.js";
@@ -180,7 +180,10 @@ export async function runSettingsConfigCommand(
   const original = snapshot?.contents;
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: scope === "project" });
   const edit = options.edit ?? editTextExternally;
-  const updated = await edit(original ?? "{}\n", {
+  const initial = original ?? (scope === "user"
+    ? await readFile(new URL("../../resources/settings.example.json", import.meta.url), "utf8")
+    : "{}\n");
+  const updated = await edit(initial, {
     environment,
     cwd: workspace,
     command: settings.getExternalEditorCommand(),

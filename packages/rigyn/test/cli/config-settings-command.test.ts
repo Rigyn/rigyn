@@ -38,6 +38,52 @@ test("config path reports exact user and project settings paths without creating
   context.after(async () => await import("node:fs/promises").then(async ({ rm }) => await rm(root, { recursive: true, force: true })));
 });
 
+test("config edit opens a complete inherited-default document when settings are missing", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-config-template-"));
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  await mkdir(workspace);
+  let opened: Record<string, unknown> | undefined;
+  await runSettingsConfigCommand(parseManagementArguments(["config", "edit"]), {
+    environment: { ...process.env, RIGYN_CODING_AGENT_DIR: agentDir },
+    cwd: workspace,
+    write() {},
+    edit: async (initial) => {
+      opened = JSON.parse(initial) as Record<string, unknown>;
+      return initial;
+    },
+  });
+
+  assert.equal(opened?.defaultProvider, null);
+  assert.equal(opened?.theme, "mono");
+  assert.deepEqual(opened?.tools, { enabled: null, excluded: [] });
+  assert.ok(Object.keys(opened?.keybindings as Record<string, unknown>).includes("app.interrupt"));
+  assert.deepEqual(JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8")), opened);
+  context.after(async () => await import("node:fs/promises").then(async ({ rm }) => await rm(root, { recursive: true, force: true })));
+});
+
+test("config edit keeps a missing project override document sparse", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-config-project-template-"));
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  await mkdir(workspace);
+  let initial: string | undefined;
+  await runSettingsConfigCommand(parseManagementArguments(["config", "edit", "--scope", "project"]), {
+    environment: { ...process.env, RIGYN_CODING_AGENT_DIR: agentDir },
+    cwd: workspace,
+    write() {},
+    projectTrustResolver: { async isTrusted() { return true; } },
+    edit: async (value) => {
+      initial = value;
+      return value;
+    },
+  });
+
+  assert.equal(initial, "{}\n");
+  assert.deepEqual(JSON.parse(await readFile(join(workspace, ".rigyn", "settings.json"), "utf8")), {});
+  context.after(async () => await import("node:fs/promises").then(async ({ rm }) => await rm(root, { recursive: true, force: true })));
+});
+
 test("config edit validates JSON and replaces only the selected settings file privately", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-config-edit-"));
   const workspace = join(root, "workspace");

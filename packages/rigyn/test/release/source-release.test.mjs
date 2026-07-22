@@ -95,6 +95,8 @@ test("source archive policy requires the build and private-install inputs", () =
     "package-lock.json",
     "scripts/generate-provider-models.mjs",
     "packages/rigyn/src/providers/maintained-model-catalog.ts",
+    "packages/rigyn/resources/AGENTS.md",
+    "packages/rigyn/resources/settings.example.json",
     "packages/terminal/scripts/build-native.mjs",
     "packages/terminal/native/darwin/src/darwin-modifiers.c",
     "packages/terminal/native/win32/src/win32-console-mode.c",

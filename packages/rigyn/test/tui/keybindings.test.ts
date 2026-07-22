@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { Keybindings, loadKeybindings, parseKeybindings } from "../../src/tui/keybindings.js";
+import { KEYBINDING_ACTIONS, Keybindings, loadKeybindings, parseKeybindings } from "../../src/tui/keybindings.js";
+
+test("the complete settings template exposes every keybinding action as inherited", async () => {
+  const template = JSON.parse(await readFile(new URL("../../resources/settings.example.json", import.meta.url), "utf8")) as {
+    keybindings: Record<string, unknown>;
+  };
+  assert.deepEqual(Object.keys(template.keybindings), [...KEYBINDING_ACTIONS]);
+  assert.ok(Object.values(template.keybindings).every((value) => value === null));
+});
 
 test("keybindings normalize modifier order and replace defaults per action", () => {
   const bindings = parseKeybindings({
@@ -128,6 +136,9 @@ test("keybindings load from a bounded file and fall back when absent", async (co
   await writeFile(path, JSON.stringify({ "app.model.select": "ctrl+q" }));
   const custom = await loadKeybindings(path);
   assert.equal(custom.matches("app.model.select", { key: "q", ctrl: true }), true);
+  const settingsOverride = await loadKeybindings(path, { "app.model.select": "alt+k" });
+  assert.equal(settingsOverride.matches("app.model.select", { key: "k", alt: true }), true);
+  assert.equal(settingsOverride.matches("app.model.select", { key: "q", ctrl: true }), false);
   await writeFile(path, "x".repeat(64 * 1024 + 1));
   await assert.rejects(loadKeybindings(path), /exceeds 65536 bytes/u);
 });

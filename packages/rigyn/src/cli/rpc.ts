@@ -280,9 +280,14 @@ async function runRpcServerOperation(
     runtime: owner,
     async output(value) { await writer.send(value); },
     promptOptions() {
+      const configuredTools = owner.services.runtime.settings.getToolSettings();
       const selection = selectedTools(
         args,
         owner.services.runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        {
+          ...(configuredTools.enabled === undefined ? {} : { allowedTools: configuredTools.enabled }),
+          ...(configuredTools.excluded === undefined ? {} : { excludedTools: configuredTools.excluded }),
+        },
       );
       return {
         ...(selection.allowedTools === undefined ? {} : { allowedTools: selection.allowedTools }),
@@ -300,9 +305,14 @@ async function runRpcServerOperation(
         mode: "rpc",
         uiContext: bridge.context("runtime", owner.services.runtime.runtimeExtensions.lifecycleSignal()),
       });
+      const configuredTools = owner.services.runtime.settings.getToolSettings();
       const selection = selectedTools(
         args,
         owner.services.runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        {
+          ...(configuredTools.enabled === undefined ? {} : { allowedTools: configuredTools.enabled }),
+          ...(configuredTools.excluded === undefined ? {} : { excludedTools: configuredTools.excluded }),
+        },
       );
       session.setActiveTools(activeToolsForSelection(
         session.getAllTools().map((tool) => tool.definition.name),

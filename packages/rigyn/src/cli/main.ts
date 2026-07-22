@@ -1137,7 +1137,15 @@ async function runCommandOperation(
       if (json) writeMachineOutput(`${JSON.stringify(envelope.event)}\n`);
     });
     try {
-      const tools = selectedTools(argumentsValue, runtime.runtimeExtensions.tools().map((tool) => tool.definition.name));
+      const configuredTools = runtime.settings.getToolSettings();
+      const tools = selectedTools(
+        argumentsValue,
+        runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        {
+          ...(configuredTools.enabled === undefined ? {} : { allowedTools: configuredTools.enabled }),
+          ...(configuredTools.excluded === undefined ? {} : { excludedTools: configuredTools.excluded }),
+        },
+      );
       const promptOptions = {
         ...(tools.allowedTools === undefined ? {} : { allowedTools: tools.allowedTools }),
         ...(tools.excludedTools === undefined ? {} : { excludedTools: tools.excludedTools }),
@@ -1280,7 +1288,7 @@ async function chatCommandOperation(
   projectTrustResolver?.setTerminal(undefined);
   applyExtensionArguments(argumentsValue, runtime);
   const owner = await createInteractiveRuntimeOwner(argumentsValue, runtime, extensionFactories, projectTrustResolver);
-  let keybindings = await loadKeybindings(runtime.paths.keybindings);
+  let keybindings = await loadKeybindings(runtime.paths.keybindings, runtime.settings.getKeybindings());
   let unsubscribe = (): void => undefined;
   let exiting = false;
   let resolveExit!: () => void;
@@ -1337,12 +1345,13 @@ async function chatCommandOperation(
     status: active ? "streaming" : "idle",
     });
   };
-  const bind = (): void => {
+  const bind = (preserveTranscript = false): void => {
     extensionUi.bind(runtime);
     unsubscribe();
     unsubscribe = bindInteractiveSessionPresentation(runtime.session, terminal, {
       onEnvelope: updateContext,
       onSessionEvent: updateContext,
+      preserveTranscript,
     });
     updateContext();
     void maybeWarnAboutAnthropicSubscriptionAuth();
@@ -1399,7 +1408,15 @@ async function chatCommandOperation(
     try {
       const prepared = await preparePrompt(text, images);
       if (runtime.session.model === undefined) await chooseModel();
-      const tools = selectedTools(argumentsValue, runtime.runtimeExtensions.tools().map((tool) => tool.definition.name));
+      const configuredTools = runtime.settings.getToolSettings();
+      const tools = selectedTools(
+        argumentsValue,
+        runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+        {
+          ...(configuredTools.enabled === undefined ? {} : { allowedTools: configuredTools.enabled }),
+          ...(configuredTools.excluded === undefined ? {} : { excludedTools: configuredTools.excluded }),
+        },
+      );
       await runtime.session.prompt(prepared.text, {
         images: prepared.images,
         ...(tools.allowedTools === undefined ? {} : { allowedTools: tools.allowedTools }),
@@ -1606,16 +1623,20 @@ async function chatCommandOperation(
       async reload() {
         terminal.setInputBlocked(`Reloading ${RELOAD_RESOURCE_SUMMARY}...`, "reload");
         try {
-          const reloadedKeybindings = await loadKeybindings(runtime.paths.keybindings);
+          let reloadedKeybindings: Keybindings | undefined;
           const result = await runtime.reload({
+            async prepareSettings(settings) {
+              reloadedKeybindings = await loadKeybindings(runtime.paths.keybindings, settings.getKeybindings());
+            },
             onCommit() {
+              if (reloadedKeybindings === undefined) throw new Error("Reloaded keybindings were not validated");
               keybindings = reloadedKeybindings;
               terminal.setKeybindings(keybindings);
               extensionUi.bind(runtime, true);
             },
           });
           await owner.adoptSession(runtime.session, { rebind: false });
-          bind();
+          bind(true);
           await refreshInteractiveModels({ force: false, allowNetwork: false });
           terminal.notify(result.warnings.length === 0 ? `Reloaded ${RELOAD_RESOURCE_SUMMARY}` : result.warnings.join("\n"), result.warnings.length === 0 ? "status" : "warning");
           await maybeWarnAboutAnthropicSubscriptionAuth();

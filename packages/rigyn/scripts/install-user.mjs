@@ -4,8 +4,10 @@ import { writeFileSync } from "node:fs";
 import {
   chmod,
   cp,
+  link,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
@@ -53,6 +55,10 @@ const npmUserConfig = join(installRoot, "config", "npm", "user.npmrc");
 const npmGlobalConfig = join(installRoot, "config", "npm", "global.npmrc");
 const paths = installationPaths(installRoot);
 const sensitiveEnvironmentName = /(?:^|_)(?:api_?key|auth(?:orization|_?token)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
+const agentScaffoldTemplates = [
+  { destination: "AGENTS.md", source: "AGENTS.md", label: "Agent instructions" },
+  { destination: "settings.json", source: "settings.example.json", label: "Agent settings" },
+];
 
 function errno(error) {
   return error instanceof Error && "code" in error ? error.code : undefined;
@@ -280,7 +286,7 @@ async function recoverInstallTransaction(markerRecord) {
       await mkdir(installRoot, { recursive: true, mode: transaction.rootMode });
       if (process.platform !== "win32") await chmod(installRoot, transaction.rootMode);
     }
-    return;
+    return { rootExisted: transaction.rootExisted, rootMode: transaction.rootMode };
   }
 
   const markerUnchanged = transaction.previousMarkerSha256 === sha256(markerRecord.contents);
@@ -297,6 +303,15 @@ async function recoverInstallTransaction(markerRecord) {
   } else if (!markerUnchanged && !(await exists(app))) {
     throw new Error("Committed installation is missing its active application directory");
   }
+  if (!markerUnchanged) {
+    await rm(buildStaging, { recursive: true, force: true });
+    await mkdir(buildStaging, { recursive: true, mode: 0o700 });
+    await ensureAgentScaffold(
+      join(installRoot, "agent"),
+      join(app, "node_modules", "rigyn", "resources"),
+      buildStaging,
+    );
+  }
   await Promise.all([
     rm(staging, { recursive: true, force: true }),
     rm(buildStaging, { recursive: true, force: true }),
@@ -306,7 +321,7 @@ async function recoverInstallTransaction(markerRecord) {
 
 async function prepareRoot() {
   await recoverInterruptedUninstall(installRoot);
-  const rootExisted = await exists(installRoot);
+  let rootExisted = await exists(installRoot);
   let rootMode = 0o700;
   let markerRecord;
   if (rootExisted) {
@@ -322,7 +337,12 @@ async function prepareRoot() {
       });
       await assertNoOtherActiveRuntimes(installRoot, markerRecord.marker);
     }
-    await recoverInstallTransaction(markerRecord);
+    const recoveredRoot = await recoverInstallTransaction(markerRecord);
+    if (recoveredRoot !== undefined) {
+      rootExisted = recoveredRoot.rootExisted;
+      rootMode = recoveredRoot.rootMode;
+      await mkdir(installRoot, { recursive: true, mode: 0o700 });
+    }
     markerRecord = await readInstallationMarker(installRoot);
     const entries = await readdir(installRoot);
     const abandonedAtomics = entries.filter((entry) => entry.startsWith(`${INSTALL_TRANSACTION}.install-`));
@@ -359,6 +379,103 @@ async function prepareInstallDirectories() {
     writeFileAtomically(npmUserConfig, "", 0o600),
     writeFileAtomically(npmGlobalConfig, "", 0o600),
   ]);
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function readScaffoldTemplate(path, label) {
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`${label} template must be a regular file: ${path}`);
+  }
+  return await readFile(path);
+}
+
+async function inspectScaffoldFile(path, label) {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`${label} must be a regular file: ${path}`);
+    }
+    return true;
+  } catch (error) {
+    if (errno(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function assertAgentDirectory(path, expectedIdentity) {
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(`Agent directory must be a real directory: ${path}`);
+  }
+  if (expectedIdentity !== undefined && !sameFileIdentity(metadata, expectedIdentity)) {
+    throw new Error(`Agent directory changed while creating its scaffold: ${path}`);
+  }
+  return metadata;
+}
+
+async function createMissingScaffoldFile(path, contents, label, temporaryDirectory, directoryIdentity) {
+  const temporaryPath = join(temporaryDirectory, `.agent-scaffold-${randomBytes(16).toString("hex")}`);
+  let handle;
+  try {
+    handle = await open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(contents);
+    await handle.sync();
+    if (process.platform !== "win32") await handle.chmod(0o600);
+    await handle.close();
+    handle = undefined;
+    await assertAgentDirectory(dirname(path), directoryIdentity);
+    try {
+      await link(temporaryPath, path);
+      return;
+    } catch (error) {
+      if (errno(error) !== "EEXIST") throw error;
+    }
+    await inspectScaffoldFile(path, label);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+/**
+ * Create only missing personalization files. Existing files and permissions are
+ * never modified. Files are linked from complete private temporaries so a hard
+ * interruption cannot publish a partial settings document.
+ */
+export async function ensureAgentScaffold(agentDirectory, resourcesDirectory, temporaryDirectory) {
+  const templates = await Promise.all(agentScaffoldTemplates.map(async (template) => ({
+    ...template,
+    contents: await readScaffoldTemplate(join(resourcesDirectory, template.source), template.label),
+  })));
+  await mkdir(agentDirectory, { recursive: false, mode: 0o700 }).catch((error) => {
+    if (errno(error) !== "EEXIST") throw error;
+  });
+  const directoryMetadata = await assertAgentDirectory(agentDirectory);
+  const directoryIdentity = { dev: directoryMetadata.dev, ino: directoryMetadata.ino };
+  await mkdir(temporaryDirectory, { recursive: true, mode: 0o700 });
+  const temporaryMetadata = await lstat(temporaryDirectory);
+  if (!temporaryMetadata.isDirectory() || temporaryMetadata.isSymbolicLink()) {
+    throw new Error(`Agent scaffold staging path must be a real directory: ${temporaryDirectory}`);
+  }
+
+  const existing = await Promise.all(templates.map(async (template) => await inspectScaffoldFile(
+    join(agentDirectory, template.destination),
+    template.label,
+  )));
+  for (const [index, template] of templates.entries()) {
+    if (existing[index]) continue;
+    await createMissingScaffoldFile(
+      join(agentDirectory, template.destination),
+      template.contents,
+      template.label,
+      temporaryDirectory,
+      directoryIdentity,
+    );
+  }
 }
 
 async function beginAppSwap(app) {
@@ -429,7 +546,7 @@ async function install() {
     let rollbackComplete = false;
     try {
       rootState = await prepareRoot();
-      await writeFileAtomically(transactionPath, `${JSON.stringify({
+      const installTransaction = {
         product: "rigyn",
         schemaVersion: 1,
         transactionId: randomBytes(16).toString("hex"),
@@ -438,7 +555,8 @@ async function install() {
         rootExisted: rootState.rootExisted,
         rootMode: rootState.rootMode,
         previousMarkerSha256: rootState.markerRecord === undefined ? null : sha256(rootState.markerRecord.contents),
-      }, null, 2)}\n`, 0o600);
+      };
+      await writeFileAtomically(transactionPath, `${JSON.stringify(installTransaction, null, 2)}\n`, 0o600);
       transactionStarted = true;
       await prepareInstallDirectories();
 
@@ -513,6 +631,11 @@ async function install() {
       );
       await writeFileAtomically(markerPath, `${JSON.stringify(marker, null, 2)}\n`, 0o600);
       committed = true;
+      await ensureAgentScaffold(
+        join(installRoot, "agent"),
+        join(installRoot, "app", "node_modules", "rigyn", "resources"),
+        buildStaging,
+      );
 
       await rm(previousApp, { recursive: true, force: true });
       await rm(transactionPath, { force: true });

@@ -33,10 +33,14 @@ import type {
 import { validateProviderResponseDiagnostics } from "./provider-diagnostics.js";
 import { addNormalizedUsage, isNormalizedUsage, normalizedContextTokens } from "./usage.js";
 import {
+  beginProviderAttempt,
   DEFAULT_RETRY_POLICY,
   isContextOverflowError,
   mayRetry,
+  providerRetryPolicy,
+  providerTimeoutError,
   retryDelay,
+  validateProviderTimeoutMs,
   waitForRetry,
   type RetryPolicy,
 } from "./retry.js";
@@ -170,6 +174,8 @@ export interface AgentRunRequest {
   compactionToolResultBytes?: number;
   thinkingBudgets?: ProviderRequest["thinkingBudgets"];
   transport?: ProviderRequest["transport"];
+  timeoutMs?: number;
+  maxRetries?: number;
   maxRetryDelayMs?: number;
   onPayload?: ProviderRequest["onPayload"];
   onResponse?: ProviderRequest["onResponse"];
@@ -1377,7 +1383,9 @@ export class AgentRunner {
     }),
     continuation = false,
   ): Promise<AgentRunResult> {
-    control.initializeAutoRetryEnabled(request.retry?.enabled ?? this.#retry.enabled ?? true);
+    validateProviderTimeoutMs(request.timeoutMs);
+    const retry = providerRetryPolicy(request.retry ?? this.#retry, request.maxRetries);
+    control.initializeAutoRetryEnabled(retry.enabled ?? true);
     if (request.outboundImages !== undefined && request.outboundImages !== "allow" && request.outboundImages !== "block") {
       throw new RangeError("outboundImages must be allow or block");
     }
@@ -1483,7 +1491,7 @@ export class AgentRunner {
           : plannedSelection;
         let finalText: string;
         if (selection.kind === "compact") {
-          const compacted = await this.#compact(selection, request, runId, sink, signal, control);
+          const compacted = await this.#compact(selection, request, runId, sink, signal, control, retry);
           finalText = `Compacted ${selection.sourceMessageIds.length} messages into ${compacted.summary.message.id}`;
         } else {
           finalText = `No compaction performed: ${selection.reason}`;
@@ -1762,7 +1770,7 @@ export class AgentRunner {
           });
           if (selection.kind === "compact") {
             try {
-              const compacted = await this.#compact(selection, turnRequest, runId, sink, signal, control);
+              const compacted = await this.#compact(selection, turnRequest, runId, sink, signal, control, retry);
               context = compacted.projection.messages;
               if (providerStateMessageId !== undefined && selection.sourceMessageIds.includes(providerStateMessageId)) {
                 providerState = undefined;
@@ -1830,6 +1838,8 @@ export class AgentRunner {
           tools: toolDefinitions,
           sessionId: request.providerSessionId ?? request.threadId,
           ...(request.transport === undefined ? {} : { transport: request.transport }),
+          ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+          ...(request.maxRetries === undefined ? {} : { maxRetries: request.maxRetries }),
           ...(request.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: request.maxRetryDelayMs }),
           ...(request.onPayload === undefined ? {} : { onPayload: request.onPayload }),
           ...(request.onResponse === undefined ? {} : { onResponse: request.onResponse }),
@@ -1894,7 +1904,7 @@ export class AgentRunner {
           }
           overflowRecoveryUsed = true;
           try {
-            await this.#compact(recovery, turnRequest, runId, sink, signal, control);
+            await this.#compact(recovery, turnRequest, runId, sink, signal, control, retry);
           } catch (error) {
             if (request.nonFatalAutomaticCompaction !== true || signal.aborted) throw error;
             throw new ProviderFailure(originalFailure ?? {
@@ -1928,7 +1938,7 @@ export class AgentRunner {
             sink,
             signal,
             step,
-            request.retry ?? this.#retry,
+            retry,
             control,
           );
           response = await (this.#lifecycle.withProviderScope === undefined
@@ -2378,6 +2388,7 @@ export class AgentRunner {
     sink: EventSink,
     signal: AbortSignal,
     control: RunControl,
+    retry: RetryPolicy,
   ): Promise<{ summary: CompactionSummary; projection: ReturnType<typeof applyCompaction> }> {
     const willRetry = request.compactionWillRetry ?? plan.reason === "overflow";
     let effectivePlan = plan;
@@ -2416,12 +2427,11 @@ export class AgentRunner {
       const summary = directive?.summaryText === undefined
         ? await this.#summarize(
             effectivePlan,
-            request.provider,
-            request.model,
+            request,
             sink,
             signal,
             activity,
-            request.retry ?? this.#retry,
+            retry,
             control,
             request.maxOutputTokenLimit,
             request.compactionInstructions,
@@ -2546,16 +2556,25 @@ export class AgentRunner {
           step,
         });
       }
+      const attemptBoundary = beginProviderAttempt(signal, request.timeoutMs);
       try {
         let terminal: AdapterEvent & { type: "response_end" } | undefined;
         let responseStarted = false;
-        for await (const event of abortableAsyncIterable(provider.stream(request, signal), signal)) {
-          if (signal.aborted) throw new ProviderFailure(abortedError(signal.reason));
-          if (terminal !== undefined) throw new Error("Provider emitted data after its terminal event");
-          // A response_start carries transport metadata only. Retrying remains
-          // replay-safe until the provider emits substantive output.
-          if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
-          switch (event.type) {
+        try {
+          for await (const event of abortableAsyncIterable(
+            provider.stream(request, attemptBoundary.signal),
+            attemptBoundary.signal,
+          )) {
+            if (attemptBoundary.signal.aborted) {
+              throw new ProviderFailure(signal.aborted
+                ? abortedError(signal.reason)
+                : providerTimeoutError(request.timeoutMs!, bodyStarted));
+            }
+            if (terminal !== undefined) throw new Error("Provider emitted data after its terminal event");
+            // A response_start carries transport metadata only. Retrying remains
+            // replay-safe until the provider emits substantive output.
+            if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
+            switch (event.type) {
             case "response_start":
               if (responseStarted) {
                 throw new ProviderFailure({
@@ -2794,7 +2813,10 @@ export class AgentRunner {
               break;
             case "error":
               throw new ProviderFailure(validatedProviderError(event.error));
+            }
           }
+        } finally {
+          attemptBoundary.dispose();
         }
         if (terminal === undefined) throw new ProviderFailure({
           category: "protocol",
@@ -2964,11 +2986,13 @@ export class AgentRunner {
           ...(responseDiagnostics === undefined ? {} : { diagnostics: responseDiagnostics }),
         };
       } catch (error) {
-        let detail = error instanceof ProviderFailure
-          ? error.detail
-          : signal.aborted
-            ? abortedError(signal.reason)
-            : {
+        let detail = signal.aborted
+          ? abortedError(signal.reason)
+          : attemptBoundary.timedOut()
+            ? providerTimeoutError(request.timeoutMs!, bodyStarted)
+            : error instanceof ProviderFailure
+              ? error.detail
+              : {
                 category: "network" as const,
                 message: error instanceof Error ? error.message : String(error),
                 retryable: !bodyStarted,
@@ -3037,8 +3061,7 @@ export class AgentRunner {
 
   async #summarize(
     plan: CompactionPlan,
-    provider: ProviderAdapter,
-    modelName: string,
+    request: AgentRunRequest,
     sink: EventSink,
     signal: AbortSignal,
     activity: ReturnType<typeof renderCompactionFileActivity>,
@@ -3061,6 +3084,13 @@ export class AgentRunner {
         "Do not continue the conversation, answer questions from the history, invent facts, issue tool calls, or include hidden provider state. Return only the checkpoint.",
       ].filter((value): value is string => value !== undefined).join(" "),
     }]);
+    const maxOutputTokens = cappedMaxOutputTokens(
+      activity.estimatedTokens === 0
+        ? plan.maxSummaryTokens
+        : Math.max(1, plan.maxSummaryTokens - activity.estimatedTokens - 8),
+      maxOutputTokenLimit,
+      "Compaction maxOutputTokens",
+    );
     let retried = false;
     try {
       for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
@@ -3075,64 +3105,70 @@ export class AgentRunner {
         let usage: NormalizedUsage | undefined;
         let terminal = false;
         let bodyStarted = false;
+        const attemptBoundary = beginProviderAttempt(signal, request.timeoutMs);
         try {
-          const maxOutputTokens = cappedMaxOutputTokens(
-            activity.estimatedTokens === 0
-              ? plan.maxSummaryTokens
-              : Math.max(1, plan.maxSummaryTokens - activity.estimatedTokens - 8),
-            maxOutputTokenLimit,
-            "Compaction maxOutputTokens",
-          );
-          for await (const event of abortableAsyncIterable(provider.stream({
-            provider: provider.id,
-            model: modelName,
-            messages: [
-              instruction,
-              compactionDataPayload(plan),
-            ],
-            tools: [],
-            ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
-          }, signal), signal)) {
-            if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
-            if (terminal) throw new ProviderFailure({
-              category: "protocol",
-              message: "Compaction provider emitted data after its terminal event",
-              retryable: false,
-              partial: true,
-              bodyStarted: true,
-            });
-            if (event.type === "text_delta") text += event.text;
-            else if (event.type === "usage") {
-              const normalized = providerUsage(event.usage);
-              usage = event.semantics === "incremental"
-                ? addNormalizedUsage(usage, normalized)
-                : structuredClone(normalized);
-              await sink.emit({ type: "usage", usage: normalized, semantics: event.semantics });
-            }
-            else if (event.type === "tool_call_start" || event.type === "tool_call_delta" || event.type === "tool_call_end") {
-              throw new ProviderFailure({
+          try {
+            for await (const event of abortableAsyncIterable(request.provider.stream({
+              provider: request.provider.id,
+              model: request.model,
+              messages: [
+                instruction,
+                compactionDataPayload(plan),
+              ],
+              tools: [],
+              ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+              ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+              ...(request.maxRetries === undefined ? {} : { maxRetries: request.maxRetries }),
+              ...(request.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: request.maxRetryDelayMs }),
+            }, attemptBoundary.signal), attemptBoundary.signal)) {
+              if (attemptBoundary.signal.aborted) {
+                throw new ProviderFailure(signal.aborted
+                  ? abortedError(signal.reason)
+                  : providerTimeoutError(request.timeoutMs!, bodyStarted));
+              }
+              if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
+              if (terminal) throw new ProviderFailure({
                 category: "protocol",
-                message: "Compaction provider attempted a tool call",
+                message: "Compaction provider emitted data after its terminal event",
                 retryable: false,
-                partial: bodyStarted,
-                bodyStarted,
+                partial: true,
+                bodyStarted: true,
               });
-            } else if (event.type === "error") {
-              throw new ProviderFailure(event.error);
-            } else if (event.type === "response_end") {
-              if (event.reason !== "stop") {
+              if (event.type === "text_delta") text += event.text;
+              else if (event.type === "usage") {
+                const normalized = providerUsage(event.usage);
+                usage = event.semantics === "incremental"
+                  ? addNormalizedUsage(usage, normalized)
+                  : structuredClone(normalized);
+                await sink.emit({ type: "usage", usage: normalized, semantics: event.semantics });
+              }
+              else if (event.type === "tool_call_start" || event.type === "tool_call_delta" || event.type === "tool_call_end") {
                 throw new ProviderFailure({
-                  category: event.reason === "length" ? "protocol" : "provider",
-                  message: event.reason === "length"
-                    ? "Compaction summary reached its output limit before completion; increase summaryTokenBudget"
-                    : `Compaction ended with ${event.reason}`,
+                  category: "protocol",
+                  message: "Compaction provider attempted a tool call",
                   retryable: false,
                   partial: bodyStarted,
                   bodyStarted,
                 });
+              } else if (event.type === "error") {
+                throw new ProviderFailure(event.error);
+              } else if (event.type === "response_end") {
+                if (event.reason !== "stop") {
+                  throw new ProviderFailure({
+                    category: event.reason === "length" ? "protocol" : "provider",
+                    message: event.reason === "length"
+                      ? "Compaction summary reached its output limit before completion; increase summaryTokenBudget"
+                      : `Compaction ended with ${event.reason}`,
+                    retryable: false,
+                    partial: bodyStarted,
+                    bodyStarted,
+                  });
+                }
+                terminal = true;
               }
-              terminal = true;
             }
+          } finally {
+            attemptBoundary.dispose();
           }
           if (!terminal || text.trim() === "") {
             throw new ProviderFailure({
@@ -3153,11 +3189,13 @@ export class AgentRunner {
             ...(usage === undefined ? {} : { usage }),
           };
         } catch (error) {
-          const detail = error instanceof ProviderFailure
-            ? error.detail
-            : signal.aborted
-              ? abortedError(signal.reason)
-              : {
+          const detail = signal.aborted
+            ? abortedError(signal.reason)
+            : attemptBoundary.timedOut()
+              ? providerTimeoutError(request.timeoutMs!, bodyStarted)
+              : error instanceof ProviderFailure
+                ? error.detail
+                : {
                   category: "network" as const,
                   message: error instanceof Error ? error.message : String(error),
                   retryable: !bodyStarted,

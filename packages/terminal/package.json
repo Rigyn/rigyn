@@ -1,6 +1,6 @@
 {
   "name": "@rigyn/terminal",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Raw terminal UI engine for Rigyn applications",
   "type": "module",

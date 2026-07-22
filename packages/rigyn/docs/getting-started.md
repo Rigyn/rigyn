@@ -44,10 +44,10 @@ and do not resolve Rigyn from the npm registry. The equivalent version-pinned ma
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-terminal-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-models-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-kernel-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-0.5.0.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn --version
 ```
@@ -66,7 +66,7 @@ npm run install:user
 rigyn --version
 ```
 
-Both routes create a self-contained installation under `~/.rigyn`. They do not create a global npm package or link the executable back to the source checkout. On Linux and macOS the command launcher is `~/.local/bin/rigyn`; on Windows it is `%USERPROFILE%\.rigyn\bin\rigyn.cmd`. See [Installation and platform troubleshooting](install.md) if the command is not on `PATH`.
+The managed one-line installer and source-install route create a self-contained installation under `~/.rigyn`. They do not create a global npm package or link the executable back to the source checkout. On Linux and macOS the command launcher is `~/.local/bin/rigyn`; on Windows it is `%USERPROFILE%\.rigyn\bin\rigyn.cmd`. See [Installation and platform troubleshooting](install.md) if the command is not on `PATH`.
 
 ## 2. Open a workspace
 
@@ -201,7 +201,7 @@ Direct development runs use the normal agent directory:
 ~/.rigyn/agent/
 ```
 
-Set `RIGYN_CODING_AGENT_DIR` to choose another root. Put personal instructions in `AGENTS.md` inside that agent directory; project `AGENTS.md` files load afterward from outer ancestors through the active working directory. Persistent preferences are sparse strict JSON at `settings.json`; the file is created only after a setting changes. Run `rigyn config path` to print its exact location and `rigyn config edit` to open it transactionally. Add `--scope project` for the trusted workspace file. `rigyn config` without an action selects resources from installed packages, and `/settings` covers common interactive preferences. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Settings](configuration.md).
+Set `RIGYN_CODING_AGENT_DIR` to choose another root. A self-contained install scaffolds `AGENTS.md` and `settings.json` inside its agent directory and preserves both on reinstall or update. Put personal instructions in `AGENTS.md`; project `AGENTS.md` files load afterward from outer ancestors through the active working directory. Run `rigyn config path` to print the settings location and `rigyn config edit` to open it transactionally. Add `--scope project` for the trusted workspace file. `rigyn config` without an action selects resources from installed packages, and `/settings` covers common interactive preferences. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Settings](configuration.md).
 
 ## 8. Update, diagnose, or remove
 

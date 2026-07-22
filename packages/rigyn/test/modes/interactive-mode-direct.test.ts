@@ -143,7 +143,10 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
   const cwd = await mkdtemp(join(tmpdir(), "rigyn-interactive-keybindings-"));
   const agentDir = join(cwd, ".agent");
   await mkdir(agentDir);
-  await writeFile(join(agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "alt+k" }));
+  await writeFile(join(agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "alt+q" }));
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+    keybindings: { "app.model.select": "alt+k" },
+  }));
   try {
     let holdResourceReload = false;
     let releaseResourceReload: (() => void) | undefined;
@@ -151,6 +154,7 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
     ensureExtensionRuntimeHost(extensionRuntime, cwd);
     const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
     const loader: ResourceLoader = {
+      supportsTransactionalReload: true,
       getExtensions: () => extensionsResult,
       getSkills: () => ({ skills: [], diagnostics: [] }),
       getPrompts: () => ({ prompts: [], diagnostics: [] }),
@@ -175,9 +179,16 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
         return await refreshModels(options);
       },
     });
-    const settings = SettingsManager.inMemory();
+    const settings = SettingsManager.create(cwd, agentDir);
+    const sessionManager = SessionManager.inMemory(cwd);
+    sessionManager.appendMessage({
+      id: "embedded-reload-history",
+      role: "user",
+      content: [{ type: "text", text: "embedded reload transcript sentinel" }],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
     const session = await AgentSession.create({
-      sessionManager: SessionManager.inMemory(cwd),
+      sessionManager,
       providers: new ProviderRegistry(),
       modelRegistry: models,
       resourceLoader: loader,
@@ -197,6 +208,8 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
     output.columns = 100;
     output.rows = 30;
     output.isTTY = false;
+    let rendered = "";
+    output.on("data", (chunk: Buffer) => { rendered += chunk.toString("utf8"); });
     const terminal = new TuiController({ input, output, mode: "accessible", handleSignals: false });
     let activeThemeListeners = 0;
     const onThemeChange = terminal.onThemeChange.bind(terminal);
@@ -220,11 +233,16 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
     const mode = new InteractiveMode(runtime, { terminal });
 
     await mode.init();
+    assert.match(rendered, /embedded reload transcript sentinel/u);
     assert.equal(activeThemeListeners, 1);
     assert.deepEqual(terminal.keybindingsManager().getKeys("app.model.select"), ["alt+k"]);
-    await writeFile(join(agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "alt+j" }));
+    const uiBeforeReload = session.extensionRunner.getUIContext();
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+      keybindings: { "app.model.select": "alt+j" },
+    }));
     const running = mode.run();
     holdResourceReload = true;
+    const reloadOutputStart = rendered.length;
     input.write("/reload\r");
     await waitFor(() => reloadPresentation.some((entry) => entry[1] === "reload"), "interactive reload did not block terminal input");
     await waitFor(() => releaseResourceReload !== undefined, "interactive reload did not reach resource hydration");
@@ -235,12 +253,15 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
       "interactive reload did not refresh persisted keybindings",
     );
     await waitFor(() => reloadPresentation.at(-1)?.[0] === undefined, "interactive reload did not restore terminal input");
+    assert.doesNotMatch(rendered.slice(reloadOutputStart), /embedded reload transcript sentinel/u);
     assert.equal(activeThemeListeners, 1);
     assert.match(reloadPresentation[0]?.[0] ?? "", /keybindings, extensions, skills, prompts, themes, and context files/u);
     assert.equal(reloadPresentation[0]?.[1], "reload");
     assert.deepEqual(reloadPresentation.at(-1), [undefined, undefined]);
     assert.deepEqual(modelRefreshes.at(-1), { force: false, allowNetwork: false });
     assert.equal(terminal.getEditorText(), "preserved reload draft");
+    assert.notEqual(session.extensionRunner.getUIContext(), uiBeforeReload);
+    assert.equal(session.extensionRunner.hasUI(), true);
     input.write(" remains editable");
     await waitFor(() => terminal.getEditorText().endsWith(" remains editable"), "terminal input stayed blocked after reload");
     input.write("\u001b");
@@ -257,6 +278,22 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
       "failed interactive reload did not restore terminal input",
     );
     assert.deepEqual(reloadPresentation.at(-1), [undefined, undefined]);
+
+    await writeFile(join(agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "alt+q" }));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+      theme: "candidate-theme",
+      keybindings: { "app.unknown": "alt+x" },
+    }));
+    const beforeInvalidSettingsReload = reloadPresentation.length;
+    input.write("/reload\r");
+    await waitFor(
+      () => reloadPresentation.length >= beforeInvalidSettingsReload + 2,
+      "invalid settings keybindings did not restore terminal input",
+    );
+    assert.equal(settings.getThemeSetting(), undefined);
+    assert.deepEqual(terminal.keybindingsManager().getKeys("app.model.select"), ["alt+j"]);
+    assert.deepEqual(reloadPresentation.at(-1), [undefined, undefined]);
+
     input.write("/exit\r");
     await running;
     await runtime.dispose();

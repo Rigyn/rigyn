@@ -30,6 +30,7 @@ test("CLI reload uses cached model hydration and restores editor input", {
   const entrypoint = join(root, "entrypoint.mjs");
   const refreshLog = join(root, "refresh.log");
   const inputMarker = join(root, "input-restored");
+  const shellMarker = join(root, "shell-complete");
   await mkdir(workspace);
   context.after(async () => await rm(root, { recursive: true, force: true }));
 
@@ -93,12 +94,17 @@ await main([
   await waitFor(() => rendered.includes(`Rigyn ${RIGYN_VERSION} · Ready`), `CLI did not become ready:\n${rendered}`);
   await waitFor(async () => existsSync(refreshLog) && (await readFile(refreshLog, "utf8")).includes("true"),
     `startup live model discovery did not run:\n${rendered}`);
+  child.stdin.write(`!printf reload-transcript-sentinel && touch ${shellQuote(shellMarker)}\r`);
+  await waitFor(() => existsSync(shellMarker), `shell transcript fixture did not finish:\n${rendered}`);
+  await waitFor(() => rendered.includes("reload-transcript-sentinel"), `shell transcript was not rendered:\n${rendered}`);
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
   await writeFile(refreshLog, "");
 
+  const reloadOutputStart = rendered.length;
   child.stdin.write("/reload\r");
   await waitFor(() => rendered.includes("Reloaded keybindings, extensions, skills, prompts, themes, and context files"),
     `CLI reload did not finish:\n${rendered}`);
+  assert.doesNotMatch(rendered.slice(reloadOutputStart), /reload-transcript-sentinel/u);
   await waitFor(() => existsSync(refreshLog), "reload model refresh was not observed");
   assert.deepEqual((await readFile(refreshLog, "utf8")).trim().split("\n").filter(Boolean), ["false"]);
 

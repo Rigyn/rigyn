@@ -1,6 +1,7 @@
 import type { ImageContent } from "@rigyn/models";
 import { join } from "node:path";
 
+import { SettingsManager } from "../core/settings-manager.js";
 import type { ImageBlock } from "../core/types.js";
 import type { ExtensionCommandContextActions } from "../extensions/direct.js";
 import { extensionSessionManager } from "../extensions/session-contract.js";
@@ -214,7 +215,10 @@ export class InteractiveMode {
     if (this.#closed) throw new Error("Interactive mode is closed");
     if (this.#initialized) return;
     this.#initialized = true;
-    this.#keybindings = await loadKeybindings(join(this.#runtime.services.agentDir, "keybindings.json"));
+    this.#keybindings = await loadKeybindings(
+      join(this.#runtime.services.agentDir, "keybindings.json"),
+      this.#runtime.session.settingsManager.getKeybindings(),
+    );
     this.#terminal.setKeybindings(this.#keybindings);
     this.#terminal.start();
     this.#terminal.setStartup(
@@ -356,20 +360,22 @@ export class InteractiveMode {
         },
       },
     );
+    const extensionBindings = {
+      mode: "tui" as const,
+      uiContext: this.#uiBinding.uiContext,
+      commandContextActions: this.#commandActions(session),
+      abortHandler: () => { void session.abort("Cancelled by extension"); },
+      shutdownHandler: () => this.stop(),
+      onError: (error: { extensionPath: string; error: string }) => this.#terminal.notify(`${error.extensionPath}: ${error.error}`, "error"),
+    };
     if (start) {
-      await session.bindExtensions({
-        mode: "tui",
-        uiContext: this.#uiBinding.uiContext,
-        commandContextActions: this.#commandActions(session),
-        abortHandler: () => { void session.abort("Cancelled by extension"); },
-        shutdownHandler: () => this.stop(),
-        onError: (error) => this.#terminal.notify(`${error.extensionPath}: ${error.error}`, "error"),
-      });
+      await session.bindExtensions(extensionBindings);
       this.#uiBinding.restoreDirectContext();
-    }
+    } else session.updateExtensionBindings(extensionBindings);
     this.#unsubscribe = bindInteractiveSessionPresentation(session, this.#terminal, {
       onEnvelope: () => this.#updateContext(),
       onSessionEvent: () => this.#updateContext(),
+      preserveTranscript: !start,
     });
     this.#terminal.setCommandItems(this.#commandItems(session));
     this.#updateContext();
@@ -432,9 +438,16 @@ export class InteractiveMode {
     this.#terminal.setInputBlocked(`Reloading ${RELOAD_RESOURCE_SUMMARY}...`, "reload");
     try {
       const session = this.#runtime.session;
-      const reloadedKeybindings = await loadKeybindings(join(this.#runtime.services.agentDir, "keybindings.json"));
+      const keybindingsPath = join(this.#runtime.services.agentDir, "keybindings.json");
+      let reloadedKeybindings: ConfiguredKeybindings | undefined;
       await session.reload({
+        validateSettings: async (settings) => {
+          const candidate = SettingsManager.inMemory(settings);
+          candidate.getToolSettings();
+          reloadedKeybindings = await loadKeybindings(keybindingsPath, candidate.getKeybindings());
+        },
         beforeSessionStart: async () => {
+          if (reloadedKeybindings === undefined) throw new Error("Reloaded keybindings were not validated");
           this.#keybindings = reloadedKeybindings;
           this.#terminal.setKeybindings(this.#keybindings);
           await this.#bindSession(false);

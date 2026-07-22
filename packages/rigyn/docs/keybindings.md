@@ -30,16 +30,18 @@ Embedding code can construct and pass the public `Keybindings` object to the ter
 
 ## Persisted overrides
 
-Put application and editor overrides in `<agent-directory>/keybindings.json`. The default path is `~/.rigyn/agent/keybindings.json`; when `RIGYN_CODING_AGENT_DIR` is set, the file lives directly in that directory. The file is a JSON object whose keys are stable action IDs and whose values are one chord or an array of chords. `KEYBINDING_ACTIONS` and `DEFAULT_KEYBINDINGS` from `rigyn/tui` expose the complete accepted action set and its defaults; `/hotkeys` shows the common high-level bindings active in the current terminal. For example:
+Edit the `keybindings` object in `<agent-directory>/settings.json`. The default path is `~/.rigyn/agent/settings.json`; when `RIGYN_CODING_AGENT_DIR` is set, the file lives directly in that directory. A fresh installation lists every stable action ID with `null`, meaning “inherit a legacy `keybindings.json` override when present, otherwise the platform default.” Replace `null` with one chord or an array of chords; use an empty array to unbind the action. `KEYBINDING_ACTIONS` and `DEFAULT_KEYBINDINGS` from `rigyn/tui` expose the accepted action set and defaults; `/hotkeys` shows the common high-level bindings active in the current terminal. For example:
 
 ```json
 {
-  "app.model.select": "alt+k",
-  "tui.editor.cursorWordLeft": ["alt+left", "alt+b"]
+  "keybindings": {
+    "app.model.select": "alt+k",
+    "tui.editor.cursorWordLeft": ["alt+left", "alt+b"]
+  }
 }
 ```
 
-Both interactive entry points load this file. `/reload` validates and applies disk changes to host actions, built-in editor components, and direct extension UI as one live keymap. A malformed or oversized file fails the reload instead of silently falling back to unrelated defaults.
+Both interactive entry points load this object. `/reload` validates and applies disk changes to host actions, built-in editor components, and direct extension UI as one live keymap. A legacy `<agent-directory>/keybindings.json` is still read for compatibility, with `settings.json` taking precedence for duplicate actions. A malformed or oversized legacy file fails the reload instead of silently falling back to unrelated defaults.
 
 Runtime extensions register standalone shortcuts with `registerShortcut`. Host actions retain precedence, and conflicting extension shortcuts are not activated. Use a chord that is both visible in the package README and unlikely to be intercepted by the target terminal.
 

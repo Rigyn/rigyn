@@ -104,14 +104,14 @@ For session replacement (`new`, resume, fork, clone), use `AgentSessionRuntime`.
 
 ## Direct settings management
 
-`SettingsManager` reads strict, sparse JSON from two scopes:
+`SettingsManager` reads strict JSON from two scopes:
 
 1. `<agentDir>/settings.json` for global settings;
 2. `<cwd>/.rigyn/settings.json` for trusted-project settings.
 
-Project values override global values. Arrays and scalar values replace the earlier scope; settings objects such as `terminal`, `images`, `retry`, `compaction`, and `branchSummary` merge their immediate keys. An untrusted project is not read and cannot be written. Calling `setProjectTrusted(true)` loads its settings, while changing it back to `false` removes project values from the effective view.
+Project values override global values. Arrays and scalar values replace the earlier scope; nested settings objects merge recursively. `null` inherits the lower-precedence or runtime default and is omitted from getters. An untrusted project is not read and cannot be written. Calling `setProjectTrusted(true)` loads its settings, while changing it back to `false` removes project values from the effective view.
 
-Files contain only explicit choices. Missing files stay missing during reads, and getters supply runtime defaults without materializing a complete configuration. Comments are not accepted. A malformed file is left untouched, its last valid in-memory scope remains active across `reload()`, and the error is available through `drainErrors()`.
+The private installer and `config edit` scaffold a complete global document; direct SDK reads still leave missing files missing. Getters supply runtime defaults without materializing another effective file. Comments are not accepted. A malformed file is left untouched, its last valid in-memory scope remains active across `reload()`, and the error is available through `drainErrors()`.
 
 ```ts
 import { SettingsManager } from "rigyn/sdk";

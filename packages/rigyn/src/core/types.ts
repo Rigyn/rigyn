@@ -517,6 +517,8 @@ export interface ProviderRequest {
   metadata?: Record<string, string>;
   sessionId?: string;
   transport?: Transport;
+  timeoutMs?: number;
+  maxRetries?: number;
   maxRetryDelayMs?: number;
   onPayload?: SimpleStreamOptions["onPayload"];
   onResponse?: SimpleStreamOptions["onResponse"];

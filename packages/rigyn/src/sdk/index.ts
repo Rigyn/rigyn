@@ -133,14 +133,18 @@ function chooseInitialModel(
 function initialActiveTools(
   options: CreateAgentSessionOptions,
   extensionAndCustomNames: readonly string[],
+  settings: SettingsManager,
 ): NonNullable<import("../service/agent-session.js").AgentSessionOptions["initialToolSelection"]> {
   let names: string[];
   let activateExtensionToolsOnBind = false;
+  const configured = settings.getToolSettings();
   if (options.tools !== undefined) names = [...options.tools];
   else if (options.noTools === "all") names = [];
   else if (options.noTools === "builtin") {
     names = [...extensionAndCustomNames];
     activateExtensionToolsOnBind = true;
+  } else if (configured.enabled !== undefined) {
+    names = [...configured.enabled];
   } else {
     names = [...DEFAULT_ACTIVE_BUILTINS, ...extensionAndCustomNames];
     activateExtensionToolsOnBind = true;
@@ -148,7 +152,7 @@ function initialActiveTools(
   return {
     names: [...new Set(names)],
     activateExtensionToolsOnBind,
-    excludedNames: [...new Set(options.excludeTools ?? [])],
+    excludedNames: [...new Set([...(configured.excluded ?? []), ...(options.excludeTools ?? [])])],
   };
 }
 
@@ -324,6 +328,9 @@ export async function createAgentSession(
     const extensionTools = extensionHost.tools();
     const customTools = options.customTools ?? [];
     const extraTools = [...extensionTools, ...customTools];
+    const hasExplicitToolSelection = options.tools !== undefined
+      || options.noTools !== undefined
+      || options.excludeTools !== undefined;
     restoreBootstrapProviders?.();
     restoreBootstrapProviders = undefined;
     session = await AgentSession.create({
@@ -337,10 +344,15 @@ export async function createAgentSession(
       agentDirectory: agentDir,
       settingsManager,
       tools: extraTools,
-      initialToolSelection: initialActiveTools(
-        options,
-        extraTools.map((tool) => tool.definition.name).filter((name) => !BUILTIN_TOOL_NAMES.has(name)),
-      ),
+      ...(hasExplicitToolSelection
+        ? {
+            initialToolSelection: initialActiveTools(
+              options,
+              extraTools.map((tool) => tool.definition.name).filter((name) => !BUILTIN_TOOL_NAMES.has(name)),
+              settingsManager,
+            ),
+          }
+        : {}),
       ...(model === undefined ? {} : { model: toSessionModel(model) }),
       thinkingLevel,
       scopedModels,
@@ -377,7 +389,7 @@ export type { ReadonlySessionManager } from "../storage/session-manager.js";
 export { DefaultResourceLoader } from "../core/resource-loader.js";
 export type { ResourceExtensionsResult, ResourceLoader } from "../core/resource-loader.js";
 export { SettingsManager } from "../core/settings-manager.js";
-export type { ThinkingLevel } from "../core/settings-manager.js";
+export type { PersistedSettings, ThinkingLevel } from "../core/settings-manager.js";
 export { ModelRegistry } from "../providers/public-model-registry.js";
 export { ModelRuntime } from "../providers/model-compat.js";
 export type { ProviderModel } from "../providers/models.js";

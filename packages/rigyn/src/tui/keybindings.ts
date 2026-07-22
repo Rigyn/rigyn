@@ -368,7 +368,7 @@ export class Keybindings {
   }
 }
 
-export function parseKeybindings(value: unknown): Keybindings {
+export function parseKeybindingOverrides(value: unknown): KeybindingOverrides {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Keybindings must be a JSON object");
   const input = value as Record<string, unknown>;
   const unknown = Object.keys(input).filter((action) => !ACTIONS.has(action));
@@ -382,16 +382,25 @@ export function parseKeybindings(value: unknown): Keybindings {
     }
     overrides[action] = selected as string | string[];
   }
-  return new Keybindings(overrides);
+  return overrides;
 }
 
-export async function loadKeybindings(path: string): Promise<Keybindings> {
+export function parseKeybindings(value: unknown): Keybindings {
+  return new Keybindings(parseKeybindingOverrides(value));
+}
+
+export async function loadKeybindings(
+  path: string,
+  settingsOverrides: KeybindingOverrides = {},
+): Promise<Keybindings> {
+  let fileOverrides: KeybindingOverrides = {};
   try {
     const loaded = await readFileBounded(path, MAX_KEYBINDINGS_BYTES);
     if (loaded.truncated) throw new Error(`Keybindings file exceeds ${MAX_KEYBINDINGS_BYTES} bytes`);
-    return parseKeybindings(JSON.parse(loaded.data.toString("utf8")) as unknown);
+    fileOverrides = parseKeybindingOverrides(JSON.parse(loaded.data.toString("utf8")) as unknown);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Keybindings();
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const configured = parseKeybindingOverrides(settingsOverrides);
+  return new Keybindings({ ...fileOverrides, ...configured });
 }

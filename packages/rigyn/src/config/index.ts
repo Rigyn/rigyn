@@ -9,6 +9,7 @@ export {
 } from "../core/settings-manager.js";
 export type {
   DefaultProjectTrust,
+  PersistedSettings,
   Settings,
   SettingsError,
   SettingsManagerCreateOptions,

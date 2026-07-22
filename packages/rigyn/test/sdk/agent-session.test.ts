@@ -72,6 +72,36 @@ test("SDK activates every built-in tool by default", async () => {
   await created.session.close();
 });
 
+test("SDK honors persistent tool settings when call options are omitted", async () => {
+  const { cwd, agentDir } = await workspace();
+  const { model, runtime } = await modelRuntime();
+  const settingsManager = SettingsManager.inMemory({
+    tools: {
+      enabled: ["read", "bash"],
+      excluded: ["bash"],
+    },
+  });
+  const created = await createAgentSession({
+    cwd,
+    agentDir,
+    modelRuntime: runtime,
+    model,
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager,
+  });
+
+  assert.deepEqual(created.session.getActiveTools(), ["read"]);
+  settingsManager.updateGlobalSettings({ tools: { enabled: ["write"], excluded: [] } });
+  await created.session.reload();
+  assert.deepEqual(created.session.getActiveTools(), ["write"]);
+
+  created.session.setActiveTools(["read"]);
+  settingsManager.updateGlobalSettings({ tools: { enabled: ["bash"], excluded: [] } });
+  await created.session.reload();
+  assert.deepEqual(created.session.getActiveTools(), ["read"]);
+  await created.session.close();
+});
+
 async function modelRuntime(scripts: readonly ScriptedProviderStep[] = []): Promise<{
   model: ProviderModel;
   runtime: ModelRegistry;
@@ -436,6 +466,8 @@ test("session.agent applies mutable state and low-level stream configuration to 
   agent.sessionId = "provider-session";
   agent.thinkingBudgets = { low: 17, medium: 23 };
   agent.transport = "websocket";
+  agent.timeoutMs = 123;
+  agent.maxRetries = 2;
   agent.maxRetryDelayMs = 321;
   agent.toolExecution = "sequential";
   const payloadHook = async (payload: unknown) => payload;
@@ -496,6 +528,8 @@ test("session.agent applies mutable state and low-level stream configuration to 
   assert.equal(observedOptions?.sessionId, "provider-session");
   assert.deepEqual(observedOptions?.thinkingBudgets, { low: 17, medium: 23 });
   assert.equal(observedOptions?.transport, "websocket");
+  assert.equal(observedOptions?.timeoutMs, 123);
+  assert.equal(observedOptions?.maxRetries, 2);
   assert.equal(observedOptions?.maxRetryDelayMs, 321);
   assert.equal(observedOptions?.onPayload, payloadHook);
   assert.equal(observedOptions?.onResponse, responseHook);

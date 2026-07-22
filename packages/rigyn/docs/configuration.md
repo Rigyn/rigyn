@@ -1,27 +1,26 @@
 # Settings
 
-Rigyn has one persisted settings model: sparse JSON managed by `SettingsManager`.
-Comments and trailing commas are not accepted. Unknown keys are retained but have no effect. Missing files and missing keys mean defaults; Rigyn does not generate a second “effective configuration” document.
+Rigyn has one editable settings document managed by `SettingsManager`. A self-contained install creates the global file from the complete packaged `resources/settings.example.json` whenever it is missing; `rigyn config edit` opens that same complete template when the user-scope file is missing. Existing files are preserved on reinstall and update.
+
+Comments and trailing commas are not accepted. Every supported persistent preference is present in the scaffold. `null` means inherit Rigyn's dynamic, provider, environment, or platform default; it is not passed into the runtime. Unknown keys are retained but have no effect. Missing files and missing keys also mean defaults, and Rigyn does not generate a second “effective configuration” document.
 
 ## Locations and precedence
 
 ```text
 ~/.rigyn/agent/settings.json              global settings
-~/.rigyn/agent/keybindings.json           global application and editor bindings
 $RIGYN_CODING_AGENT_DIR/settings.json     global settings with a custom agent directory
-$RIGYN_CODING_AGENT_DIR/keybindings.json  bindings with a custom agent directory
 WORKSPACE/.rigyn/settings.json            trusted project settings
 ```
 
 The self-contained launcher sets `RIGYN_CODING_AGENT_DIR` to `INSTALL_ROOT/agent`, so its settings, authentication, sessions, resources, and model catalog stay under that installation root.
 
-Global settings load first. Trusted project settings override them. Nested setting objects merge one level deep; arrays and scalar values replace. Project settings are not read and cannot be written until the workspace is trusted. `defaultProjectTrust` is global-only even if a project file contains that key.
+Global settings load first. Trusted project settings override them. Nested setting objects merge recursively; arrays and scalar values replace. A nested or top-level `null` inherits the lower-precedence/default value. Project settings are not read and cannot be written until the workspace is trusted. `defaultProjectTrust` is global-only even if a project file contains that key.
 
-`/reload` requires an idle session and blocks interactive input while it completes. It waits for pending writes, rereads both active settings scopes and `keybindings.json`, then rebuilds extensions, skills, prompt templates, themes, and context files without switching the active JSONL session. Model state is rehydrated from cached catalogs only; `/reload` never waits for live provider discovery. A parse failure is reported and leaves the last valid in-memory settings scope intact. Writes lock the file and merge only the fields changed in-process into the latest disk contents, so unrelated external edits survive.
+`/reload` requires an idle session and blocks interactive input while it completes. It waits for pending writes, rereads both active settings scopes (including `keybindings`) and the legacy `keybindings.json`, then rebuilds extensions, skills, prompt templates, themes, and context files without switching the active JSONL session. Model state is rehydrated from cached catalogs only; `/reload` never waits for live provider discovery. A parse failure is reported and leaves the last valid in-memory settings scope intact. Writes lock the file and merge only the fields changed in-process into the latest disk contents, so unrelated external edits survive.
 
-Credentials are stored separately in `auth.json`. Sessions are append-only JSONL files under `sessions/`. Provider/model declarations and authentication commands are not settings: use the model registry and trusted provider extensions described in [Providers](providers.md).
+Credentials are stored separately in `auth.json`. Sessions are append-only JSONL files under `sessions/`. They are intentionally not configuration and never belong in `settings.json`. Provider/model declarations and authentication commands are also not settings: use the model registry and trusted provider extensions described in [Providers](providers.md).
 
-Keybindings are stored separately because they configure both the application and the low-level editor. See [Keybindings](keybindings.md) for the complete action map and file format. `/reload` applies keybinding changes together with settings and extension resources.
+Application and editor overrides live under the `keybindings` object in `settings.json`, so ordinary configuration stays in one file. A pre-0.5.1 `keybindings.json` remains a compatibility input; values in `settings.json` take precedence. See [Keybindings](keybindings.md) for the action map and chord format. `/reload` applies keybinding changes together with settings and extension resources.
 
 ## Agent instructions
 
@@ -32,6 +31,9 @@ Use `AGENTS.md` to personalize the agent without changing the built-in system pr
 $RIGYN_CODING_AGENT_DIR/AGENTS.md     global instructions with a custom agent directory
 ANCESTOR/AGENTS.md                    project or directory-specific instructions
 ```
+
+A self-contained install scaffolds the global `AGENTS.md` from the packaged template whenever it is missing. Edit it
+directly and run `/reload` in an active session; reinstall and update preserve the customized file byte-for-byte.
 
 Rigyn loads the global file first, then one instruction file from each ancestor directory in filesystem-root-to-working-directory order. More specific instructions therefore appear later. `/reload` rereads the active files, and `--no-context-files` disables instruction-file discovery for one invocation. Instruction files are prompt text; they do not grant extension trust or additional operating-system authority.
 
@@ -46,7 +48,7 @@ rigyn config path --scope project
 rigyn config edit --scope project
 ```
 
-`path` prints the exact file path without creating it; add `--json` for structured output. `edit` opens the selected file with `externalEditor`, `$VISUAL`, `$EDITOR`, or the platform editor. It accepts only valid JSON whose top level is an object. The edit is committed under the settings lock only when the on-disk file still matches the version opened in the editor, so invalid JSON, editor failure, or a concurrent change leaves the original untouched. Project scope targets `WORKSPACE/.rigyn/settings.json` and honors `--workspace DIR`; editing that scope requires a trusted workspace (or the invocation-only `--approve`). `-l` is the short project-scope form.
+`path` prints the exact file path without creating it; add `--json` for structured output. `edit` opens the selected file with `externalEditor`, `$VISUAL`, `$EDITOR`, or the platform editor. When user settings are missing it starts from the complete packaged template. It accepts only valid JSON whose top level is an object. The edit is committed under the settings lock only when the on-disk file still matches the version opened in the editor, so invalid JSON, editor failure, or a concurrent change leaves the original untouched. Project scope targets `WORKSPACE/.rigyn/settings.json` and honors `--workspace DIR`; editing that scope requires a trusted workspace (or the invocation-only `--approve`). `-l` is the short project-scope form.
 
 ## Supported settings
 
@@ -85,6 +87,8 @@ rigyn config edit --scope project
 | `prompts` | `[]` | Additional prompt-template files or directories. |
 | `themes` | `[]` | Additional custom theme files or directories. |
 | `enableSkillCommands` | `true` | Register discovered skills as slash commands. |
+| `tools.enabled` | all built-in and extension tools | Persistent tool allowlist; `null` keeps every available tool enabled. Invocation flags take precedence. |
+| `tools.excluded` | `[]` | Persistent tool exclusions, combined with `--exclude-tools`. |
 | `terminal.showImages` | `true` | Render supported terminal images. |
 | `terminal.imageWidthCells` | `60` | Preferred terminal image width. |
 | `terminal.clearOnShrink` | `false` | Clear and redraw after terminal shrink. |
@@ -94,7 +98,7 @@ rigyn config edit --scope project
 | `enabledModels` | all available | Provider/model glob patterns used for model cycling. |
 | `doubleEscapeAction` | `tree` | `tree`, `fork`, or `none`. |
 | `treeFilterMode` | `default` | `default`, `no-tools`, `user-only`, `labeled-only`, or `all`. |
-| `thinkingBudgets` | provider defaults | Optional `minimal`, `low`, `medium`, and `high` token budgets. |
+| `thinkingBudgets` | provider defaults | Optional `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` token budgets. |
 | `editorPaddingX` | `0` | Composer horizontal padding, clamped from 0 through 3. |
 | `outputPad` | `1` | Transcript horizontal padding: 0 or 1. |
 | `autocompleteMaxVisible` | `5` | Visible autocomplete rows, clamped from 3 through 20. |
@@ -106,31 +110,15 @@ rigyn config edit --scope project
 | `httpIdleTimeoutMs` | `300000` | Header/body idle timeout; `0` or `"disabled"` disables it. |
 | `websocketConnectTimeoutMs` | provider default | WebSocket connect timeout; `0` or `"disabled"` disables it. |
 | `collapseChangelog` | `false` | Prefer a condensed changelog display. |
+| `keybindings` | platform defaults | Complete application/editor action map. `null` on an action keeps its built-in binding; `[]` unbinds it. |
 
 Rigyn does not send install or usage telemetry. Secrets, OAuth tokens, and provider request headers never belong in settings.
 
 The first interactive startup records the installed version without replaying old release notes. After an update, startup shows only release sections newer than the recorded version. Set `collapseChangelog` to `true` for a one-line update notice; `/changelog` always shows the complete packaged changelog.
 
-## Sparse example
+## Complete editable template
 
-```json
-{
-  "defaultProvider": "openai-codex",
-  "defaultModel": "MODEL_ID",
-  "defaultThinkingLevel": "high",
-  "theme": "mono",
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
-  },
-  "packages": [
-    "npm:@scope/reviewed-package"
-  ]
-}
-```
-
-Keep only intentional overrides. A packaged copy of this example is available at [`../resources/settings.example.json`](../resources/settings.example.json).
+The installed `settings.json` is a directly editable copy of [`../resources/settings.example.json`](../resources/settings.example.json). It lists every persistent setting and every keybinding action. Leave dynamic values as `null`, replace them with an accepted value to override the default, and run `/reload` after editing. Project settings may stay sparse because they are override documents rather than the main user configuration.
 
 ## Package-resource selector
 

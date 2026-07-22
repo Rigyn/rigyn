@@ -1,6 +1,6 @@
 {
   "name": "rigyn",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
@@ -164,9 +164,9 @@
     "typecheck:test": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@rigyn/kernel": "0.5.0",
-    "@rigyn/models": "0.5.0",
-    "@rigyn/terminal": "0.5.0",
+    "@rigyn/kernel": "0.5.1",
+    "@rigyn/models": "0.5.1",
+    "@rigyn/terminal": "0.5.1",
     "@anthropic-ai/sdk": "0.112.3",
     "@aws-sdk/client-bedrock-runtime": "3.1048.0",
     "@aws-sdk/credential-providers": "3.1090.0",

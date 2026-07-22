@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -29,7 +29,10 @@ import {
   terminateLifecycleProcessTree,
   windowsLauncher,
 } from "../../scripts/lifecycle-common.mjs";
-import { sourceBuildSteps } from "../../scripts/install-user.mjs";
+import {
+  ensureAgentScaffold,
+  sourceBuildSteps,
+} from "../../scripts/install-user.mjs";
 import {
   assertUpdateVersionPolicy,
   downloadLatestGitHubReleaseBundle,
@@ -39,7 +42,7 @@ import {
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
-function githubReleaseFixture(version = "0.5.0") {
+function githubReleaseFixture(version = "0.5.1") {
   const files = new Map(RIGYN_PRODUCT_PACKAGE_GRAPH.map(({ name }) => {
     const file = `${name === "rigyn" ? "rigyn" : name.replace("@rigyn/", "rigyn-")}-${version}.tgz`;
     return [file, Buffer.from(`${name} ${version} release archive\n`)];
@@ -145,7 +148,7 @@ const { basename } = require("node:path");
   const url = args.at(-1);
   await appendFile(process.env.RIGYN_TEST_CURL_CAPTURE, JSON.stringify({ args, url }) + "\\n");
   if (url.endsWith("/latest")) {
-    process.stdout.write("https://github.com/Rigyn/rigyn/releases/tag/v0.5.0");
+    process.stdout.write("https://github.com/Rigyn/rigyn/releases/tag/v0.5.1");
   } else {
     const outputIndex = args.indexOf("--output");
     await copyFile(process.env.RIGYN_TEST_FIXTURE + "/" + basename(new URL(url).pathname), args[outputIndex + 1]);
@@ -222,6 +225,91 @@ test("source installation builds and verifies only the matching desktop native h
       ...portable.slice(1),
     ]);
   }
+});
+
+test("agent scaffold creates complete private templates idempotently", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-agent-scaffold-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const agentDirectory = join(root, "agent");
+  const temporaryDirectory = join(root, "temporary");
+  const resourcesDirectory = join(PROJECT_ROOT, "resources");
+
+  await ensureAgentScaffold(agentDirectory, resourcesDirectory, temporaryDirectory);
+  await ensureAgentScaffold(agentDirectory, resourcesDirectory, temporaryDirectory);
+
+  assert.deepEqual(
+    await readFile(join(agentDirectory, "AGENTS.md")),
+    await readFile(join(resourcesDirectory, "AGENTS.md")),
+  );
+  assert.deepEqual(
+    await readFile(join(agentDirectory, "settings.json")),
+    await readFile(join(resourcesDirectory, "settings.example.json")),
+  );
+  if (process.platform !== "win32") {
+    assert.equal((await lstat(agentDirectory)).mode & 0o777, 0o700);
+    assert.equal((await lstat(join(agentDirectory, "AGENTS.md"))).mode & 0o777, 0o600);
+    assert.equal((await lstat(join(agentDirectory, "settings.json"))).mode & 0o777, 0o600);
+  }
+});
+
+test("agent scaffold preserves existing files and permissions byte-for-byte", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-agent-scaffold-existing-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const agentDirectory = join(root, "agent");
+  const temporaryDirectory = join(root, "temporary");
+  const instructions = Buffer.from("");
+  const settings = Buffer.from('{"theme":"custom-theme","quietStartup":true}\n');
+  await mkdir(agentDirectory, { mode: 0o755 });
+  await Promise.all([
+    writeFile(join(agentDirectory, "AGENTS.md"), instructions, { mode: 0o644 }),
+    writeFile(join(agentDirectory, "settings.json"), settings, { mode: 0o640 }),
+  ]);
+
+  await ensureAgentScaffold(agentDirectory, join(PROJECT_ROOT, "resources"), temporaryDirectory);
+
+  assert.deepEqual(await readFile(join(agentDirectory, "AGENTS.md")), instructions);
+  assert.deepEqual(await readFile(join(agentDirectory, "settings.json")), settings);
+  if (process.platform !== "win32") {
+    assert.equal((await lstat(agentDirectory)).mode & 0o777, 0o755);
+    assert.equal((await lstat(join(agentDirectory, "AGENTS.md"))).mode & 0o777, 0o644);
+    assert.equal((await lstat(join(agentDirectory, "settings.json"))).mode & 0o777, 0o640);
+  }
+});
+
+test("agent scaffold validates every destination before creating a missing file", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-agent-scaffold-failure-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const agentDirectory = join(root, "agent");
+  await mkdir(agentDirectory, { mode: 0o755 });
+  await mkdir(join(agentDirectory, "settings.json"), { mode: 0o755 });
+
+  await assert.rejects(
+    ensureAgentScaffold(agentDirectory, join(PROJECT_ROOT, "resources"), join(root, "temporary")),
+    /Agent settings must be a regular file/u,
+  );
+
+  await assert.rejects(access(join(agentDirectory, "AGENTS.md")), { code: "ENOENT" });
+  assert.equal((await lstat(join(agentDirectory, "settings.json"))).isDirectory(), true);
+});
+
+test("agent scaffold rejects a linked agent directory without touching its target", {
+  skip: process.platform === "win32",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-agent-scaffold-link-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const target = join(root, "target");
+  const agentDirectory = join(root, "agent");
+  await mkdir(target, { mode: 0o755 });
+  await chmod(target, 0o755);
+  await symlink(target, agentDirectory, "dir");
+
+  await assert.rejects(
+    ensureAgentScaffold(agentDirectory, join(PROJECT_ROOT, "resources"), join(root, "temporary")),
+    /Agent directory must be a real directory/u,
+  );
+
+  assert.equal((await lstat(target)).mode & 0o777, 0o755);
+  assert.deepEqual(await readdir(target), []);
 });
 
 test("native verification rejects a missing matching helper in a clean source tree", async (context) => {
@@ -323,7 +411,7 @@ process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.
 
 test("release metadata policy matches the GitHub artifact contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.5.0");
+  assert.equal(result.version, "0.5.1");
   assert.equal(result.subpathCount, 22);
   assert.equal(result.targetCount, 6);
   assert.equal(result.nativeTargetCount, 4);
@@ -559,9 +647,9 @@ test("streamed POSIX bootstrap rejects a checksum mismatch before npm", {
 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-bootstrap-posix-checksum-"));
   context.after(async () => await rm(root, { recursive: true, force: true }));
-  const run = await runPosixBootstrap(root, { corrupt: "rigyn-0.5.0.tgz" });
+  const run = await runPosixBootstrap(root, { corrupt: "rigyn-0.5.1.tgz" });
   assert.notEqual(run.result.code, 0);
-  assert.match(run.result.stderr, /checksum mismatch for rigyn-0\.5\.0\.tgz/u);
+  assert.match(run.result.stderr, /checksum mismatch for rigyn-0\.5\.1\.tgz/u);
   await assert.rejects(access(run.npmCapture), (error) => error?.code === "ENOENT");
   assert.deepEqual(await readdir(run.temporary), []);
 });

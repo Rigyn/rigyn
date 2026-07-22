@@ -128,6 +128,7 @@ export {
   type DefaultProjectTrust,
   type ImageSettings,
   type PackageSource,
+  type PersistedSettings,
   type RetrySettings,
   type SettingsManagerCreateOptions,
 } from "./core/settings-manager.js";

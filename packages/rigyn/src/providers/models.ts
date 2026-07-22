@@ -233,6 +233,8 @@ export interface ProviderStreamOptions {
   sessionId?: string;
   metadata?: Record<string, string>;
   transport?: Transport;
+  timeoutMs?: number;
+  maxRetries?: number;
   maxRetryDelayMs?: number;
   onPayload?: SimpleStreamOptions["onPayload"];
   onResponse?: SimpleStreamOptions["onResponse"];
@@ -929,6 +931,9 @@ export function createProvider<TApi extends ModelProtocolFamily = ModelProtocolF
       ...(options.thinkingBudgets === undefined ? {} : { thinkingBudgets: options.thinkingBudgets }),
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(options.metadata === undefined ? {} : { metadata: options.metadata }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+      ...(options.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: options.maxRetryDelayMs }),
       ...(model.compat === undefined ? {} : { modelSettings: { compatibility: structuredClone(model.compat) } }),
     };
     return simple && implementation.streamSimple !== undefined

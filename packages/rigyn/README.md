@@ -36,10 +36,10 @@ manual command is:
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-terminal-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-models-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-kernel-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-0.5.0.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn
 ```
@@ -48,7 +48,7 @@ This uses npm's one-shot package executor with version-pinned GitHub assets; it 
 installation or download a Rigyn package from the npm registry.
 
 To install without Node.js or npm, download the standalone archive matching your platform from the
-[v0.5.0 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.0), verify it against `SHA256SUMS`, and
+[v0.5.1 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.1), verify it against `SHA256SUMS`, and
 extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/rigyn`
 on Linux or macOS and `bin\rigyn.cmd` on Windows.
 
@@ -63,7 +63,7 @@ rigyn
 
 On macOS and Windows, a source install compiles and verifies the matching terminal input helper before packaging the private installation. Put `cc` on `PATH` on macOS (normally through the Xcode Command Line Tools), or run from an architecture-matching MSVC developer shell with `cl` on `PATH` on Windows. Linux source installs do not compile a terminal helper.
 
-The installer creates a self-contained installation under `$HOME/.rigyn`. It copies the required build inputs into installation-owned staging, builds there, and removes the staging copy afterward. The master source checkout is read-only during installation. The packaged application, production dependencies, executable, configuration, sessions, credentials, cache, and temporary artifacts stay under the installation directory. On Linux and macOS, a tiny managed command launcher at `$HOME/.local/bin/rigyn` makes the private installation available from any directory. The installer does not use npm's global package directory, link the application back to the source checkout, change the current workspace, or edit shell startup files.
+The installer creates a self-contained installation under `$HOME/.rigyn`. It copies the required build inputs into installation-owned staging, builds there, and removes the staging copy afterward. It scaffolds editable `agent/AGENTS.md` and `agent/settings.json` files from the packaged templates whenever either file is missing; reinstall and update never overwrite an existing copy. The master source checkout is read-only during installation. The packaged application, production dependencies, executable, configuration, sessions, credentials, cache, and temporary artifacts stay under the installation directory. On Linux and macOS, a tiny managed command launcher at `$HOME/.local/bin/rigyn` makes the private installation available from any directory. The installer does not use npm's global package directory, link the application back to the source checkout, change the current workspace, or edit shell startup files.
 
 Installing does not require `npm install` in the master checkout. For development only, run `npm install`, `npm run check`, and `npm run dev --workspace rigyn --` from the checkout.
 
@@ -245,7 +245,7 @@ For an agent-built package, enter `/build-extension <request>`. The bundled prom
 
 ## Configuration
 
-Persistent settings are sparse, strict JSON:
+Persistent settings use one strict JSON document:
 
 ```text
 ~/.rigyn/agent/settings.json              normal installation
@@ -253,11 +253,11 @@ $RIGYN_CODING_AGENT_DIR/settings.json     custom agent directory
 WORKSPACE/.rigyn/settings.json            trusted project overrides
 ```
 
-Missing files mean defaults and are not created until a setting is changed. Global settings load first; a trusted project's settings then override them one level deep. Arrays replace, while nested setting objects merge by key. Invalid JSON is reported without replacing the last valid in-memory values. Credentials remain in `auth.json`, sessions remain JSONL files, and provider/model declarations belong to the model registry or trusted extensions rather than the settings file.
+The self-contained installer scaffolds the global settings file from the complete packaged template when it is missing. `null` inherits dynamic/platform defaults without entering the runtime. Missing files and keys still mean defaults in portable or custom-agent-directory runs. Global settings load first; a trusted project's settings then override them recursively. Arrays and scalar values replace. The document includes persistent tool policy and the complete keybinding map. Invalid JSON is reported without replacing the last valid in-memory values. Credentials remain in `auth.json`, sessions remain JSONL files, and provider/model declarations belong to the model registry or trusted extensions rather than the settings file.
 
 Project settings are neither read nor writable before trust. The global-only `defaultProjectTrust` setting accepts `ask`, `always`, or `never`; `--approve` and `--no-approve` remain invocation-only overrides.
 
-Personal agent instructions belong in `~/.rigyn/agent/AGENTS.md`, or in
+The self-contained installer creates a ready-to-edit personal template at `~/.rigyn/agent/AGENTS.md` and preserves it on updates. Personal agent instructions belong there, or in
 `$RIGYN_CODING_AGENT_DIR/AGENTS.md` when that directory is overridden. Project instructions belong in `AGENTS.md`
 files along the path to the active working directory. Rigyn appends the global file first and project files from the
 outermost ancestor to the working directory, so more specific instructions appear later. `/reload` rereads them.
@@ -281,7 +281,7 @@ Example:
 path and `rigyn config edit` opens it through the configured external editor. Add `--scope project` to either command
 for `WORKSPACE/.rigyn/settings.json`; editing that scope requires project trust. Edits validate a top-level JSON object
 and commit under the settings lock only if the file did not change while the editor was open. The complete settings
-contract and resource paths are in [Configuration](docs/configuration.md), with a sparse example at
+contract and resource paths are in [Configuration](docs/configuration.md), with the complete installed template at
 [`resources/settings.example.json`](resources/settings.example.json).
 
 ## Automation and embedding

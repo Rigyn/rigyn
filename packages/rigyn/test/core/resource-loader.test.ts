@@ -208,6 +208,17 @@ test("failed and finally-aborted reloads leave every published resource view on 
   assert.equal(extensionHost(loader.getExtensions()), expectedHost);
   assert.deepEqual(publishedState(), expectedState);
   assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
+
+  mode = "normal";
+  abortController = new AbortController();
+  await assert.rejects(loader.reload({
+    signal: abortController.signal,
+    prepareExtensions() { abortController!.abort(new Error("preparation abort")); },
+  }), /preparation abort/u);
+  assert.equal(loader.getExtensions(), expectedExtensions);
+  assert.equal(extensionHost(loader.getExtensions()), expectedHost);
+  assert.deepEqual(publishedState(), expectedState);
+  assert.deepEqual(registeredCommandNames(loader.getExtensions()), ["one"]);
 });
 
 test("extension load results exclude warnings emitted by active extensions", async (t) => {

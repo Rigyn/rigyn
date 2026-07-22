@@ -107,3 +107,135 @@ test("runtime startup, reload, and project trust use one SettingsManager authori
     else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDirectory;
   }
 });
+
+test("runtime startup and candidate reload apply persistent tool policy", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-runtime-tool-settings-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const agentDirectory = join(root, "agent");
+  await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
+  await writeFile(join(agentDirectory, "settings.json"), JSON.stringify({
+    tools: {
+      enabled: ["read", "runtime_extension"],
+      excluded: ["read"],
+    },
+  }));
+
+  const previousAgentDirectory = process.env.RIGYN_CODING_AGENT_DIR;
+  process.env.RIGYN_CODING_AGENT_DIR = agentDirectory;
+  let runtime: Awaited<ReturnType<typeof loadRuntime>> | undefined;
+  try {
+    runtime = await loadRuntime({
+      workspace,
+      ephemeral: true,
+      projectTrusted: true,
+      extensions: false,
+      extensionRuntime: true,
+      extensionFactories: [{
+        name: "runtime-tool-policy",
+        factory(api) {
+          api.registerTool({
+            name: "runtime_extension",
+            label: "Runtime extension",
+            description: "Runtime tool-policy fixture",
+            parameters: { type: "object", additionalProperties: false, properties: {} },
+            async execute() { return { content: [{ type: "text", text: "ready" }], details: {} }; },
+          });
+          api.on("session_start", () => {
+            api.registerTool({
+              name: "runtime_late_extension",
+              label: "Late runtime extension",
+              description: "Late runtime tool-policy fixture",
+              parameters: { type: "object", additionalProperties: false, properties: {} },
+              async execute() { return { content: [{ type: "text", text: "ready" }], details: {} }; },
+            });
+          });
+        },
+      }],
+      skills: false,
+      promptTemplates: false,
+      themes: false,
+      offline: true,
+    });
+    assert.deepEqual(runtime.session.getActiveTools(), ["runtime_extension"]);
+
+    await writeFile(join(agentDirectory, "settings.json"), JSON.stringify({
+      tools: { excluded: ["bash", "runtime_late_extension"] },
+    }));
+    await runtime.reload();
+    assert.deepEqual(runtime.session.getActiveTools(), [
+      "read",
+      "edit",
+      "write",
+      "grep",
+      "find",
+      "ls",
+      "runtime_extension",
+    ]);
+    assert.equal(runtime.session.getAllTools().some((tool) => tool.definition.name === "runtime_late_extension"), true);
+  } finally {
+    await runtime?.close().catch(() => undefined);
+    if (previousAgentDirectory === undefined) delete process.env.RIGYN_CODING_AGENT_DIR;
+    else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDirectory;
+  }
+});
+
+test("runtime reload rejects invalid candidate settings without replacing the active generation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-runtime-invalid-settings-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const agentDirectory = join(root, "agent");
+  const settingsPath = join(agentDirectory, "settings.json");
+  await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
+  await writeFile(settingsPath, JSON.stringify({ theme: "mono" }));
+
+  const previousAgentDirectory = process.env.RIGYN_CODING_AGENT_DIR;
+  process.env.RIGYN_CODING_AGENT_DIR = agentDirectory;
+  let runtime: Awaited<ReturnType<typeof loadRuntime>> | undefined;
+  try {
+    runtime = await loadRuntime({
+      workspace,
+      ephemeral: true,
+      projectTrusted: false,
+      extensions: false,
+      extensionRuntime: false,
+      skills: false,
+      promptTemplates: false,
+      themes: false,
+      offline: true,
+    });
+    const activeSession = runtime.session;
+    const activeSettings = runtime.settings;
+
+    await writeFile(settingsPath, "{not-json");
+    await assert.rejects(runtime.reload(), /Settings could not be loaded.*global/iu);
+    assert.equal(runtime.session, activeSession);
+    assert.equal(runtime.settings, activeSettings);
+    assert.equal(runtime.settings.getTheme(), "mono");
+
+    await writeFile(settingsPath, JSON.stringify({
+      theme: "mono",
+      keybindings: { "app.not-a-real-action": "alt+x" },
+    }));
+    await assert.rejects(runtime.reload(), /Unknown keybinding action/iu);
+    assert.equal(runtime.session, activeSession);
+    assert.equal(runtime.settings, activeSettings);
+
+    await writeFile(settingsPath, JSON.stringify({ theme: "mono", tools: "none" }));
+    await assert.rejects(runtime.reload(), /tools must be an object or null/iu);
+    assert.equal(runtime.session, activeSession);
+    assert.equal(runtime.settings, activeSettings);
+
+    await writeFile(settingsPath, JSON.stringify({
+      theme: "mono",
+      retry: { maxRetries: "3", provider: { timeoutMs: "100" } },
+    }));
+    await assert.rejects(runtime.reload(), /Invalid retry\.maxRetries setting/iu);
+    assert.equal(runtime.session, activeSession);
+    assert.equal(runtime.settings, activeSettings);
+  } finally {
+    await runtime?.close().catch(() => undefined);
+    if (previousAgentDirectory === undefined) delete process.env.RIGYN_CODING_AGENT_DIR;
+    else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDirectory;
+  }
+});

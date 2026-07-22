@@ -26,13 +26,13 @@ irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
 
 Neither command needs an npm account or downloads a Rigyn package from the npm registry. To install without Node.js
 or npm, download the standalone archive for your platform from the
-[v0.5.0 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.0), verify it against the release
+[v0.5.1 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.1), verify it against the release
 `SHA256SUMS`, and extract it. The archive includes its own Node.js runtime and production dependencies.
 
 ```sh
-tar -xzf rigyn-v0.5.0-linux-x64.tar.gz
+tar -xzf rigyn-v0.5.1-linux-x64.tar.gz
 cd /path/to/your/project
-/path/to/rigyn-v0.5.0-linux-x64/bin/rigyn
+/path/to/rigyn-v0.5.1-linux-x64/bin/rigyn
 ```
 
 Use `bin/rigyn` on Linux or macOS and `bin\rigyn.cmd` on Windows. The
@@ -51,9 +51,9 @@ Useful commands include `/settings`, `/model`, `/scoped-models`, `/new`, `/resum
 rigyn -p "Review this project and explain its architecture"
 ```
 
-Personal instructions load first from `~/.rigyn/agent/AGENTS.md` (or
+The private installer creates editable `~/.rigyn/agent/AGENTS.md` and `settings.json` templates and preserves them on updates. Personal instructions load first from that `AGENTS.md` (or
 `$RIGYN_CODING_AGENT_DIR/AGENTS.md`), then from project `AGENTS.md` files in ancestor order. Run
-`rigyn config path` to locate user settings, `rigyn config edit` to edit them safely, or add
+`rigyn config path` to locate the complete user settings document, `rigyn config edit` to edit it safely, or add
 `--scope project` for the trusted workspace settings file.
 
 Read the complete product guide for providers, sessions, configuration, terminal controls, extensions, embedding,

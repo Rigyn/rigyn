@@ -35,6 +35,19 @@ test("explicit tool policies preserve extension-only, empty, allowlist, and excl
   );
 });
 
+test("persisted tool policy supplies defaults while invocation flags retain precedence", () => {
+  const configured = { allowedTools: ["read", "extension_probe"], excludedTools: ["extension_probe"] };
+  assert.deepEqual(selectedTools({}, ["extension_probe"], configured), configured);
+  assert.deepEqual(selectedTools({ tools: ["bash"], excludeTools: ["read"] }, ["extension_probe"], configured), {
+    allowedTools: ["bash"],
+    excludedTools: ["extension_probe", "read"],
+  });
+  assert.deepEqual(selectedTools({ noBuiltinTools: true }, ["extension_probe"], configured), {
+    allowedTools: ["extension_probe"],
+    excludedTools: ["extension_probe"],
+  });
+});
+
 test("mutually exclusive tool policies are rejected", () => {
   assert.throws(
     () => selectedTools({ noBuiltinTools: true, tools: ["read"] }),

@@ -34,3 +34,15 @@ test("AGENTS files take precedence over alternate context names in one directory
   assert.equal(result.at(-1)?.content, "agents");
   assert.equal(result.some((entry) => entry.content === "alternate"), false);
 });
+
+test("an empty personal AGENTS file is behaviorally inert and still owns name precedence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-context-empty-personal-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "workspace");
+  await mkdir(agentDir);
+  await mkdir(cwd);
+  await writeFile(join(agentDir, "AGENTS.md"), "");
+  await writeFile(join(agentDir, "CLAUDE.md"), "alternate");
+
+  assert.deepEqual(loadProjectContextFiles({ cwd, agentDir }), []);
+});

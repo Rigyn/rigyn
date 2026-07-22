@@ -83,6 +83,7 @@ import { expandPath, agentPaths, type AgentPaths } from "./paths.js";
 import { createNetworkTransport, type NetworkTransport } from "../net/index.js";
 import { sha256 } from "../tools/hash.js";
 import type { ToolExecutionBackend } from "../tools/backend.js";
+import { parseKeybindingOverrides } from "../tui/keybindings.js";
 import type { ProjectTrustResolver } from "./project-trust.js";
 
 interface RuntimeProviderAuthRegistration {
@@ -117,6 +118,7 @@ export interface LoadedRuntime {
 export interface RuntimeReloadOptions {
   signal?: AbortSignal;
   prepareExtensions?: (extensions: RuntimeExtensionHost) => void | Promise<void>;
+  prepareSettings?: (settings: SettingsManager) => void | Promise<void>;
   onCommit?: () => void | Promise<void>;
 }
 
@@ -855,6 +857,22 @@ function networkOptions(settings: SettingsManager, environment: NodeJS.ProcessEn
   };
 }
 
+async function reloadRuntimeSettings(settings: SettingsManager): Promise<void> {
+  settings.drainErrors();
+  await settings.reload();
+  const failures = settings.drainErrors();
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures.map((failure) => failure.error),
+      `Settings could not be loaded: ${failures.map((failure) => `${failure.scope}: ${failure.error.message}`).join("; ")}`,
+    );
+  }
+  settings.getToolSettings();
+  settings.getRetrySettings();
+  settings.getProviderRetrySettings();
+  parseKeybindingOverrides(settings.getKeybindings());
+}
+
 function configuredOAuthRegistrations(
   bindings: readonly ProviderAuthBinding[],
 ): Record<string, OAuthRegistrationConfig> {
@@ -957,7 +975,7 @@ export async function loadAuthRuntime(options: {
   const trust = new TrustStore(paths.trustStore);
   const trusted = await trust.isTrusted(workspace);
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: trusted });
-  await settings.reload();
+  await reloadRuntimeSettings(settings);
   const network = createNetworkTransport(networkOptions(settings, environment));
   const credentials = await createCredentialStore(paths, {
     ...(options.createLocalKey === undefined ? {} : { createLocalKey: options.createLocalKey }),
@@ -1243,7 +1261,7 @@ export async function preactivateProjectTrustExtensions(
   if (options.extensionRuntime !== true) return undefined;
   const workspace = await canonicalExistingPath(resolve(workspaceValue));
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: false });
-  await settings.reload();
+  await reloadRuntimeSettings(settings);
   const packages = new DefaultPackageManager({
     cwd: workspace,
     agentDir: paths.agentDirectory,
@@ -1286,7 +1304,7 @@ async function loadResourceGeneration(
   const trust = new TrustStore(paths.trustStore);
   const trusted = options.projectTrusted ?? await trust.isTrusted(workspace);
   const settings = SettingsManager.create(workspace, paths.agentDirectory, { projectTrusted: trusted });
-  await settings.reload();
+  await reloadRuntimeSettings(settings);
   const toolBackend: ToolExecutionBackend | undefined = undefined;
   const authoringResources = bundledAuthoringResources();
   const network = createNetworkTransport(networkOptions(settings, process.env));
@@ -1582,7 +1600,7 @@ async function loadResourceGeneration(
         ...(options.themePaths ?? []).map((path) => expandPath(path, workspace)),
       ],
     });
-    await resourceLoader.reload(signal === undefined ? {} : { signal });
+    await resourceLoader.reload({ preparedSettings: settings, ...(signal === undefined ? {} : { signal }) });
     runtimeExtensions.addRegistrationCleanup(bindDirectProviderWireLifecycle(runtimeExtensions, providerWire));
     runtimeExtensions.setDirectDiscoveryHandler((discoverySignal) => {
       discoverySignal?.throwIfAborted();
@@ -1816,6 +1834,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           });
           bindExtensionControls(candidate, candidateSession);
           await reloadOptions.prepareExtensions?.(candidate.runtimeExtensions);
+          await reloadOptions.prepareSettings?.(candidate.settings);
           signal.throwIfAborted();
           generation = candidate;
           activeNetwork = candidate.network;
@@ -1823,7 +1842,11 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           assignGeneration(runtime, candidate);
           previous.abortController.abort(new Error("Runtime resources reloaded"));
           committed = true;
-          await previousSession.close();
+          try {
+            await previousSession.close();
+          } catch (error) {
+            warnings.push(`Old session cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
           try {
             await reloadOptions.onCommit?.();
           } catch (error) {

@@ -12,7 +12,7 @@ import {
   streamFunctionAdapterEvents,
 } from "../../src/extensions/model-boundary.js";
 import { ModelRegistry } from "../../src/providers/model-registry.js";
-import { createModels, createProvider } from "../../src/providers/models.js";
+import { createModels, createProvider, type ProviderStreamOptions } from "../../src/providers/models.js";
 
 function publicModel(api: Api, provider = "extension-provider", id = "extension-model"): Model<Api> {
   return {
@@ -534,6 +534,7 @@ test("native public providers execute through the internal run-loop boundary", a
 
 test("internal providers exposed by the model directory retain a functional public stream", async () => {
   const models = createModels();
+  let observedOptions: ProviderStreamOptions | undefined;
   const internalModel = {
     id: "internal-model",
     name: "Internal model",
@@ -551,7 +552,8 @@ test("internal providers exposed by the model directory retain a functional publ
     auth: { apiKey: { name: "Test key", resolve: async () => ({ auth: { apiKey: "test-key" } }) } },
     models: [internalModel],
     api: {
-      async *stream() {
+      async *stream(_request, _signal, options) {
+        observedOptions = options;
         yield {
           type: "response_start",
           model: "internal-model-revision",
@@ -580,7 +582,11 @@ test("internal providers exposed by the model directory retain a functional publ
   const provider = registry.getProvider("internal-provider")!;
   const exposed = provider.getModels()[0]!;
   assert.equal(exposed.api, "openai-completions");
-  const stream = provider.streamSimple(exposed, { messages: [] });
+  const stream = provider.streamSimple(exposed, { messages: [] }, {
+    timeoutMs: 123,
+    maxRetries: 2,
+    maxRetryDelayMs: 456,
+  });
   const publicEvents = [];
   for await (const event of stream) publicEvents.push(event);
   assert.deepEqual(publicEvents.map((event) => event.type), ["start", "text_start", "text_delta", "text_end", "done"]);
@@ -598,6 +604,9 @@ test("internal providers exposed by the model directory retain a functional publ
   const textEnd = publicEvents.find((event) => event.type === "text_end");
   assert.equal(textEnd?.type === "text_end" ? textEnd.contentSignature : undefined, "text-signature");
   assert.equal(response.stopReason, "stop");
+  assert.equal(observedOptions?.timeoutMs, 123);
+  assert.equal(observedOptions?.maxRetries, 2);
+  assert.equal(observedOptions?.maxRetryDelayMs, 456);
 });
 
 function responseStream(model: Model<Api>, text: string, providerState?: ProviderState) {

@@ -107,7 +107,7 @@ test("package and node entrypoints preserve the declared dependency boundary", a
   const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(manifest.dependencies?.["@rigyn/models"], "0.5.0");
+  assert.equal(manifest.dependencies?.["@rigyn/models"], "0.5.1");
   assert.equal(nodeEntry.Agent, Agent);
   assert.equal(typeof nodeEntry.NodeExecutionEnv, "function");
 });

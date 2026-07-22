@@ -2136,7 +2136,11 @@ export class TuiController {
     else this.#renderClassicSessionEntry(entry.id);
   }
 
-  replaceTranscript(items: readonly TuiTranscriptItem[], branch?: string): void {
+  replaceTranscript(
+    items: readonly TuiTranscriptItem[],
+    branch?: string,
+    options: { preserveExisting?: boolean } = {},
+  ): void {
     this.#ensureStarted();
     if (branch !== undefined && (
       typeof branch !== "string"
@@ -2145,8 +2149,25 @@ export class TuiController {
     )) {
       throw new Error("Transcript replacement requires a branch");
     }
+    if (options.preserveExisting !== undefined && typeof options.preserveExisting !== "boolean") {
+      throw new TypeError("preserveExisting must be boolean");
+    }
+    const preservedIds = options.preserveExisting === true
+      ? new Set(this.#model.entries.map((entry) => entry.id))
+      : undefined;
+    const preservedCommittedIds = options.preserveExisting === true
+      ? new Set(this.#inlineCommittedIds)
+      : undefined;
+    const preservedRevealedIds = options.preserveExisting === true
+      ? new Set(this.#inlineRevealedIds)
+      : undefined;
     this.#resetTranscript();
     this.#model.applyAll(items);
+    if (preservedCommittedIds !== undefined) {
+      const liveIds = new Set(this.#model.entries.map((entry) => entry.id));
+      for (const id of preservedCommittedIds) if (liveIds.has(id)) this.#inlineCommittedIds.add(id);
+      for (const id of preservedRevealedIds ?? []) if (liveIds.has(id)) this.#inlineRevealedIds.add(id);
+    }
     const liveExtensionEntries = new Set(this.#model.entries.flatMap((entry) =>
       entry.extension === undefined ? [] : [entry.id]));
     for (const item of items) {
@@ -2161,7 +2182,8 @@ export class TuiController {
     this.#transcriptOffset = 0;
     if (this.mode === "full") this.#scheduleRender();
     else {
-      const entries = this.#model.entries.filter((entry) => entry.kind !== "startup");
+      const entries = this.#model.entries.filter((entry) =>
+        entry.kind !== "startup" && (preservedIds === undefined || !preservedIds.has(entry.id)));
       const rendered = renderTranscriptFrame(entries, terminalSize(this.output, this.capabilities).columns, this.#theme, {
         sessionRenderBlocks: this.#renderSessionBlocks(
           entries,

@@ -346,6 +346,7 @@ function assertSafePackageFiles(files) {
     "examples/subprocess-workers/extensions/index.mjs",
     "examples/dynamic-package/package.json",
     "examples/dynamic-package/extensions/index.mjs",
+    "resources/AGENTS.md",
     "resources/package-gallery.json",
     "resources/settings.example.json",
     "resources/schemas/package-gallery-v1.json",
@@ -520,6 +521,17 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     label: "packed installer bootstrap",
   });
   const installerPackageRoot = join(paths.installDriver, "node_modules", "rigyn");
+  await mkdir(paths.installRoot, { recursive: true, mode: 0o700 });
+  await writeFile(join(paths.installRoot, ".install-transaction.json"), `${JSON.stringify({
+    product: "rigyn",
+    schemaVersion: 1,
+    transactionId: "f".repeat(32),
+    pid: process.pid,
+    createdAt: Date.now(),
+    rootExisted: false,
+    rootMode: 0o700,
+    previousMarkerSha256: null,
+  }, null, 2)}\n`);
   const installer = await runCommand(process.execPath, [join(installerPackageRoot, "scripts", "install-user.mjs")], {
     cwd: installerPackageRoot,
     env: installerEnvironment,
@@ -549,6 +561,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     await access(join(paths.installRoot, "app", "node_modules", ...dependency.split("/"), license), constants.R_OK);
   }
   await Promise.all([
+    access(join(packageRoot, "resources", "AGENTS.md")),
     access(join(packageRoot, "resources", "settings.example.json")),
     access(join(packageRoot, "resources", "prompts", "build-extension.md")),
     access(join(packageRoot, "resources", "skills", "build-extension", "SKILL.md")),
@@ -556,8 +569,22 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
   ]);
   const appManifest = JSON.parse(await readFile(join(paths.installRoot, "app", "package.json"), "utf8"));
   assert.equal(appManifest.dependencies?.["rigyn"], packed[0].version);
+  const agentDirectory = join(paths.installRoot, "agent");
+  const globalInstructionsPath = join(agentDirectory, "AGENTS.md");
   const globalSettingsPath = join(paths.installRoot, "agent", "settings.json");
-  await assert.rejects(access(globalSettingsPath), (error) => errno(error) === "ENOENT");
+  assert.deepEqual(
+    await readFile(globalInstructionsPath),
+    await readFile(join(packageRoot, "resources", "AGENTS.md")),
+  );
+  assert.deepEqual(
+    await readFile(globalSettingsPath),
+    await readFile(join(packageRoot, "resources", "settings.example.json")),
+  );
+  if (process.platform !== "win32") {
+    assert.equal((await lstat(agentDirectory)).mode & 0o777, 0o700);
+    assert.equal((await lstat(globalInstructionsPath)).mode & 0o777, 0o600);
+    assert.equal((await lstat(globalSettingsPath)).mode & 0o777, 0o600);
+  }
   await assert.rejects(access(join(paths.installRoot, "app", "package-lock.json")), (error) => errno(error) === "ENOENT");
   const ripgrepModule = pathToFileURL(join(packageRoot, "dist", "tools", "ripgrep.js")).href;
   const ripgrepCheck = await runCommand(process.execPath, [
@@ -705,16 +732,17 @@ export default function activate(api: any) {
   assert.equal(help.stderr, "");
   assert.deepEqual(await readdir(paths.config), []);
   assert.deepEqual(await readdir(paths.state), []);
-  for (const directory of ["app", "bin", "cache", "config", "data", "home", "logs", "npm-prefix", "state", "tmp"]) {
+  for (const directory of ["agent", "app", "bin", "cache", "config", "data", "home", "logs", "npm-prefix", "state", "tmp"]) {
     assert.ok((await lstat(join(paths.installRoot, directory))).isDirectory(), `${directory} must stay inside the installation root`);
   }
   const keepRoot = join(paths.installRoot, "keep.txt");
   const keepBin = join(paths.installRoot, "bin", "keep.txt");
+  const customizedInstructions = "# Customized global instructions\nKeep this byte-for-byte.\n";
   const customizedSettings = `${JSON.stringify({ theme: "mono", quietStartup: true }, null, 2)}\n`;
-  await mkdir(join(paths.installRoot, "agent"), { recursive: true, mode: 0o700 });
   await Promise.all([
     writeFile(keepRoot, "keep root\n"),
     writeFile(keepBin, "keep bin\n"),
+    writeFile(globalInstructionsPath, customizedInstructions, { mode: 0o600 }),
     writeFile(globalSettingsPath, customizedSettings, { mode: 0o600 }),
   ]);
   const interruptedApp = join(paths.installRoot, ".app-previous");
@@ -740,6 +768,7 @@ export default function activate(api: any) {
   await assert.rejects(access(interruptedApp), (error) => errno(error) === "ENOENT");
   assert.equal(await readFile(keepRoot, "utf8"), "keep root\n");
   assert.equal(await readFile(keepBin, "utf8"), "keep bin\n");
+  assert.equal(await readFile(globalInstructionsPath, "utf8"), customizedInstructions);
   assert.equal(await readFile(globalSettingsPath, "utf8"), customizedSettings);
   assert.equal(await readFile(globalSentinel, "utf8"), "must remain untouched\n");
   assert.equal((await lstat(packageRoot)).isSymbolicLink(), false);
@@ -769,6 +798,7 @@ export default function activate(api: any) {
   });
   assert.match(selfUpdate.stdout, /Updated Rigyn from .* to /u);
   assert.equal(selfUpdate.stderr, "");
+  assert.equal(await readFile(globalInstructionsPath, "utf8"), customizedInstructions);
   assert.equal(await readFile(globalSettingsPath, "utf8"), customizedSettings);
   for (const residue of [".app-previous", ".app-install", ".build-install", ".install-transaction.json"]) {
     await assert.rejects(access(join(paths.installRoot, residue)), (error) => errno(error) === "ENOENT");
@@ -813,6 +843,8 @@ export default function activate(api: any) {
     executable: await readFile(installedExecutable),
     launcher: await readFile(commandShim),
     command: await readFile(commandLink),
+    instructions: await readFile(globalInstructionsPath),
+    settings: await readFile(globalSettingsPath),
   };
   await assert.rejects(
     runCommand(process.execPath, [join(PROJECT_ROOT, "scripts", "install-user.mjs")], {
@@ -827,6 +859,8 @@ export default function activate(api: any) {
   assert.deepEqual(await readFile(installedExecutable), beforeFailedReinstall.executable);
   assert.deepEqual(await readFile(commandShim), beforeFailedReinstall.launcher);
   assert.deepEqual(await readFile(commandLink), beforeFailedReinstall.command);
+  assert.deepEqual(await readFile(globalInstructionsPath), beforeFailedReinstall.instructions);
+  assert.deepEqual(await readFile(globalSettingsPath), beforeFailedReinstall.settings);
   for (const residue of [".app-previous", ".app-install", ".build-install", ".install-transaction.json"]) {
     await assert.rejects(access(join(paths.installRoot, residue)), (error) => errno(error) === "ENOENT");
   }

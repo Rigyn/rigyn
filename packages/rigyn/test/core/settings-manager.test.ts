@@ -9,12 +9,31 @@ import test from "node:test";
 
 import {
   InMemorySettingsStorage,
+  SETTINGS_KEYS,
   SettingsManager,
   type SettingsScope,
   type SettingsStorage,
 } from "../../src/core/settings-manager.js";
 
 const execFileAsync = promisify(execFile);
+
+test("the installed template contains every supported top-level setting", async () => {
+  const template = JSON.parse(await readFile(new URL("../../resources/settings.example.json", import.meta.url), "utf8")) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(template), SETTINGS_KEYS);
+  const keys = (name: string): string[] => Object.keys(template[name] as Record<string, unknown>);
+  assert.deepEqual(keys("compaction"), ["enabled", "reserveTokens", "keepRecentTokens"]);
+  assert.deepEqual(keys("branchSummary"), ["reserveTokens", "skipPrompt"]);
+  assert.deepEqual(keys("retry"), ["enabled", "maxRetries", "baseDelayMs", "provider"]);
+  assert.deepEqual(Object.keys((template.retry as { provider: Record<string, unknown> }).provider), [
+    "timeoutMs", "maxRetries", "maxRetryDelayMs",
+  ]);
+  assert.deepEqual(keys("tools"), ["enabled", "excluded"]);
+  assert.deepEqual(keys("terminal"), ["showImages", "imageWidthCells", "clearOnShrink", "showTerminalProgress"]);
+  assert.deepEqual(keys("images"), ["autoResize", "blockImages"]);
+  assert.deepEqual(keys("thinkingBudgets"), ["minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(keys("markdown"), ["codeBlockIndent"]);
+  assert.deepEqual(keys("warnings"), ["anthropicExtraUsage"]);
+});
 
 test("direct settings expose runtime defaults without creating files", async () => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-settings-defaults-"));
@@ -32,6 +51,102 @@ test("direct settings expose runtime defaults without creating files", async () 
   assert.equal(manager.getImageAutoResize(), true);
   assert.equal(manager.getEnableSkillCommands(), true);
   await assert.rejects(access(agentDirectory));
+});
+
+test("null settings resolve to defaults without reaching runtime getters", () => {
+  const manager = SettingsManager.inMemory({
+    defaultModel: null,
+    transport: null,
+    packages: null,
+    terminal: { showImages: null, imageWidthCells: null },
+    retry: { enabled: null, provider: { maxRetryDelayMs: null } },
+    warnings: { anthropicExtraUsage: null },
+  });
+
+  assert.equal(manager.getDefaultModel(), undefined);
+  assert.equal(manager.getTransport(), "auto");
+  assert.deepEqual(manager.getPackages(), []);
+  assert.equal(manager.getShowImages(), true);
+  assert.equal(manager.getImageWidthCells(), 60);
+  assert.equal(manager.getRetryEnabled(), true);
+  assert.equal(manager.getProviderRetrySettings().maxRetryDelayMs, 60_000);
+  assert.deepEqual(manager.getWarnings(), {});
+  assert.deepEqual(manager.getGlobalSettings(), {
+    terminal: {},
+    retry: { provider: {} },
+    warnings: {},
+  });
+});
+
+test("null inheritance does not silently remove invalid replacement-array entries", () => {
+  const manager = SettingsManager.inMemory({
+    tools: { enabled: ["read", null, "bash"] },
+  } as never);
+
+  assert.throws(() => manager.getToolSettings(), /tools\.enabled must be an array of non-empty tool names/u);
+});
+
+test("nested project nulls inherit recursively from global settings", () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({
+    terminal: { showImages: false, imageWidthCells: 44 },
+    retry: { enabled: false, provider: { timeoutMs: 12_000, maxRetries: 7 } },
+  }));
+  storage.withLock("project", () => JSON.stringify({
+    terminal: { showImages: null },
+    retry: { provider: { timeoutMs: null } },
+  }));
+
+  const manager = SettingsManager.fromStorage(storage);
+  assert.equal(manager.getShowImages(), false);
+  assert.equal(manager.getImageWidthCells(), 44);
+  assert.equal(manager.getRetryEnabled(), false);
+  assert.deepEqual(manager.getProviderRetrySettings(), {
+    timeoutMs: 12_000,
+    maxRetries: 7,
+    maxRetryDelayMs: 60_000,
+  });
+  assert.deepEqual(manager.getProjectSettings(), {
+    terminal: {},
+    retry: { provider: {} },
+  });
+});
+
+test("writes and reload preserve untouched null placeholders and unknown fields", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-settings-null-preservation-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const agentDirectory = join(root, "agent");
+  const path = join(agentDirectory, "settings.json");
+  await mkdir(agentDirectory, { recursive: true });
+  const unknown = {
+    empty: null,
+    nested: { value: null, bytes: "keep \\u0000 exactly" },
+    list: [null, { child: null }, "unchanged"],
+  };
+  await writeFile(path, JSON.stringify({
+    theme: null,
+    terminal: { showImages: null, imageWidthCells: null, extensionOption: null },
+    retry: { enabled: null, provider: { timeoutMs: null, extensionOption: null } },
+    extensionSettings: unknown,
+  }));
+
+  const manager = SettingsManager.create(join(root, "project"), agentDirectory);
+  manager.updateGlobalSettings({ terminal: { showImages: false }, quietStartup: true });
+  await manager.flush();
+  await manager.reload();
+  manager.setTheme("mono");
+  await manager.flush();
+
+  assert.equal(manager.getShowImages(), false);
+  assert.equal(manager.getImageWidthCells(), 60);
+  assert.equal(manager.getRetryEnabled(), true);
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+    theme: "mono",
+    terminal: { showImages: false, imageWidthCells: null, extensionOption: null },
+    retry: { enabled: null, provider: { timeoutMs: null, extensionOption: null } },
+    extensionSettings: unknown,
+    quietStartup: true,
+  });
 });
 
 test("global and project settings merge nested values and preserve external edits", async () => {
@@ -220,6 +335,107 @@ test("reload keeps the last valid scope when its file becomes malformed", async 
   assert.equal(manager.getTheme(), "dark");
   assert.deepEqual(manager.getEnabledModels(), ["one"]);
   assert.equal(manager.drainErrors().some((entry) => entry.scope === "global"), true);
+});
+
+test("reload validation rejects a candidate without changing the active settings", async () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ theme: "mono" }));
+  const manager = SettingsManager.fromStorage(storage);
+  storage.withLock("global", () => JSON.stringify({ theme: "candidate" }));
+
+  await assert.rejects(
+    manager.reload({ validate: () => { throw new Error("candidate rejected"); } }),
+    /candidate rejected/u,
+  );
+
+  assert.equal(manager.getThemeSetting(), "mono");
+});
+
+test("reload rejects a stale candidate when settings change during async validation", async () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ theme: "mono" }));
+  const manager = SettingsManager.fromStorage(storage);
+  storage.withLock("global", () => JSON.stringify({ theme: "candidate" }));
+
+  await assert.rejects(manager.reload({
+    async validate() {
+      manager.setTheme("concurrent");
+      await manager.flush();
+    },
+  }), /changed while reload validation was in progress/u);
+
+  assert.equal(manager.getThemeSetting(), "concurrent");
+  let stored: Record<string, unknown> = {};
+  storage.withLock("global", (contents) => {
+    stored = JSON.parse(contents ?? "{}") as Record<string, unknown>;
+    return undefined;
+  });
+  assert.equal(stored.theme, "concurrent");
+});
+
+test("overlapping reloads cannot commit an older validated candidate", async () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ theme: "initial" }));
+  const manager = SettingsManager.fromStorage(storage);
+  storage.withLock("global", () => JSON.stringify({ theme: "older-candidate" }));
+  let releaseValidation!: () => void;
+  let validationStarted!: () => void;
+  const started = new Promise<void>((resolve) => { validationStarted = resolve; });
+  const validation = new Promise<void>((resolve) => { releaseValidation = resolve; });
+  const olderReload = manager.reload({
+    async validate() {
+      validationStarted();
+      await validation;
+    },
+  });
+  await started;
+  storage.withLock("global", () => JSON.stringify({ theme: "newer-candidate" }));
+  await manager.reload();
+  releaseValidation();
+
+  await assert.rejects(olderReload, /changed while reload validation was in progress/u);
+  assert.equal(manager.getThemeSetting(), "newer-candidate");
+});
+
+test("tool settings reject non-object policies instead of enabling every tool", () => {
+  for (const tools of ["none", 42, false, []]) {
+    assert.throws(
+      () => SettingsManager.inMemory({ tools } as never).getToolSettings(),
+      /tools must be an object or null/u,
+    );
+  }
+});
+
+test("retry settings reject malformed values before request execution", () => {
+  const invalid = [
+    { retry: "enabled" },
+    { retry: { enabled: "true" } },
+    { retry: { maxRetries: "2" } },
+    { retry: { maxRetries: -1 } },
+    { retry: { maxRetries: 1.5 } },
+    { retry: { baseDelayMs: "100" } },
+    { retry: { provider: "default" } },
+    { retry: { provider: { timeoutMs: "100" } } },
+    { retry: { provider: { timeoutMs: 2_147_483_648 } } },
+    { retry: { provider: { maxRetries: "2" } } },
+    { retry: { provider: { maxRetryDelayMs: -1 } } },
+  ];
+  for (const settings of invalid) {
+    assert.throws(
+      () => SettingsManager.inMemory(settings as never).getProviderRetrySettings(),
+      /retry/u,
+    );
+  }
+  const valid = SettingsManager.inMemory({
+    retry: {
+      enabled: false,
+      maxRetries: 0,
+      baseDelayMs: 0,
+      provider: { timeoutMs: 0, maxRetries: 0, maxRetryDelayMs: 0 },
+    },
+  });
+  assert.deepEqual(valid.getRetrySettings(), { enabled: false, maxRetries: 0, baseDelayMs: 0 });
+  assert.deepEqual(valid.getProviderRetrySettings(), { timeoutMs: 0, maxRetries: 0, maxRetryDelayMs: 0 });
 });
 
 test("unrelated writes retain arrays, extension paths, and nested values changed on disk", async () => {
@@ -536,4 +752,27 @@ test("generic scoped updates retain unrelated external fields and enforce projec
     theme: "dark",
   });
   assert.throws(() => manager.updateProjectSettings({ theme: "light" }), /not trusted/iu);
+});
+
+test("generic updates preserve concurrent siblings at every nested depth", async () => {
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({
+    retry: { provider: { timeoutMs: 100, maxRetries: 1, extensionOption: "initial" } },
+  }));
+  const manager = SettingsManager.fromStorage(storage);
+  storage.withLock("global", () => JSON.stringify({
+    retry: { provider: { timeoutMs: 100, maxRetries: 7, extensionOption: "external" } },
+  }));
+
+  manager.updateGlobalSettings({ retry: { provider: { timeoutMs: 250 } } });
+  await manager.flush();
+
+  let stored: Record<string, unknown> = {};
+  storage.withLock("global", (contents) => {
+    stored = JSON.parse(contents ?? "{}") as Record<string, unknown>;
+    return undefined;
+  });
+  assert.deepEqual(stored, {
+    retry: { provider: { timeoutMs: 250, maxRetries: 7, extensionOption: "external" } },
+  });
 });

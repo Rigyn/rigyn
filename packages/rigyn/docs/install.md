@@ -31,10 +31,10 @@ archive, and only then invokes the private installer. The equivalent version-pin
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-terminal-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-models-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-kernel-0.5.0.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.0/rigyn-0.5.0.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn --version
 ```
@@ -60,16 +60,16 @@ rigyn --version
 
 The source checkout and versioned release source archive contain the native helper sources rather than generated binaries. After checking `rigyn-v<version>-source.tar.gz` against the release's `SHA256SUMS`, extract it, enter its `rigyn-v<version>` directory, and run `npm ci --ignore-scripts`, followed by `npm run build` or `npm run install:user`. On macOS, source installation requires `cc` on `PATH` (normally from the Xcode Command Line Tools). On Windows, run it from an architecture-matching MSVC developer shell with `cl` on `PATH`. The installer builds and loads the matching helper before it packages the private installation; a compiler or verification failure stops the install. Linux does not use this terminal helper and needs no helper compilation step.
 
-The application, dependencies, configuration, sessions, credentials, cache, and temporary files live under `~/.rigyn` by default. Set `RIGYN_INSTALL_DIR` only when a different self-contained root is required. The source checkout and npm's global package directory are not used at runtime.
+The application, dependencies, configuration, sessions, credentials, cache, and temporary files live under `~/.rigyn` by default. An install copies the packaged personalization and settings templates to `~/.rigyn/agent/AGENTS.md` and `~/.rigyn/agent/settings.json` when either file is missing, without overwriting existing copies. Set `RIGYN_INSTALL_DIR` only when a different self-contained root is required. The source checkout and npm's global package directory are not used at runtime.
 
 To verify the complete release before installation, download the wanted artifacts and `SHA256SUMS` from the same release, then check the selected lines with `sha256sum --check` (or `shasum -a 256 -c` on macOS). Pass all four product archives explicitly so npm does not resolve an internal package from a different source:
 
 ```sh
 npm exec --yes \
-  --package=./rigyn-terminal-0.5.0.tgz \
-  --package=./rigyn-models-0.5.0.tgz \
-  --package=./rigyn-kernel-0.5.0.tgz \
-  --package=./rigyn-0.5.0.tgz \
+  --package=./rigyn-terminal-0.5.1.tgz \
+  --package=./rigyn-models-0.5.1.tgz \
+  --package=./rigyn-kernel-0.5.1.tgz \
+  --package=./rigyn-0.5.1.tgz \
   -- rigyn self-install
 ```
 

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   createEmbeddingHarnessFromRuntime,
 } from "../../src/embedding/index.js";
 import type { HarnessRuntime } from "../../src/public-runtime.js";
+import { createHarnessRuntime } from "../../src/public-runtime.js";
 import type { AgentSession, AgentSessionModel } from "../../src/service/agent-session.js";
 import { createInMemoryHarness } from "../../src/embedding/index.js";
 import { createScriptedProvider } from "../../src/testing/scripted-provider.js";
@@ -67,6 +71,45 @@ test("configured embedding sessions remain live when reload replaces the runtime
   assert.equal(followUp instanceof Promise, true);
   await Promise.all([steering, followUp]);
   assert.deepEqual(replacement.calls, ["resolve:selected", "set:selected", "steer:adjust", "follow:continue"]);
+});
+
+test("configured embedding startup and reload apply persistent tool settings", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-embedding-tool-settings-"));
+  const workspace = join(root, "workspace");
+  const agentDirectory = join(root, "agent");
+  await Promise.all([mkdir(workspace), mkdir(agentDirectory)]);
+  await writeFile(join(agentDirectory, "settings.json"), JSON.stringify({
+    tools: { enabled: ["read", "bash"], excluded: ["bash"] },
+  }));
+  const previousAgentDirectory = process.env.RIGYN_CODING_AGENT_DIR;
+  process.env.RIGYN_CODING_AGENT_DIR = agentDirectory;
+  let harness: ReturnType<typeof createEmbeddingHarnessFromRuntime> | undefined;
+  context.after(async () => {
+    await harness?.close().catch(() => undefined);
+    if (previousAgentDirectory === undefined) delete process.env.RIGYN_CODING_AGENT_DIR;
+    else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDirectory;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtimeOptions = {
+    workspace,
+    ephemeral: true,
+    projectTrusted: false,
+    extensions: false,
+    skills: false,
+    promptTemplates: false,
+    themes: false,
+    offline: true,
+  } as const;
+  const runtime = await createHarnessRuntime(runtimeOptions);
+  harness = createEmbeddingHarnessFromRuntime(runtime);
+  assert.deepEqual(runtime.session.getActiveTools(), ["read"]);
+
+  await writeFile(join(agentDirectory, "settings.json"), JSON.stringify({
+    tools: { enabled: ["write"], excluded: [] },
+  }));
+  await harness.reload();
+  assert.deepEqual(runtime.session.getActiveTools(), ["write"]);
 });
 
 test("an embedding run handle can cancel immediately after start", async () => {

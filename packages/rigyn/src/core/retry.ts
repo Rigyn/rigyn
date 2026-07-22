@@ -18,6 +18,60 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   jitter: 0.2,
 };
 
+const MAX_PROVIDER_TIMEOUT_MS = 2_147_483_647;
+
+export interface ProviderAttemptBoundary {
+  signal: AbortSignal;
+  timedOut(): boolean;
+  dispose(): void;
+}
+
+export function providerRetryPolicy(policy: RetryPolicy, maxRetries: number | undefined): RetryPolicy {
+  if (maxRetries === undefined) return policy;
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0 || maxRetries >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("maxRetries must be a non-negative safe integer");
+  }
+  return { ...policy, maxAttempts: maxRetries + 1 };
+}
+
+export function validateProviderTimeoutMs(timeoutMs: number | undefined): void {
+  if (
+    timeoutMs !== undefined &&
+    (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_PROVIDER_TIMEOUT_MS)
+  ) {
+    throw new RangeError(`timeoutMs must be an integer from 0 to ${MAX_PROVIDER_TIMEOUT_MS}`);
+  }
+}
+
+export function beginProviderAttempt(
+  signal: AbortSignal,
+  timeoutMs: number | undefined,
+): ProviderAttemptBoundary {
+  validateProviderTimeoutMs(timeoutMs);
+  if (timeoutMs === undefined || timeoutMs === 0) {
+    return { signal, timedOut: () => false, dispose() {} };
+  }
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new Error(`Provider request timed out after ${timeoutMs} ms`)), timeoutMs);
+  timer.unref?.();
+  return {
+    signal: AbortSignal.any([signal, timeout.signal]),
+    timedOut: () => timeout.signal.aborted,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
+export function providerTimeoutError(timeoutMs: number, bodyStarted: boolean): AdapterError {
+  return {
+    category: "network",
+    message: `Provider request timed out after ${timeoutMs} ms`,
+    providerCode: "request_timeout",
+    retryable: !bodyStarted,
+    partial: bodyStarted,
+    bodyStarted,
+  };
+}
+
 export function retryDelay(
   error: AdapterError,
   attempt: number,

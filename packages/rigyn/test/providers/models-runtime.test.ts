@@ -149,6 +149,41 @@ test("adapter bridges skip unauthenticated remote discovery but permit explicit 
   assert.equal(refreshes, 1);
 });
 
+test("adapter bridges preserve provider timeout and retry options in both stream modes", async () => {
+  const requests: ProviderRequest[] = [];
+  const selected = model("adapter-options", "model");
+  const adapter = {
+    id: selected.provider,
+    async *stream(request: ProviderRequest) {
+      requests.push(structuredClone(request));
+      yield { type: "response_start" as const, model: request.model };
+    },
+    async listModels() {
+      return [providerModelToInfo(selected)];
+    },
+  };
+  const bridged = providerFromAdapter(adapter, {
+    auth: { apiKey: ambientAuth },
+    initialModels: [providerModelToInfo(selected)],
+  });
+  const bridgedModel = bridged.getModels()[0]!;
+  const options = { timeoutMs: 123, maxRetries: 2, maxRetryDelayMs: 456 };
+
+  for await (const _event of bridged.stream(bridgedModel, { messages: [] }, options)) {
+    // exhaust
+  }
+  for await (const _event of bridged.streamSimple(bridgedModel, { messages: [] }, options)) {
+    // exhaust
+  }
+
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    assert.equal(request.timeoutMs, 123);
+    assert.equal(request.maxRetries, 2);
+    assert.equal(request.maxRetryDelayMs, 456);
+  }
+});
+
 test("model bridges preserve exact logical reasoning effort support", () => {
   const observedAt = "2026-07-22T00:00:00.000Z";
   const capability = (value: "supported" | "unsupported") => ({
@@ -673,9 +708,15 @@ test("direct models bridge into the run loop without changing model or request s
     messages: [],
     tools: [],
     reasoningEffort: "high",
+    timeoutMs: 123,
+    maxRetries: 2,
+    maxRetryDelayMs: 456,
   }, controller.signal)) events.push(event);
   assert.equal(events[0]?.type, "response_start");
   assert.equal(observed?.reasoningEffort, "provider-high");
+  assert.equal(observed?.timeoutMs, 123);
+  assert.equal(observed?.maxRetries, 2);
+  assert.equal(observed?.maxRetryDelayMs, 456);
   const info = providerModelToInfo(selected);
   assert.equal(info.provider, "bridge");
   assert.equal(info.capabilities.reasoning.value, "supported");

@@ -193,6 +193,9 @@ async function* streamBuiltinModel(
       ...(options.thinkingBudgets === undefined ? {} : { thinkingBudgets: options.thinkingBudgets }),
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(options.metadata === undefined ? {} : { metadata: options.metadata }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.maxRetries === undefined ? {} : { maxRetries: options.maxRetries }),
+      ...(options.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: options.maxRetryDelayMs }),
       ...(Object.keys(requestHeaders).length === 0 && model.compat === undefined
         ? {}
         : {

@@ -19,7 +19,7 @@ import type {
   ProviderRequest,
 } from "../../src/core/types.js";
 import { DefaultResourceLoader, type ResourceLoader } from "../../src/core/resource-loader.js";
-import { SettingsManager } from "../../src/core/settings-manager.js";
+import { InMemorySettingsStorage, SettingsManager } from "../../src/core/settings-manager.js";
 import { getExtensionRuntimeHost, projectLoadedExtensionHost } from "../../src/extensions/compat.js";
 import {
   extensionModelRegistry,
@@ -187,6 +187,48 @@ class BranchSummaryAttemptProvider extends RecordingProvider {
     const events = this.#attempts[this.requests.length - 1];
     if (events === undefined) throw new Error("No scripted branch-summary attempt remains");
     for (const event of events) yield event;
+  }
+}
+
+function hangingProviderEvents(values: readonly AdapterEvent[]): AsyncIterable<AdapterEvent> {
+  return {
+    [Symbol.asyncIterator]() {
+      let index = 0;
+      return {
+        next(): Promise<IteratorResult<AdapterEvent>> {
+          const value = values[index];
+          index += 1;
+          return value === undefined
+            ? new Promise<IteratorResult<AdapterEvent>>(() => {})
+            : Promise.resolve({ done: false, value });
+        },
+      };
+    },
+  };
+}
+
+class BranchSummaryTimeoutProvider extends RecordingProvider {
+  readonly signals: AbortSignal[] = [];
+  readonly #firstEvents: readonly AdapterEvent[];
+
+  constructor(firstEvents: readonly AdapterEvent[] = []) {
+    super();
+    this.#firstEvents = firstEvents;
+  }
+
+  override stream(request: ProviderRequest, signal?: AbortSignal): AsyncIterable<AdapterEvent> {
+    this.requests.push(structuredClone(request));
+    this.signals.push(signal ?? new AbortController().signal);
+    if (this.requests.length === 1) return hangingProviderEvents(this.#firstEvents);
+    return (async function* () {
+      yield { type: "response_start", model: request.model } as const;
+      yield { type: "text_delta", part: 0, text: "recovered branch summary" } as const;
+      yield {
+        type: "response_end",
+        reason: "stop",
+        state: { kind: "chat_completions", assistantMessage: {} },
+      } as const;
+    })();
   }
 }
 
@@ -525,6 +567,106 @@ test("AgentSession retry.maxRetries counts retries after the initial attempt", a
 
   assert.equal(provider.requests.length, 3);
   assert.equal(result.results.at(-1)?.finalText, "recovered");
+  await session.close();
+});
+
+test("AgentSession applies provider timeout and retry settings to every provider request", async () => {
+  const cwd = await workspace();
+  const provider = new RecordingProvider();
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(cwd),
+    providers: new ProviderRegistry([provider]),
+    settingsManager: SettingsManager.inMemory({
+      retry: { provider: { timeoutMs: 12_345, maxRetries: 4, maxRetryDelayMs: 6_789 } },
+    }),
+  });
+  await session.setModel({
+    provider: provider.id,
+    api: "openai-chat-completions",
+    id: "one",
+    info: provider.models[0]!,
+  });
+
+  await session.prompt("provider settings", { allowedTools: [] });
+
+  assert.equal(session.agent.timeoutMs, 12_345);
+  assert.equal(session.agent.maxRetries, 4);
+  assert.equal(session.agent.maxRetryDelayMs, 6_789);
+  assert.equal(provider.requests[0]?.timeoutMs, 12_345);
+  assert.equal(provider.requests[0]?.maxRetries, 4);
+  assert.equal(provider.requests[0]?.maxRetryDelayMs, 6_789);
+  await session.close();
+});
+
+test("AgentSession reload refreshes settings-owned agent options and preserves caller overrides", async () => {
+  const cwd = await workspace();
+  const storage = new InMemorySettingsStorage();
+  const replaceSettings = (settings: object): void => {
+    storage.withLock("global", () => JSON.stringify(settings));
+  };
+  replaceSettings({
+    transport: "auto",
+    thinkingBudgets: { high: 1_000, xhigh: 2_000, max: 3_000 },
+    retry: { provider: { timeoutMs: 100, maxRetries: 1, maxRetryDelayMs: 200 } },
+  });
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(cwd),
+    providers: new ProviderRegistry([new RecordingProvider()]),
+    settingsManager: SettingsManager.fromStorage(storage),
+  });
+
+  replaceSettings({
+    transport: "websocket",
+    thinkingBudgets: { high: 4_000, xhigh: 5_000, max: 6_000 },
+    retry: { provider: { timeoutMs: 300, maxRetries: 2, maxRetryDelayMs: 400 } },
+  });
+  await session.reload();
+  assert.equal(session.agent.transport, "websocket");
+  assert.deepEqual(session.agent.thinkingBudgets, { high: 4_000, xhigh: 5_000, max: 6_000 });
+  assert.equal(session.agent.timeoutMs, 300);
+  assert.equal(session.agent.maxRetries, 2);
+  assert.equal(session.agent.maxRetryDelayMs, 400);
+
+  session.agent.transport = "websocket";
+  session.agent.thinkingBudgets = { high: 4_000, xhigh: 5_000, max: 6_000 };
+  session.agent.timeoutMs = 300;
+  session.agent.maxRetries = 2;
+  session.agent.maxRetryDelayMs = 400;
+  replaceSettings({
+    transport: "websocket-cached",
+    thinkingBudgets: { high: 10_000 },
+    retry: { provider: { timeoutMs: 500, maxRetries: 3, maxRetryDelayMs: 600 } },
+  });
+  await session.reload();
+  assert.equal(session.agent.transport, "websocket");
+  assert.deepEqual(session.agent.thinkingBudgets, { high: 4_000, xhigh: 5_000, max: 6_000 });
+  assert.equal(session.agent.timeoutMs, 300);
+  assert.equal(session.agent.maxRetries, 2);
+  assert.equal(session.agent.maxRetryDelayMs, 400);
+  await session.close();
+});
+
+test("AgentSession reload reports invalid settings and keeps the last valid values", async () => {
+  const cwd = await workspace();
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ theme: "mono" }));
+  const settings = SettingsManager.fromStorage(storage);
+  const session = await AgentSession.create({
+    sessionManager: SessionManager.inMemory(cwd),
+    providers: new ProviderRegistry([new RecordingProvider()]),
+    settingsManager: settings,
+  });
+  storage.withLock("global", () => "{not-json");
+
+  await assert.rejects(session.reload(), /Settings could not be loaded.*global/iu);
+
+  assert.equal(settings.getTheme(), "mono");
+  storage.withLock("global", () => JSON.stringify({
+    theme: "candidate",
+    retry: { provider: { timeoutMs: "100" } },
+  }));
+  await assert.rejects(session.reload(), /Invalid retry\.provider\.timeoutMs setting/iu);
+  assert.equal(settings.getTheme(), "mono");
   await session.close();
 });
 
@@ -1739,6 +1881,129 @@ test("AgentSession reload swaps extension generations and routes later commands 
   assert.throws(() => finalRunner.createContext().isIdle(), /stale after AgentSession close/u);
 });
 
+test("AgentSession reload keeps the active runner when resources republish the same runtime", async () => {
+  const cwd = await workspace();
+  const settings = SettingsManager.inMemory();
+  const lifecycle: string[] = [];
+  let generation = 0;
+  let stable: ReturnType<DefaultResourceLoader["getExtensions"]> | undefined;
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: join(cwd, "agent-home"),
+    settingsManager: settings,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    extensionFactories: [{
+      name: "stable-runtime",
+      factory(api) {
+        const current = ++generation;
+        lifecycle.push(`${current}:activate`);
+        api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
+        api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
+        api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
+      },
+    }],
+    extensionsOverride(base) {
+      if (stable === undefined) {
+        stable = base;
+        return base;
+      }
+      return {
+        ...stable,
+        errors: [...stable.errors, { path: "<override>", error: "updated diagnostics" }],
+      };
+    },
+  });
+  await loader.reload();
+  const initialResult = loader.getExtensions();
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
+    resourceLoader: loader,
+  });
+  await session.bindExtensions({ reason: "startup" });
+  const initialRunner = session.extensionRunner;
+
+  await session.reload();
+
+  assert.notEqual(loader.getExtensions(), initialResult);
+  assert.equal(loader.getExtensions().runtime, initialResult.runtime);
+  assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(initialRunner.createContext().isIdle(), true);
+  assert.deepEqual(lifecycle, [
+    "1:activate",
+    "1:start:startup",
+    "1:shutdown:reload",
+    "2:activate",
+    "2:dispose",
+    "1:start:reload",
+  ]);
+  await session.close();
+});
+
+test("AgentSession rejects a changed projection on the active runtime without closing it", async () => {
+  const cwd = await workspace();
+  const settings = SettingsManager.inMemory();
+  const lifecycle: string[] = [];
+  let generation = 0;
+  let stable: ReturnType<DefaultResourceLoader["getExtensions"]> | undefined;
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: join(cwd, "agent-home"),
+    settingsManager: settings,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    extensionFactories: [{
+      name: "changed-projection",
+      factory(api) {
+        const current = ++generation;
+        lifecycle.push(`${current}:activate`);
+        api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
+        api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
+        api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
+      },
+    }],
+    extensionsOverride(base) {
+      if (stable === undefined) {
+        stable = base;
+        return base;
+      }
+      return { ...stable, extensions: [] };
+    },
+  });
+  await loader.reload();
+  const initialResult = loader.getExtensions();
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
+    resourceLoader: loader,
+  });
+  await session.bindExtensions({ reason: "startup" });
+  const initialRunner = session.extensionRunner;
+
+  await assert.rejects(
+    session.reload(),
+    /cannot change the extension projection without a new runtime generation/u,
+  );
+
+  assert.equal(loader.getExtensions(), initialResult);
+  assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(initialRunner.createContext().isIdle(), true);
+  assert.deepEqual(lifecycle, [
+    "1:activate",
+    "1:start:startup",
+    "1:shutdown:reload",
+    "2:activate",
+    "2:dispose",
+    "1:start:reload",
+  ]);
+  await session.close();
+});
+
 test("AgentSession reload atomically adds, removes, and replaces direct providers", async (context) => {
   const cwd = await workspace();
   const agentDir = join(cwd, "agent-home");
@@ -2008,18 +2273,84 @@ test("AgentSession reload rolls back every provider from a partially activated g
     resourceLoader: loader,
   });
   await session.bindExtensions({ reason: "startup" });
+  const previousRuntime = loader.getExtensions().runtime;
+  const previousRunner = session.extensionRunner;
   assert.equal(providers.has("previous-provider"), true);
 
   await assert.rejects(session.reload(), /cannot exceed 1 adapters/u);
 
   assert.equal(providers.has("candidate-one"), false);
   assert.equal(providers.has("candidate-two"), false);
+  assert.equal(providers.has("previous-provider"), true);
+  assert.equal(modelRegistry.find("previous-provider", "previous-model")?.id, "previous-model");
   assert.equal(modelRegistry.find("candidate-one", "candidate-one-model"), undefined);
   assert.equal(modelRegistry.find("candidate-two", "candidate-two-model"), undefined);
+  assert.equal(loader.getExtensions().runtime, previousRuntime);
+  assert.equal(session.extensionRunner, previousRunner);
   await session.close();
 });
 
-test("AgentSession reload restores the prior provider set when its host remains live", async (context) => {
+test("AgentSession rejects an invalid extension projection before resource publication", async (context) => {
+  const cwd = await workspace();
+  const agentDir = join(cwd, "agent-home");
+  const settings = SettingsManager.inMemory();
+  const lifecycle: string[] = [];
+  let generation = 0;
+  let originalExtensions: ReturnType<DefaultResourceLoader["getExtensions"]>["extensions"] | undefined;
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: settings,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    extensionFactories: [{
+      name: "projection-generation",
+      factory(api) {
+        const current = ++generation;
+        lifecycle.push(`${current}:activate`);
+        api.on("session_start", (event) => { lifecycle.push(`${current}:start:${event.reason}`); });
+        api.on("session_shutdown", (event) => { lifecycle.push(`${current}:shutdown:${event.reason}`); });
+        api.onDispose(() => { lifecycle.push(`${current}:dispose`); });
+      },
+    }],
+    extensionsOverride(base) {
+      if (originalExtensions === undefined) {
+        originalExtensions = base.extensions;
+        return base;
+      }
+      return { ...base, extensions: originalExtensions };
+    },
+  });
+  await loader.reload();
+  context.after(async () => await getExtensionRuntimeHost(loader.getExtensions().runtime)?.close());
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
+    resourceLoader: loader,
+  });
+  await session.bindExtensions({ reason: "startup" });
+  const originalRuntime = loader.getExtensions().runtime;
+  const originalRunner = session.extensionRunner;
+
+  await assert.rejects(session.reload(), /Extension projection belongs to another host generation/u);
+
+  assert.equal(loader.getExtensions().runtime, originalRuntime);
+  assert.equal(session.extensionRunner, originalRunner);
+  assert.equal(originalRunner.createContext().isIdle(), true);
+  assert.deepEqual(lifecycle, [
+    "1:activate",
+    "1:start:startup",
+    "1:shutdown:reload",
+    "2:activate",
+    "2:dispose",
+    "1:start:reload",
+  ]);
+  await session.close();
+});
+
+test("AgentSession rejects a legacy loader before it can publish an unprepared extension generation", async (context) => {
   const cwd = await workspace();
   const config = (modelId: string) => ({
     name: modelId,
@@ -2060,6 +2391,8 @@ test("AgentSession reload restores the prior provider set when its host remains 
     await previousHost.close();
   });
   let extensionsResult = projectLoadedExtensionHost(previousHost);
+  const initialExtensionsResult = extensionsResult;
+  let reloadCalls = 0;
   const loader = {
     getExtensions: () => extensionsResult,
     getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -2069,7 +2402,10 @@ test("AgentSession reload restores the prior provider set when its host remains 
     getSystemPrompt: () => undefined,
     getAppendSystemPrompt: () => [],
     extendResources() {},
-    async reload() { extensionsResult = projectLoadedExtensionHost(candidateHost); },
+    async reload() {
+      reloadCalls += 1;
+      extensionsResult = projectLoadedExtensionHost(candidateHost);
+    },
   } satisfies ResourceLoader;
   const providers = new ProviderRegistry([], { maxProviders: 1 });
   const modelRegistry = new ModelRegistry(createModels());
@@ -2080,10 +2416,15 @@ test("AgentSession reload restores the prior provider set when its host remains 
     resourceLoader: loader,
     settingsManager: SettingsManager.inMemory(),
   });
+  const previousRunner = session.extensionRunner;
   assert.equal(providers.has("previous-provider"), true);
 
-  await assert.rejects(session.reload(), /cannot exceed 1 adapters/u);
+  await assert.rejects(session.reload(), /does not support transactional reload/u);
 
+  assert.equal(reloadCalls, 0);
+  assert.equal(loader.getExtensions(), initialExtensionsResult);
+  assert.equal(getExtensionRuntimeHost(loader.getExtensions().runtime), previousHost);
+  assert.equal(session.extensionRunner, previousRunner);
   assert.equal(providers.has("previous-provider"), true);
   assert.equal(modelRegistry.find("previous-provider", "previous-model")?.id, "previous-model");
   assert.equal(providers.has("candidate-one"), false);
@@ -2093,6 +2434,11 @@ test("AgentSession reload restores the prior provider set when its host remains 
 
 test("AgentSession reload restarts the current extension host when resource loading fails", async (context) => {
   const cwd = await workspace();
+  const settingsStorage = new InMemorySettingsStorage();
+  settingsStorage.withLock("global", () => JSON.stringify({
+    retry: { provider: { timeoutMs: 100 } },
+  }));
+  const settings = SettingsManager.fromStorage(settingsStorage);
   const lifecycle: string[] = [];
   const commands: string[] = [];
   const host = await loadDirectExtensions([], {
@@ -2116,6 +2462,7 @@ test("AgentSession reload restarts the current extension host when resource load
   context.after(async () => await host.close());
   const extensionsResult = projectLoadedExtensionHost(host);
   const loader = {
+    supportsTransactionalReload: true as const,
     getExtensions: () => extensionsResult,
     getSkills: () => ({ skills: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
@@ -2128,19 +2475,163 @@ test("AgentSession reload restarts the current extension host when resource load
   } satisfies ResourceLoader;
   const session = await AgentSession.create({
     ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
     resourceLoader: loader,
     extensionRunner: host,
   });
   const initialRunner = session.extensionRunner;
   await session.bindExtensions({ reason: "startup" });
 
+  settingsStorage.withLock("global", () => JSON.stringify({
+    retry: { provider: { timeoutMs: 200 } },
+  }));
   await assert.rejects(session.reload(), /reload fixture failed/u);
 
   assert.equal(session.extensionRunner, initialRunner);
+  assert.equal(settings.getProviderRetrySettings().timeoutMs, 100);
+  assert.equal(session.agent.timeoutMs, 100);
   assert.equal(initialRunner.createContext().isIdle(), true);
   assert.deepEqual(lifecycle, ["start:startup", "shutdown:reload", "start:reload"]);
   assert.deepEqual(await session.prompt("/recovered"), { sessionId: session.sessionId, results: [] });
   assert.deepEqual(commands, ["handled"]);
+  await session.close();
+});
+
+test("AgentSession reload uses one validated settings snapshot with the default resource loader", async () => {
+  const cwd = await workspace();
+  const agentDir = join(cwd, "agent-home");
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ retry: { provider: { timeoutMs: 100 } } }));
+  const settings = SettingsManager.fromStorage(storage, { projectTrusted: false });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: settings,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  await loader.reload();
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
+    resourceLoader: loader,
+  });
+  const originalReload = settings.reload.bind(settings);
+  let redundantReloads = 0;
+  settings.reload = async (options) => {
+    redundantReloads += 1;
+    await originalReload(options);
+  };
+  storage.withLock("global", () => JSON.stringify({ retry: { provider: { timeoutMs: 200 } } }));
+
+  await session.reload();
+
+  assert.equal(redundantReloads, 0);
+  assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
+  assert.equal(session.agent.timeoutMs, 200);
+  const activeRuntime = loader.getExtensions().runtime;
+  const activeRunner = session.extensionRunner;
+  storage.withLock("global", () => JSON.stringify({
+    tools: "bad",
+    retry: { provider: { timeoutMs: 300 } },
+  }));
+  await assert.rejects(session.reload(), /tools must be an object or null/iu);
+  assert.equal(loader.getExtensions().runtime, activeRuntime);
+  assert.equal(session.extensionRunner, activeRunner);
+  assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
+  assert.equal(session.agent.timeoutMs, 200);
+  await session.close();
+});
+
+test("AgentSession does not suppress a distinct resource loader settings manager", async () => {
+  const cwd = await workspace();
+  const agentDir = join(cwd, "agent-home");
+  const loaderSettings = SettingsManager.inMemory({}, { projectTrusted: false });
+  const sessionSettings = SettingsManager.inMemory({}, { projectTrusted: false });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: loaderSettings,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  await loader.reload();
+  const originalLoaderReload = loaderSettings.reload.bind(loaderSettings);
+  let loaderSettingsReloads = 0;
+  loaderSettings.reload = async (options) => {
+    loaderSettingsReloads += 1;
+    await originalLoaderReload(options);
+  };
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: sessionSettings,
+    resourceLoader: loader,
+  });
+
+  await session.reload();
+
+  assert.equal(loaderSettingsReloads, 1);
+  await session.close();
+});
+
+test("AgentSession keeps settings coherent when a post-resource reload hook fails", async () => {
+  const cwd = await workspace();
+  const agentDir = join(cwd, "agent-home");
+  const storage = new InMemorySettingsStorage();
+  storage.withLock("global", () => JSON.stringify({ retry: { provider: { timeoutMs: 100 } } }));
+  const settings = SettingsManager.fromStorage(storage, { projectTrusted: false });
+  let starts = 0;
+  let discoveries = 0;
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager: settings,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    extensionFactories: [{
+      name: "committed-reload-recovery",
+      factory(api) {
+        api.on("session_start", () => { starts += 1; });
+        api.on("resources_discover", () => { discoveries += 1; });
+      },
+    }],
+  });
+  await loader.reload();
+  const session = await AgentSession.create({
+    ...sessionOptions(SessionManager.inMemory(cwd), new ProviderRegistry([new RecordingProvider()])),
+    settingsManager: settings,
+    resourceLoader: loader,
+  });
+  await session.bindExtensions({ reason: "startup" });
+  const initialRuntime = loader.getExtensions().runtime;
+  const initialRunner = session.extensionRunner;
+  storage.withLock("global", () => JSON.stringify({ retry: { provider: { timeoutMs: 200 } } }));
+
+  await assert.rejects(session.reload({
+    beforeSessionStart() { throw new Error("UI refresh failed"); },
+  }), (error: unknown) => {
+    assert.ok(error instanceof AggregateError);
+    assert.match(error.message, /reload committed/iu);
+    assert.equal((error.errors[0] as Error).message, "UI refresh failed");
+    return true;
+  });
+
+  assert.notEqual(loader.getExtensions().runtime, initialRuntime);
+  assert.notEqual(session.extensionRunner, initialRunner);
+  assert.equal(settings.getProviderRetrySettings().timeoutMs, 200);
+  assert.equal(session.agent.timeoutMs, 200);
+  assert.equal(session.extensionRunner.createContext().isIdle(), true);
+  assert.equal(starts, 2);
+  assert.equal(discoveries, 2);
   await session.close();
 });
 
@@ -3210,6 +3701,69 @@ test("AgentSession retries transient branch summaries with exact public and enve
   await session.close();
 });
 
+test("AgentSession branch summaries apply provider timeout and retry overrides", async () => {
+  const provider = new BranchSummaryTimeoutProvider();
+  const { session, target } = await branchSummaryFixture(provider, SettingsManager.inMemory({
+    retry: {
+      maxRetries: 3,
+      baseDelayMs: 0,
+      provider: { timeoutMs: 20, maxRetries: 1, maxRetryDelayMs: 0 },
+    },
+  }));
+  const events: AgentSessionEvent[] = [];
+  session.subscribe((event) => { events.push(event); });
+
+  const result = await session.navigateTree(target, { summarize: true });
+
+  assert.equal(result.summaryEntry?.summary, "recovered branch summary");
+  assert.equal(provider.requests.length, 2);
+  assert.equal(provider.requests.every((request) => request.timeoutMs === 20), true);
+  assert.equal(provider.requests.every((request) => request.maxRetries === 1), true);
+  assert.equal(provider.requests.every((request) => request.maxRetryDelayMs === 0), true);
+  assert.notEqual(provider.signals[0], provider.signals[1]);
+  assert.equal(provider.signals[0]?.aborted, true);
+  assert.equal(provider.signals[1]?.aborted, false);
+  assert.deepEqual(events.filter((event) => event.type.startsWith("summarization_retry_")), [
+    {
+      type: "summarization_retry_scheduled",
+      attempt: 1,
+      maxAttempts: 1,
+      delayMs: 0,
+      errorMessage: "Provider request timed out after 20 ms",
+    },
+    { type: "summarization_retry_attempt_start", source: "branchSummary" },
+    { type: "summarization_retry_finished" },
+  ]);
+  await session.close();
+});
+
+test("AgentSession branch-summary timeout does not replay partial output", async () => {
+  const provider = new BranchSummaryTimeoutProvider([
+    { type: "response_start", model: "one" },
+    { type: "text_delta", part: 0, text: "partial branch summary" },
+  ]);
+  const { session, manager, target, leaf } = await branchSummaryFixture(provider, SettingsManager.inMemory({
+    retry: {
+      maxRetries: 3,
+      baseDelayMs: 0,
+      provider: { timeoutMs: 20, maxRetries: 2, maxRetryDelayMs: 0 },
+    },
+  }));
+  const events: AgentSessionEvent[] = [];
+  session.subscribe((event) => { events.push(event); });
+
+  await assert.rejects(
+    session.navigateTree(target, { summarize: true }),
+    /Provider request timed out after 20 ms/u,
+  );
+
+  assert.equal(provider.requests.length, 1);
+  assert.equal(manager.getLeafId(), leaf);
+  assert.equal(manager.getEntries().some((entry) => entry.type === "branch_summary"), false);
+  assert.equal(events.some((event) => event.type.startsWith("summarization_retry_")), false);
+  await session.close();
+});
+
 test("AgentSession branch-summary retry boundaries never move the leaf on failure or cancellation", async (context) => {
   const retrySettings = () => SettingsManager.inMemory({
     retry: { maxRetries: 2, baseDelayMs: 0, provider: { maxRetryDelayMs: 0 } },
@@ -3461,6 +4015,26 @@ test("AgentSession rejects branch summarization when the selected model leaves n
   );
   assert.equal(provider.requests.length, 0);
   assert.equal(manager.getLeafId(), leaf);
+  await session.close();
+});
+
+test("AgentSession uses the dedicated branch-summary reserve instead of compaction reserve", async () => {
+  const provider = new RecordingProvider();
+  const { session, target } = await branchSummaryFixture(provider, SettingsManager.inMemory({
+    compaction: { reserveTokens: 16_384 },
+    branchSummary: { reserveTokens: 100 },
+  }));
+  await session.setModel({
+    provider: provider.id,
+    api: "openai-chat-completions",
+    id: "one",
+    info: branchSummaryModel(provider.models[0]!, { contextTokens: 20_000, maxOutputTokens: 4_096 }),
+  });
+
+  const result = await session.navigateTree(target, { summarize: true });
+
+  assert.equal(provider.requests.length, 1);
+  assert.equal(result.cancelled, false);
   await session.close();
 });
 

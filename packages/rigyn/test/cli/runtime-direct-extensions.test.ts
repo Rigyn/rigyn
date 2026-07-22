@@ -193,6 +193,44 @@ test("runtime reload announces shutdown before activating the replacement extens
   ]);
 });
 
+test("runtime reload completes its UI commit when old-session cleanup fails", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-runtime-session-cleanup-"));
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  await mkdir(workspace);
+  const previousAgentDir = process.env.RIGYN_CODING_AGENT_DIR;
+  process.env.RIGYN_CODING_AGENT_DIR = agentDir;
+  context.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.RIGYN_CODING_AGENT_DIR;
+    else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runtime = await loadRuntime({
+    workspace,
+    projectTrusted: true,
+    ephemeral: true,
+    extensions: false,
+    extensionRuntime: true,
+    skills: false,
+    promptTemplates: false,
+    themes: false,
+    offline: true,
+  });
+  context.after(async () => await runtime.close().catch(() => undefined));
+  const previousSession = runtime.session;
+  const closePreviousSession = previousSession.close.bind(previousSession);
+  previousSession.close = async () => { throw new Error("old session cleanup fixture"); };
+  let uiCommitted = false;
+
+  const result = await runtime.reload({ onCommit() { uiCommitted = true; } });
+
+  assert.equal(uiCommitted, true);
+  assert.notEqual(runtime.session, previousSession);
+  assert.deepEqual(result.warnings, ["Old session cleanup failed: old session cleanup fixture"]);
+  await closePreviousSession();
+});
+
 test("a failed runtime reload disposes its candidate and restarts the previous generation", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-runtime-reload-recovery-"));
   const workspace = join(root, "workspace");

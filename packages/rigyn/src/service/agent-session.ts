@@ -48,10 +48,19 @@ import type { EventEnvelope, EventSink, RuntimeEvent } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import { isJsonValue, type JsonValue } from "../core/json.js";
 import { buildSystemPrompt, instructionMessage, type BuildSystemPromptOptions } from "../core/system-prompt.js";
-import { SettingsManager } from "../core/settings-manager.js";
+import { SettingsManager, type Settings } from "../core/settings-manager.js";
 import { expandPromptTemplate, type PromptTemplate } from "../core/prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "../core/resource-loader.js";
-import { mayRetry, retryDelay, waitForRetry, type RetryPolicy } from "../core/retry.js";
+import {
+  beginProviderAttempt,
+  mayRetry,
+  providerRetryPolicy,
+  providerTimeoutError,
+  retryDelay,
+  validateProviderTimeoutMs,
+  waitForRetry,
+  type RetryPolicy,
+} from "../core/retry.js";
 import { addNormalizedUsage, normalizedTotalTokens } from "../core/usage.js";
 import type { ConversationContext, ConversationPort } from "../core/ports.js";
 import type {
@@ -169,6 +178,7 @@ import type {
 } from "../storage/types.js";
 import { CURRENT_SESSION_VERSION } from "../storage/types.js";
 import {
+  allToolNames,
   EditTool,
   FindTool,
   GrepTool,
@@ -422,6 +432,8 @@ export interface AgentSessionAgent {
   sessionId: string | undefined;
   thinkingBudgets: ThinkingBudgets | undefined;
   transport: Transport;
+  timeoutMs: number | undefined;
+  maxRetries: number | undefined;
   maxRetryDelayMs: number | undefined;
   toolExecution: ToolExecutionMode;
   steeringMode: "all" | "one-at-a-time";
@@ -1067,6 +1079,15 @@ class SessionBackedAgent implements AgentSessionAgent {
   #onResponse: AgentSessionAgent["onResponse"];
   #transport: Transport;
   #transportCustomized = false;
+  #thinkingBudgets: ThinkingBudgets | undefined;
+  #thinkingBudgetsCustomized = false;
+  #timeoutMs: number | undefined;
+  #timeoutMsCustomized = false;
+  #maxRetries: number | undefined;
+  #maxRetriesCustomized = false;
+  #maxRetryDelayMs: number | undefined;
+  #maxRetryDelayMsCustomized = false;
+  #settingsThinkingBudgets: ThinkingBudgets | undefined;
   #callerOwnedModel: Model<Api> | undefined;
   #preparedContext: { context: AgentContext; sourceMessageCount: number } | undefined;
 
@@ -1077,8 +1098,6 @@ class SessionBackedAgent implements AgentSessionAgent {
   prepareNextTurn: AgentSessionAgent["prepareNextTurn"];
   prepareNextTurnWithContext: AgentSessionAgent["prepareNextTurnWithContext"];
   sessionId: string | undefined;
-  thinkingBudgets: ThinkingBudgets | undefined;
-  maxRetryDelayMs: number | undefined;
   toolExecution: ToolExecutionMode = "parallel";
 
   constructor(session: AgentSession, host: SessionBackedAgentHost) {
@@ -1087,9 +1106,13 @@ class SessionBackedAgent implements AgentSessionAgent {
     this.#defaultStreamFunction = (model, context, options) => session.modelRuntime.streamSimple(model, context, options);
     this.#streamFunction = this.#defaultStreamFunction;
     this.sessionId = session.sessionId;
-    this.thinkingBudgets = session.settingsManager.getThinkingBudgets();
+    this.#thinkingBudgets = session.settingsManager.getThinkingBudgets();
+    this.#settingsThinkingBudgets = structuredClone(this.#thinkingBudgets);
     this.#transport = session.settingsManager.getTransport();
-    this.maxRetryDelayMs = session.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
+    const providerRetry = session.settingsManager.getProviderRetrySettings();
+    this.#timeoutMs = providerRetry.timeoutMs;
+    this.#maxRetries = providerRetry.maxRetries;
+    this.#maxRetryDelayMs = providerRetry.maxRetryDelayMs;
     this.#state = this.#createState();
   }
 
@@ -1129,6 +1152,42 @@ class SessionBackedAgent implements AgentSessionAgent {
   set transport(value: Transport) {
     this.#transport = value;
     this.#transportCustomized = true;
+  }
+  get thinkingBudgets(): ThinkingBudgets | undefined { return this.#thinkingBudgets; }
+  set thinkingBudgets(value: ThinkingBudgets | undefined) {
+    this.#thinkingBudgets = value;
+    this.#thinkingBudgetsCustomized = true;
+  }
+  get timeoutMs(): number | undefined { return this.#timeoutMs; }
+  set timeoutMs(value: number | undefined) {
+    this.#timeoutMs = value;
+    this.#timeoutMsCustomized = true;
+  }
+  get maxRetries(): number | undefined { return this.#maxRetries; }
+  set maxRetries(value: number | undefined) {
+    this.#maxRetries = value;
+    this.#maxRetriesCustomized = true;
+  }
+  get maxRetryDelayMs(): number | undefined { return this.#maxRetryDelayMs; }
+  set maxRetryDelayMs(value: number | undefined) {
+    this.#maxRetryDelayMs = value;
+    this.#maxRetryDelayMsCustomized = true;
+  }
+  refreshSettings(): void {
+    const thinkingBudgets = this.#session.settingsManager.getThinkingBudgets();
+    if (!this.#thinkingBudgetsCustomized) {
+      if (isDeepStrictEqual(this.#thinkingBudgets, this.#settingsThinkingBudgets)) {
+        this.#thinkingBudgets = structuredClone(thinkingBudgets);
+      } else {
+        this.#thinkingBudgetsCustomized = true;
+      }
+    }
+    this.#settingsThinkingBudgets = structuredClone(thinkingBudgets);
+    if (!this.#transportCustomized) this.#transport = this.#session.settingsManager.getTransport();
+    const providerRetry = this.#session.settingsManager.getProviderRetrySettings();
+    if (!this.#timeoutMsCustomized) this.#timeoutMs = providerRetry.timeoutMs;
+    if (!this.#maxRetriesCustomized) this.#maxRetries = providerRetry.maxRetries;
+    if (!this.#maxRetryDelayMsCustomized) this.#maxRetryDelayMs = providerRetry.maxRetryDelayMs;
   }
   get systemPrompt(): string { return this.#host.getSystemPrompt(); }
   set systemPrompt(value: string) { this.#host.setSystemPrompt(value); }
@@ -1399,6 +1458,8 @@ class SessionBackedAgent implements AgentSessionAgent {
           ...(agent.#onPayload === undefined ? {} : { onPayload: agent.#onPayload }),
           ...(agent.#onResponse === undefined ? {} : { onResponse: agent.#onResponse }),
           transport: agent.#transport,
+          ...(agent.timeoutMs === undefined ? {} : { timeoutMs: agent.timeoutMs }),
+          ...(agent.maxRetries === undefined ? {} : { maxRetries: agent.maxRetries }),
           ...(agent.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: agent.maxRetryDelayMs }),
         });
       },
@@ -1452,6 +1513,7 @@ export class AgentSession {
   #activeToolNames: Set<string> | undefined;
   #activateExtensionToolsOnBind = false;
   #excludedActiveToolNames = new Set<string>();
+  #settingsOwnToolSelection = false;
   #activeToolCoordinator: ToolCoordinator | undefined;
   #agentToolsOverride: HarnessTool[] | undefined;
   #agentSystemPromptOverride: string | undefined;
@@ -1492,6 +1554,7 @@ export class AgentSession {
     this.#workspace = workspaceBoundary.root;
     this.#workspaceBoundary = workspaceBoundary;
     this.#session = options.sessionManager;
+    this.#settings = settings;
     const extensionsResult = options.extensionsResult
       ?? options.resourceLoader?.getExtensions()
       ?? (options.extensionRunner === undefined ? undefined : projectLoadedExtensionHost(options.extensionRunner));
@@ -1519,7 +1582,7 @@ export class AgentSession {
         options.initialToolSelection.names.filter((name) => !this.#excludedActiveToolNames.has(name)),
       );
       this.#activateExtensionToolsOnBind = options.initialToolSelection.activateExtensionToolsOnBind === true;
-    }
+    } else this.#applySettingsToolSelection();
     this.#unsubscribeSessionAppend = this.#session.onAppend((entry) => {
       const visible = extensionSessionManager(this.#session).getEntries()
         .filter((candidate) => candidate.id === entry.id || candidate.id.startsWith(`${entry.id}~`));
@@ -1527,7 +1590,6 @@ export class AgentSession {
         void this.#emitPublic({ type: "entry_appended", entry: projected }).catch(() => undefined);
       }
     });
-    this.#settings = settings;
     this.#model = options.model === undefined ? undefined : cloneModel(options.model);
     this.#sessionStartEvent = structuredClone(options.sessionStartEvent ?? {
       type: "session_start",
@@ -1599,8 +1661,7 @@ export class AgentSession {
         this.#assertIdle();
         this.#agentToolsOverride = tools.map(harnessToolFromAgent);
         this.#activeToolNames = new Set(this.#agentToolsOverride.map((tool) => tool.definition.name));
-        this.#activateExtensionToolsOnBind = false;
-        this.#excludedActiveToolNames.clear();
+        this.#takeToolSelectionOwnership();
       },
       setModel: (model, selected) => this.#setAgentModel(model, selected),
       reset: () => {
@@ -2598,6 +2659,30 @@ export class AgentSession {
     return this.#session.appendCustomMessageEntry(customType, content, display, details);
   }
 
+  #applySettingsToolSelection(): void {
+    const configured = this.#settings.getToolSettings();
+    const excluded = new Set(configured.excluded ?? []);
+    this.#settingsOwnToolSelection = true;
+    this.#excludedActiveToolNames = excluded;
+    if (configured.enabled !== undefined) {
+      this.#activeToolNames = new Set(configured.enabled.filter((name) => !excluded.has(name)));
+      this.#activateExtensionToolsOnBind = false;
+      return;
+    }
+    this.#activeToolNames = new Set([
+      ...allToolNames,
+      ...this.#extraTools.map((tool) => tool.definition.name),
+      ...(this.#extensionHost?.tools() ?? []).map((tool) => tool.definition.name),
+    ].filter((name) => !excluded.has(name)));
+    this.#activateExtensionToolsOnBind = true;
+  }
+
+  #takeToolSelectionOwnership(): void {
+    this.#settingsOwnToolSelection = false;
+    this.#activateExtensionToolsOnBind = false;
+    this.#excludedActiveToolNames.clear();
+  }
+
   getTools(): AgentSessionToolInfo[] {
     const active = this.#activeToolNames;
     return this.#buildTools().map((tool) => ({
@@ -2631,8 +2716,7 @@ export class AgentSession {
       if (available.has(name)) selected.add(name);
     }
     this.#activeToolNames = selected;
-    this.#activateExtensionToolsOnBind = false;
-    this.#excludedActiveToolNames.clear();
+    this.#takeToolSelectionOwnership();
     const coordinator = this.#activeToolCoordinator;
     if (coordinator !== undefined) {
       const eligible = new Set(coordinator.allToolNames());
@@ -3174,10 +3258,8 @@ export class AgentSession {
     const runner = this.#extensionRunner;
     if (host === undefined || runner === undefined) return;
     const legacyEvent = "reason" in bindingsOrEvent ? bindingsOrEvent : undefined;
-    if (legacyEvent === undefined) {
-      this.#extensionBindings = { ...this.#extensionBindings, ...bindingsOrEvent };
-      this.#applyExtensionBindings(runner, host);
-    } else this.#activateDirectProviderGeneration(host);
+    if (legacyEvent === undefined) this.updateExtensionBindings(bindingsOrEvent as ExtensionBindings);
+    else this.#activateDirectProviderGeneration(host);
     const start = legacyEvent ?? (() => {
       const { type: _type, ...event } = this.#sessionStartEvent;
       return event;
@@ -3191,6 +3273,16 @@ export class AgentSession {
       this.#activeToolNames = selected;
     }
     await this.#extendResourcesFromExtensions(host, start.reason === "reload" ? "reload" : "startup");
+  }
+
+  /** @internal Replace host bindings without emitting another session_start event. */
+  updateExtensionBindings(bindings: ExtensionBindings): void {
+    this.#assertOpen();
+    const host = this.#extensionHost;
+    const runner = this.#extensionRunner;
+    if (host === undefined || runner === undefined) return;
+    this.#extensionBindings = { ...this.#extensionBindings, ...bindings };
+    this.#applyExtensionBindings(runner, host);
   }
 
   /** Replace host-owned session lifecycle actions without emitting a session event. */
@@ -3403,58 +3495,173 @@ export class AgentSession {
     this.#activateDirectProviderGeneration(host);
   }
 
-  async reload(options: { beforeSessionStart?: () => void | Promise<void> } = {}): Promise<void> {
+  async reload(options: {
+    validateSettings?: (settings: Readonly<Settings>) => void | Promise<void>;
+    beforeSessionStart?: () => void | Promise<void>;
+  } = {}): Promise<void> {
     this.#assertIdle();
+    if (this.#resourceLoader !== undefined && this.#resourceLoader.supportsTransactionalReload !== true) {
+      throw new Error(
+        "This resource loader does not support transactional reload; add supportsTransactionalReload: true and honor prepareExtensions before publishing resources",
+      );
+    }
+    await this.#settings.flush();
+    const rollbackSettings = this.#settings.createRollback();
     const previousRunner = this.#extensionRunner;
     const previousHost = this.#extensionHost;
+    const previousProviderHost = this.#activeDirectProviderHost;
     const previousResult = this.#extensionsResult;
     const previousFlagValues = previousRunner?.getFlagValues() ?? new Map<string, boolean | string>();
     let shutdownStarted = false;
     let startAttempted = false;
+    let settingsRevision: number | undefined;
+    let resourcesCommitted = false;
+    let preparedExtensions: {
+      result: NonNullable<typeof previousResult>;
+      host: RuntimeExtensionHost;
+      runner: ExtensionRunner;
+    } | undefined;
     try {
       if (previousHost !== undefined) {
         shutdownStarted = true;
         const event = { reason: "reload" } satisfies Omit<SessionShutdownEvent, "type">;
         await previousHost.dispatch("session_shutdown", event as never);
       }
-      await this.#settings.reload();
-      await this.#resourceLoader?.reload();
+      this.#settings.drainErrors();
+      settingsRevision = await this.#settings.reloadForTransaction(options.validateSettings === undefined
+        ? {}
+        : { validate: options.validateSettings });
+      const settingsFailures = this.#settings.drainErrors();
+      if (settingsFailures.length > 0) {
+        throw new AggregateError(
+          settingsFailures.map((failure) => failure.error),
+          `Settings could not be loaded: ${settingsFailures.map((failure) => `${failure.scope}: ${failure.error.message}`).join("; ")}`,
+        );
+      }
+      this.#settings.getToolSettings();
+      this.#settings.getRetrySettings();
+      this.#settings.getProviderRetrySettings();
+      if (this.#resourceLoader !== undefined) {
+        await this.#resourceLoader.reload({
+          preparedSettings: this.#settings,
+          prepareExtensions: (result) => {
+            if (result === previousResult) return;
+            if (result.runtime === previousResult?.runtime) {
+              if (previousRunner === undefined || previousHost === undefined
+                || result.extensions.length !== previousResult.extensions.length
+                || result.extensions.some((extension, index) => extension !== previousResult.extensions[index])) {
+                throw new Error("A reload cannot change the extension projection without a new runtime generation");
+              }
+              return;
+            }
+            const host = getExtensionRuntimeHost(result.runtime)
+              ?? ensureExtensionRuntimeHost(result.runtime, this.#workspace);
+            for (const [name, value] of host.flagValues()) result.runtime.flagValues.set(name, value);
+            const runner = new ExtensionRunner(
+              result.extensions,
+              result.runtime,
+              this.#workspace,
+              this.#session,
+              this.#modelRegistry ?? new ModelRegistry(createModels()),
+            );
+            for (const [name, value] of previousFlagValues) {
+              if (runner.getFlags().has(name)) runner.setFlagValue(name, value);
+            }
+            this.#activateDirectProviderGeneration(host);
+            preparedExtensions = { result, host, runner };
+            return () => {
+              if (previousProviderHost !== undefined) {
+                this.#activateDirectProviderGeneration(previousProviderHost);
+                return;
+              }
+              const binding = this.#directProviderBindings.get(host);
+              if (binding !== undefined) this.#disposeDirectProviderBinding(binding);
+            };
+          },
+        });
+        resourcesCommitted = true;
+      }
       const nextResult = this.#resourceLoader?.getExtensions() ?? previousResult;
       if (nextResult !== undefined && nextResult !== previousResult) {
-        const nextHost = getExtensionRuntimeHost(nextResult.runtime)
-          ?? ensureExtensionRuntimeHost(nextResult.runtime, this.#workspace);
-        for (const [name, value] of nextHost.flagValues()) nextResult.runtime.flagValues.set(name, value);
-        const nextRunner = new ExtensionRunner(
-          nextResult.extensions,
-          nextResult.runtime,
-          this.#workspace,
-          this.#session,
-          this.#modelRegistry ?? new ModelRegistry(createModels()),
-        );
-        for (const [name, value] of previousFlagValues) {
-          if (nextRunner.getFlags().has(name)) nextRunner.setFlagValue(name, value);
+        if (nextResult.runtime === previousResult?.runtime) {
+          this.#extensionsResult = nextResult;
+        } else {
+          const prepared = preparedExtensions?.result === nextResult ? preparedExtensions : undefined;
+          const nextHost = prepared?.host
+            ?? getExtensionRuntimeHost(nextResult.runtime)
+            ?? ensureExtensionRuntimeHost(nextResult.runtime, this.#workspace);
+          if (prepared === undefined) {
+            for (const [name, value] of nextHost.flagValues()) nextResult.runtime.flagValues.set(name, value);
+          }
+          const nextRunner = prepared?.runner ?? new ExtensionRunner(
+            nextResult.extensions,
+            nextResult.runtime,
+            this.#workspace,
+            this.#session,
+            this.#modelRegistry ?? new ModelRegistry(createModels()),
+          );
+          if (prepared === undefined) {
+            for (const [name, value] of previousFlagValues) {
+              if (nextRunner.getFlags().has(name)) nextRunner.setFlagValue(name, value);
+            }
+          }
+          this.#extensionsResult = nextResult;
+          this.#extensionHost = nextHost;
+          this.#extensionRunner = nextRunner;
+          previousRunner?.invalidate("Extension runtime context is stale after AgentSession reload");
         }
-        this.#extensionsResult = nextResult;
-        this.#extensionHost = nextHost;
-        this.#extensionRunner = nextRunner;
-        previousRunner?.invalidate("Extension runtime context is stale after AgentSession reload");
       }
       if (this.#extensionRunner !== undefined && this.#extensionHost !== undefined) {
         this.#applyExtensionBindings(this.#extensionRunner, this.#extensionHost);
       }
+      if (this.#settingsOwnToolSelection) this.#applySettingsToolSelection();
+      this.#publicAgent.refreshSettings();
       await options.beforeSessionStart?.();
       await this.#options.reload?.(options);
       startAttempted = true;
       await this.bindExtensions({ reason: "reload" });
     } catch (error) {
+      const failures: unknown[] = [error];
+      if (!resourcesCommitted) {
+        const settingsRestored = rollbackSettings(settingsRevision);
+        if (settingsRestored) {
+          try {
+            if (this.#settingsOwnToolSelection) this.#applySettingsToolSelection();
+            this.#publicAgent.refreshSettings();
+          } catch (settingsRecoveryError) {
+            failures.push(settingsRecoveryError);
+          }
+        } else {
+          failures.push(new Error("Settings changed concurrently and could not be rolled back"));
+        }
+      } else {
+        try {
+          if (this.#settingsOwnToolSelection) this.#applySettingsToolSelection();
+          this.#publicAgent.refreshSettings();
+        } catch (settingsRecoveryError) {
+          failures.push(settingsRecoveryError);
+        }
+      }
       const active = this.#extensionHost;
       const shouldRestart = active !== undefined && !startAttempted && (active !== previousHost || shutdownStarted);
       if (shouldRestart) {
         try {
-          await active.dispatch("session_start", { reason: "reload" } as never);
+          await this.bindExtensions({ reason: "reload" });
         } catch (restartError) {
-          throw new AggregateError([error, restartError], "AgentSession reload and recovery failed");
+          failures.push(restartError);
         }
+      }
+      if (resourcesCommitted) {
+        throw new AggregateError(
+          failures,
+          `AgentSession reload committed but did not finish cleanly: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(
+          failures,
+          "AgentSession reload and recovery failed",
+        );
       }
       throw error;
     }
@@ -4740,6 +4947,8 @@ export class AgentSession {
         ? {}
         : { thinkingBudgets: { ...this.#publicAgent.thinkingBudgets } }),
       transport: this.#publicAgent.transport,
+      ...(this.#publicAgent.timeoutMs === undefined ? {} : { timeoutMs: this.#publicAgent.timeoutMs }),
+      ...(this.#publicAgent.maxRetries === undefined ? {} : { maxRetries: this.#publicAgent.maxRetries }),
       ...(this.#publicAgent.maxRetryDelayMs === undefined
         ? {}
         : { maxRetryDelayMs: this.#publicAgent.maxRetryDelayMs }),
@@ -4761,7 +4970,7 @@ export class AgentSession {
       ...(extensionReducers === undefined ? {} : { extensions: extensionReducers }),
       retry: {
         enabled: this.#settings.getRetryEnabled(),
-        maxAttempts: this.#settings.getRetrySettings().maxRetries + 1,
+        maxAttempts: (this.#publicAgent.maxRetries ?? this.#settings.getRetrySettings().maxRetries) + 1,
         baseDelayMs: this.#settings.getRetrySettings().baseDelayMs,
         maxDelayMs: this.#publicAgent.maxRetryDelayMs ?? this.#settings.getProviderRetrySettings().maxRetryDelayMs,
         jitter: 0.2,
@@ -4779,6 +4988,7 @@ export class AgentSession {
                 if (update.context.tools !== undefined) {
                   this.#agentToolsOverride = update.context.tools.map(harnessToolFromAgent);
                   this.#activeToolNames = new Set(this.#agentToolsOverride.map((tool) => tool.definition.name));
+                  this.#takeToolSelectionOwnership();
                   const nextTools = this.#publicAgent.toolExecution === "sequential"
                     ? this.#agentToolsOverride.map(forceSequentialTool)
                     : this.#agentToolsOverride;
@@ -4883,7 +5093,7 @@ export class AgentSession {
       model.info?.maxOutputTokens ?? BRANCH_SUMMARY_LIMITS.defaultOutputTokens,
     );
     const contextWindow = model.info?.contextTokens;
-    const reserveTokens = this.#options.compactionReserveTokens ?? this.#settings.getCompactionReserveTokens();
+    const reserveTokens = this.#settings.getBranchSummarySettings().reserveTokens;
     const inputTokenBudget = (contextWindow ?? 0) - maxOutputTokens - reserveTokens;
     if (
       contextWindow === undefined || contextWindow <= 0 ||
@@ -4945,6 +5155,7 @@ export class AgentSession {
       },
     ];
     const provider = this.#providers.runtimeAdapter(model.provider);
+    validateProviderTimeoutMs(this.#publicAgent.timeoutMs);
     const request = {
       provider: model.provider,
       model: model.id,
@@ -4952,15 +5163,20 @@ export class AgentSession {
       messages,
       tools: [],
       maxOutputTokens,
+      ...(this.#publicAgent.timeoutMs === undefined ? {} : { timeoutMs: this.#publicAgent.timeoutMs }),
+      ...(this.#publicAgent.maxRetries === undefined ? {} : { maxRetries: this.#publicAgent.maxRetries }),
+      ...(this.#publicAgent.maxRetryDelayMs === undefined
+        ? {}
+        : { maxRetryDelayMs: this.#publicAgent.maxRetryDelayMs }),
     } satisfies ProviderRequest;
     const configuredRetry = this.#settings.getRetrySettings();
-    const retry = {
+    const retry = providerRetryPolicy({
       enabled: configuredRetry.enabled,
       maxAttempts: configuredRetry.maxRetries + 1,
       baseDelayMs: configuredRetry.baseDelayMs,
       maxDelayMs: this.#publicAgent.maxRetryDelayMs ?? this.#settings.getProviderRetrySettings().maxRetryDelayMs,
       jitter: 0.2,
-    } satisfies RetryPolicy;
+    } satisfies RetryPolicy, this.#publicAgent.maxRetries);
     const retryEvents = new SessionEventSink(this.#session, createId("run"), this.#listeners, () => this.#model);
     const summarize = async (): Promise<{ summary: string; usage?: NormalizedUsage }> => {
       let text = "";
@@ -4969,6 +5185,7 @@ export class AgentSession {
       let responseStarted = false;
       let bodyStarted = false;
       let usage: NormalizedUsage | undefined;
+      const attemptBoundary = beginProviderAttempt(signal, request.timeoutMs);
       const protocolFailure = (message: string): BranchSummaryProviderFailure => new BranchSummaryProviderFailure({
         category: "protocol",
         message,
@@ -4977,42 +5194,56 @@ export class AgentSession {
         bodyStarted,
       });
       try {
-        for await (const event of abortableAsyncIterable(provider.stream(request, signal), signal)) {
-          signal.throwIfAborted();
-          if (terminal) throw protocolFailure("Branch summarization provider emitted data after completion");
-          if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
-          if (event.type === "response_start") {
-            if (responseStarted) throw protocolFailure("Branch summarization provider emitted more than one response_start event");
-            responseStarted = true;
-          } else if (event.type === "text_delta") {
-            outputBytes += Buffer.byteLength(event.text, "utf8");
-            if (outputBytes > BRANCH_SUMMARY_LIMITS.maxOutputBytes) {
-              throw protocolFailure(`Branch summary exceeded ${BRANCH_SUMMARY_LIMITS.maxOutputBytes} bytes`);
+        try {
+          for await (const event of abortableAsyncIterable(
+            provider.stream(request, attemptBoundary.signal),
+            attemptBoundary.signal,
+          )) {
+            if (attemptBoundary.signal.aborted) {
+              if (signal.aborted) throw new BranchSummaryCancelledError();
+              throw new BranchSummaryProviderFailure(providerTimeoutError(request.timeoutMs!, bodyStarted));
             }
-            text += event.text;
-          } else if (event.type === "tool_call_start" || event.type === "tool_call_delta" || event.type === "tool_call_end") {
-            throw protocolFailure("Branch summarization cannot call tools");
-          } else if (event.type === "usage") {
-            usage = event.semantics === "incremental"
-              ? addNormalizedUsage(usage, event.usage)
-              : structuredClone(event.usage);
-          } else if (event.type === "error") {
-            if (event.error.category === "cancelled") throw new BranchSummaryCancelledError();
-            throw new BranchSummaryProviderFailure({
-              ...event.error,
-              partial: event.error.partial || bodyStarted,
-              bodyStarted: event.error.bodyStarted === true || bodyStarted,
-            });
-          } else if (event.type === "response_end") {
-            if (event.reason === "cancelled" || event.reason === "aborted") {
-              throw new BranchSummaryCancelledError();
+            if (terminal) throw protocolFailure("Branch summarization provider emitted data after completion");
+            if (event.type !== "error" && event.type !== "response_start") bodyStarted = true;
+            if (event.type === "response_start") {
+              if (responseStarted) throw protocolFailure("Branch summarization provider emitted more than one response_start event");
+              responseStarted = true;
+            } else if (event.type === "text_delta") {
+              outputBytes += Buffer.byteLength(event.text, "utf8");
+              if (outputBytes > BRANCH_SUMMARY_LIMITS.maxOutputBytes) {
+                throw protocolFailure(`Branch summary exceeded ${BRANCH_SUMMARY_LIMITS.maxOutputBytes} bytes`);
+              }
+              text += event.text;
+            } else if (event.type === "tool_call_start" || event.type === "tool_call_delta" || event.type === "tool_call_end") {
+              throw protocolFailure("Branch summarization cannot call tools");
+            } else if (event.type === "usage") {
+              usage = event.semantics === "incremental"
+                ? addNormalizedUsage(usage, event.usage)
+                : structuredClone(event.usage);
+            } else if (event.type === "error") {
+              if (event.error.category === "cancelled") throw new BranchSummaryCancelledError();
+              throw new BranchSummaryProviderFailure({
+                ...event.error,
+                partial: event.error.partial || bodyStarted,
+                bodyStarted: event.error.bodyStarted === true || bodyStarted,
+              });
+            } else if (event.type === "response_end") {
+              if (event.reason === "cancelled" || event.reason === "aborted") {
+                throw new BranchSummaryCancelledError();
+              }
+              if (event.reason !== "stop") throw protocolFailure(`Branch summarization ended with ${event.reason}`);
+              terminal = true;
             }
-            if (event.reason !== "stop") throw protocolFailure(`Branch summarization ended with ${event.reason}`);
-            terminal = true;
           }
+        } finally {
+          attemptBoundary.dispose();
         }
       } catch (error) {
-        if (signal.aborted || error instanceof BranchSummaryCancelledError) throw new BranchSummaryCancelledError();
+        if (signal.aborted) throw new BranchSummaryCancelledError();
+        if (attemptBoundary.timedOut()) {
+          throw new BranchSummaryProviderFailure(providerTimeoutError(request.timeoutMs!, bodyStarted));
+        }
+        if (error instanceof BranchSummaryCancelledError) throw error;
         if (error instanceof BranchSummaryProviderFailure) throw error;
         throw new BranchSummaryProviderFailure({
           category: "network",
@@ -5052,7 +5283,7 @@ export class AgentSession {
           await retryEvents.emit({
             type: "summarization_retry_scheduled",
             attempt,
-            maxAttempts: configuredRetry.maxRetries,
+            maxAttempts: Math.max(0, retry.maxAttempts - 1),
             delayMs,
             errorMessage: detail.message,
           });

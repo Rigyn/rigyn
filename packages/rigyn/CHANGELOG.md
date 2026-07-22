@@ -4,6 +4,31 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.5.1] - 2026-07-22
+
+### Added
+
+- Added a blank personal `AGENTS.md` and a complete editable `settings.json` template to fresh managed installations; reinstall and update preserve existing copies byte for byte.
+- Added persistent settings for the complete built-in tool policy and every configurable terminal action.
+- Added public assistant-call retry helpers, compaction and branch-summary retry events, retained-tail session checkpoints, and a configurable default stream function.
+
+### Changed
+
+- Activated every built-in tool by default while retaining explicit allowlists and exclusions across CLI, RPC, and SDK sessions.
+- Made `mono` the sole bundled theme while retaining trusted extension-theme discovery and selection.
+- Made nested global and project settings merge recursively, with `null` consistently inheriting the next applicable default.
+- Kept installation and release publication on checksum-verified GitHub Release assets; npm is used only as a local package executor and build tool.
+
+### Fixed
+
+- Normalized Node-native `Request` objects before transport fallback, eliminating `Failed to parse URL from [object Request]` failures.
+- Preserved each model's exact `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` thinking choices through selection and request routing.
+- Made `/reload` consume one validated settings snapshot, preserve editor and transcript state, preflight replacement providers, refresh tools and keybindings, rebind the live extension UI, and recover coherently at its commit boundary.
+- Fixed Escape cancellation and exit routing, shrink-to-empty repainting, software-cursor cleanup, CRLF rendering, and atomic paste undo in the terminal UI.
+- Retried transient provider, compaction, and branch-summary failures without replaying partial output, with complete retry lifecycle events across interactive, terminal, RPC, and SDK surfaces.
+- Preserved retained-tail compaction ancestry in memory and JSONL sessions, and tightened CLI required-value, management-command, settings, trust, and documentation diagnostics.
+- Required the personal-instructions and complete-settings templates in deterministic source archives and clean-install release verification.
+
 ## [0.5.0] - 2026-07-22
 
 ### Added

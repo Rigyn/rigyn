@@ -52,6 +52,10 @@ export interface ResourceExtensionPaths {
 
 export interface ResourceLoaderReloadOptions {
   resolveProjectTrust?: (input: { extensionsResult: ResourceExtensionsResult }) => Promise<boolean>;
+  /** Exact manager already loaded and validated by a coordinating caller. */
+  preparedSettings?: SettingsManager;
+  /** Validate a complete candidate before publication and optionally return a synchronous rollback. */
+  prepareExtensions?: (extensionsResult: ResourceExtensionsResult) => void | (() => void);
   signal?: AbortSignal;
 }
 
@@ -60,6 +64,12 @@ export type ResourceExtensionsResult = LoadExtensionsResult;
 
 /** Complete resource view consumed by an agent session. */
 export interface ResourceLoader {
+  /**
+   * Opt in to AgentSession's coordinated reload protocol. Legacy loaders may
+   * omit this and remain usable, but AgentSession will not reload them because
+   * their published state cannot be rolled back generically.
+   */
+  readonly supportsTransactionalReload?: true;
   getExtensions(): ResourceExtensionsResult;
   getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
   getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
@@ -74,6 +84,12 @@ export interface ResourceLoader {
   extendResources(paths: ResourceExtensionPaths): void;
   /** Host hook used after session_start so extension resources see bound session context. */
   extendResourcesFromExtensions?(runtime: ExtensionRuntime, reason: "startup" | "reload"): Promise<void>;
+  /**
+   * Replace one resource generation. Implementations must invoke a supplied
+   * prepareExtensions callback before publication and retain the active
+   * generation when it throws. If publication does not follow a successful
+   * preparation, implementations must invoke its returned rollback.
+   */
   reload(options?: ResourceLoaderReloadOptions): Promise<void>;
 }
 
@@ -121,7 +137,10 @@ function contextFile(directory: string): { path: string; content: string } | und
   for (const name of ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]) {
     const path = join(directory, name);
     if (!existsSync(path)) continue;
-    try { return { path, content: readFileSync(path, "utf8") }; }
+    try {
+      const content = readFileSync(path, "utf8");
+      return content.trim() === "" ? undefined : { path, content };
+    }
     catch (error) {
       console.error(`Warning: could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -171,6 +190,7 @@ function extensionResult(runtime: RuntimeExtensionHost): ResourceExtensionsResul
 }
 
 export class DefaultResourceLoader implements ResourceLoader {
+  readonly supportsTransactionalReload = true as const;
   readonly #cwd: string;
   readonly #agentDir: string;
   readonly #options: DefaultResourceLoaderOptions;
@@ -374,6 +394,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
   async reload(options: ResourceLoaderReloadOptions = {}): Promise<void> {
     options.signal?.throwIfAborted();
+    const settingsPrepared = options.preparedSettings === this.#settingsManager;
+    if (settingsPrepared && options.resolveProjectTrust !== undefined) {
+      throw new Error("Project-trust resolution requires settings reload");
+    }
     let trustBootstrap = this.#preloadedExtensions;
     this.#preloadedExtensions = undefined;
     if (options.resolveProjectTrust !== undefined) {
@@ -403,7 +427,7 @@ export class DefaultResourceLoader implements ResourceLoader {
     let projectPackageCatalog: ProjectPackageCatalogEntry[];
     let commandLine: ResolvedPaths;
     try {
-      await this.#settingsManager.reload();
+      if (!settingsPrepared) await this.#settingsManager.reload();
       const configuredNpm = this.#settingsManager.getNpmCommand();
       const project = await new ProjectPackageManager({
         workspace: this.#cwd,
@@ -467,6 +491,9 @@ export class DefaultResourceLoader implements ResourceLoader {
     let nextExtensions: RuntimeExtensionHost | undefined;
     let discardedExtensions: RuntimeExtensionHost | undefined;
     let candidateRuntime: ExtensionRuntime | undefined;
+    let rollbackPreparation: (() => void) | undefined;
+    const publishedRuntime = this.#extensions.runtime;
+    const publishedHost = this.#extensionHost;
     try {
       const extensionOptions = {
         workspace: this.#cwd,
@@ -596,6 +623,8 @@ export class DefaultResourceLoader implements ResourceLoader {
       }
       candidateRuntime = selectedExtensions.runtime;
       options.signal?.throwIfAborted();
+      rollbackPreparation = options.prepareExtensions?.(selectedExtensions) ?? undefined;
+      options.signal?.throwIfAborted();
       const previousRuntime = this.#extensions.runtime;
       const previousHost = this.#extensionHost;
       this.#metadataByPath = metadataByPath;
@@ -620,6 +649,7 @@ export class DefaultResourceLoader implements ResourceLoader {
       this.#projectPackageCatalog = projectPackageCatalog;
       nextExtensions = undefined;
       candidateRuntime = undefined;
+      rollbackPreparation = undefined;
       if (previousRuntime !== selectedExtensions.runtime) {
         previousRuntime.invalidate("Extension runtime was replaced by reload");
       }
@@ -645,9 +675,22 @@ export class DefaultResourceLoader implements ResourceLoader {
         }
       }
     } catch (error) {
-      candidateRuntime?.invalidate("Extension generation failed before activation");
-      await nextExtensions?.close().catch(() => undefined);
-      await discardedExtensions?.close().catch(() => undefined);
+      let rollbackError: unknown;
+      try {
+        rollbackPreparation?.();
+      } catch (cause) {
+        rollbackError = cause;
+      }
+      if (candidateRuntime !== publishedRuntime) {
+        candidateRuntime?.invalidate("Extension generation failed before activation");
+      }
+      if (nextExtensions !== publishedHost) await nextExtensions?.close().catch(() => undefined);
+      if (discardedExtensions !== publishedHost && discardedExtensions !== nextExtensions) {
+        await discardedExtensions?.close().catch(() => undefined);
+      }
+      if (rollbackError !== undefined) {
+        throw new AggregateError([error, rollbackError], "Resource preparation and rollback failed");
+      }
       throw error;
     }
   }

@@ -11,7 +11,8 @@ import {
 } from "../../src/interactive/session-presentation.js";
 import type { AgentSession, AgentSessionEvent, AgentSessionEventListener } from "../../src/service/agent-session.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
-import type { TuiController } from "../../src/tui/controller.js";
+import { DEFAULT_TUI_LIMITS, type TuiController } from "../../src/tui/controller.js";
+import { TuiModel } from "../../src/tui/model.js";
 import type { TuiSessionEntry, TuiTranscriptItem } from "../../src/tui/types.js";
 
 const roots = new Set<string>();
@@ -69,9 +70,65 @@ test("interactive history preserves custom entry order and omits display-false m
   });
 
   const projected = interactiveTranscriptHistory(fakeSession(storage).session);
-  assert.deepEqual(projected.map((item) => "event" in item ? item.eventId : item.id), [first, state, visible, last]);
+  assert.deepEqual(projected.map((item) => "event" in item ? item.eventId : item.id), [
+    first,
+    state,
+    visible,
+    last,
+    `${last}~assistant-completed`,
+  ]);
   assert.equal(projected.some((item) => !("event" in item) && item.type === "custom_message" && !item.display), false);
   assert.deepEqual(projected.flatMap((item) => "event" in item ? [] : [item.customType]), ["counter", "notice"]);
+});
+
+test("history replay finalizes each assistant before its tool and later assistant", async () => {
+  const storage = await manager();
+  storage.appendMessage({
+    id: "ordered-user",
+    role: "user",
+    content: [{ type: "text", text: "inspect the file" }],
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  storage.appendMessage({
+    id: "ordered-planning",
+    role: "assistant",
+    content: [
+      { type: "text", text: "I will read it" },
+      { type: "tool_call", callId: "ordered-call", name: "read", arguments: { path: "src/main.ts" } },
+    ],
+    stopReason: "tool_calls",
+    createdAt: "2026-01-01T00:00:01.000Z",
+  });
+  storage.appendMessage({
+    id: "ordered-tool",
+    role: "tool",
+    content: [{
+      type: "tool_result",
+      callId: "ordered-call",
+      name: "read",
+      content: "file contents",
+      isError: false,
+    }],
+    createdAt: "2026-01-01T00:00:02.000Z",
+  });
+  storage.appendMessage({
+    id: "ordered-final",
+    role: "assistant",
+    content: [{ type: "text", text: "final answer" }],
+    stopReason: "stop",
+    createdAt: "2026-01-01T00:00:03.000Z",
+  });
+
+  const model = new TuiModel(DEFAULT_TUI_LIMITS);
+  model.applyAll(interactiveTranscriptHistory(fakeSession(storage).session));
+
+  assert.deepEqual(model.entries.map((entry) => [entry.kind, entry.text || entry.title]), [
+    ["user", "inspect the file"],
+    ["assistant", "I will read it"],
+    ["tool", "file contents"],
+    ["assistant", "final answer"],
+  ]);
+  assert.deepEqual(model.committableEntries().map((entry) => entry.id), model.entries.map((entry) => entry.id));
 });
 
 test("non-display entry floods do not crowd visible resume history out", async () => {

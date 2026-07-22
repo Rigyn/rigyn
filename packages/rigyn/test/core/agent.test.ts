@@ -144,6 +144,23 @@ async function* events(values: AdapterEvent[]): AsyncIterable<AdapterEvent> {
   for (const value of values) yield value;
 }
 
+function hangingEvents(values: readonly AdapterEvent[] = []): AsyncIterable<AdapterEvent> {
+  return {
+    [Symbol.asyncIterator]() {
+      let index = 0;
+      return {
+        next(): Promise<IteratorResult<AdapterEvent>> {
+          const value = values[index];
+          index += 1;
+          return value === undefined
+            ? new Promise<IteratorResult<AdapterEvent>>(() => {})
+            : Promise.resolve({ done: false, value });
+        },
+      };
+    },
+  };
+}
+
 const state = { kind: "chat_completions" as const, assistantMessage: { role: "assistant" } };
 
 test("continuation state and opaque replay require the exact provider, API, and model", async () => {
@@ -1444,6 +1461,107 @@ test("a run-scoped retry policy overrides the runner default without replaying p
   assert.equal(result.finalText, "recovered");
 });
 
+test("provider maxRetries overrides the outer replay-safe attempt count", async () => {
+  const provider = new ScriptedProvider([
+    () => events([{
+      type: "error",
+      error: { category: "network", message: "first failure", retryable: true, partial: false },
+    }]),
+    () => events([{
+      type: "error",
+      error: { category: "network", message: "must not run", retryable: true, partial: false },
+    }]),
+  ]);
+  const harness = await setup(provider, {
+    retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+
+  await assert.rejects(harness.runner.run({
+    threadId: "provider-retry-override",
+    prompt: "p",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+    maxRetries: 0,
+  }), /first failure/u);
+
+  assert.equal(provider.requests.length, 1);
+  assert.equal(harness.runtimes[0]?.events.some((entry) => entry.event.type === "retry_scheduled"), false);
+});
+
+test("provider timeout retries with a fresh per-attempt signal before output", async () => {
+  const signals: AbortSignal[] = [];
+  const provider = new ScriptedProvider([
+    (_request, signal) => {
+      signals.push(signal);
+      return hangingEvents();
+    },
+    (_request, signal) => {
+      signals.push(signal);
+      return events([
+        { type: "response_start", model: "m" },
+        { type: "text_delta", part: 0, text: "recovered" },
+        { type: "response_end", reason: "stop", state },
+      ]);
+    },
+  ]);
+  const harness = await setup(provider, {
+    retry: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+
+  const result = await harness.runner.run({
+    threadId: "provider-timeout-retry",
+    prompt: "p",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+    timeoutMs: 20,
+    maxRetries: 1,
+  });
+
+  assert.equal(result.finalText, "recovered");
+  assert.equal(provider.requests.length, 2);
+  assert.notEqual(signals[0], signals[1]);
+  assert.equal(signals[0]?.aborted, true);
+  assert.equal(signals[1]?.aborted, false);
+  const completion = harness.runtimes[0]?.events.find((entry) =>
+    entry.event.type === "assistant_completed" && entry.event.rawReason === "request_timeout");
+  assert.ok(completion);
+});
+
+test("provider timeout never retries after substantive output", async () => {
+  const provider = new ScriptedProvider([
+    () => hangingEvents([
+      { type: "response_start", model: "m" },
+      { type: "text_delta", part: 0, text: "partial" },
+    ]),
+    () => events([
+      { type: "response_start", model: "m" },
+      { type: "text_delta", part: 0, text: "must not run" },
+      { type: "response_end", reason: "stop", state },
+    ]),
+  ]);
+  const harness = await setup(provider, {
+    retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: 0 },
+  });
+
+  await assert.rejects(harness.runner.run({
+    threadId: "partial-provider-timeout",
+    prompt: "p",
+    provider,
+    model: "m",
+    tools: harness.tools,
+    toolContext: harness.toolContext,
+    timeoutMs: 20,
+    maxRetries: 2,
+  }), /Provider request timed out after 20 ms/u);
+
+  assert.equal(provider.requests.length, 1);
+  assert.equal(harness.runtimes[0]?.events.some((entry) => entry.event.type === "retry_scheduled"), false);
+});
+
 test("agent never retries after a response body event", async () => {
   let secondCalled = false;
   const provider = new ScriptedProvider([
@@ -2177,10 +2295,16 @@ test("automatic compaction safely retries a transport failure before summary out
     contextTokenBudget: 100_000,
     contextTriggerTokens: 1_000,
     summaryTokenBudget: 100,
+    timeoutMs: 10_000,
+    maxRetries: 1,
+    maxRetryDelayMs: 456,
   });
 
   assert.equal(result.finalText, "continued after compaction");
   assert.equal(provider.requests.length, 3);
+  assert.equal(provider.requests.every((request) => request.timeoutMs === 10_000), true);
+  assert.equal(provider.requests.every((request) => request.maxRetries === 1), true);
+  assert.equal(provider.requests.every((request) => request.maxRetryDelayMs === 456), true);
   const runtimeEvents = harness.runtimes[0]?.events.map((entry) => entry.event) ?? [];
   assert.equal(runtimeEvents.filter((event) => event.type === "retry_scheduled").length, 1);
   assert.deepEqual(runtimeEvents.filter((event) => event.type.startsWith("summarization_retry_")), [

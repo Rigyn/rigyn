@@ -111,13 +111,27 @@ export function interactiveTranscriptHistory(session: AgentSession): TuiTranscri
       event: { type: "message_appended", message: message as CanonicalMessage },
     };
     parentEventId = entry.id;
-    return [envelope];
+    if (message.role !== "assistant") return [envelope];
+    return [envelope, {
+      eventId: `${entry.id}~assistant-completed`,
+      threadId: session.sessionId,
+      parentEventId: entry.id,
+      sequence: ++sequence,
+      timestamp: entry.timestamp,
+      schemaVersion: 1,
+      event: {
+        type: "assistant_completed",
+        finishReason: message.stopReason
+          ?? (message.content.some((block) => block.type === "tool_call") ? "tool_calls" : "stop"),
+      },
+    }];
   });
 }
 
 export interface InteractiveSessionPresentationOptions {
   onEnvelope?(event: EventEnvelope): void;
   onSessionEvent?(event: AgentSessionEvent): void;
+  preserveTranscript?: boolean;
 }
 
 /**
@@ -149,7 +163,9 @@ export function bindInteractiveSessionPresentation(
     options.onSessionEvent?.(event);
   }));
   try {
-    terminal.replaceTranscript(interactiveTranscriptHistory(session), "main");
+    terminal.replaceTranscript(interactiveTranscriptHistory(session), "main", {
+      preserveExisting: options.preserveTranscript === true,
+    });
     replaying = false;
     for (const action of pending) action();
     pending.length = 0;

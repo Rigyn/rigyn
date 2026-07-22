@@ -2346,6 +2346,75 @@ test("classic transcript replacement writes only the retained bounded projection
   controller.close();
 });
 
+test("reload transcript replacement preserves committed rows without reordering or duplicating them", async () => {
+  const { output, controller } = fullController();
+  controller.start();
+  const snapshot = [
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "reload-user",
+        role: "user",
+        content: [{ type: "text", text: "inspect the file" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    }, 1),
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "reload-planning",
+        role: "assistant",
+        content: [
+          { type: "text", text: "I will read it" },
+          { type: "tool_call", callId: "reload-call", name: "read", arguments: { path: "src/main.ts" } },
+        ],
+        stopReason: "tool_calls",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+    }, 2),
+    envelope({ type: "assistant_completed", finishReason: "tool_calls" }, 3),
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "reload-tool",
+        role: "tool",
+        content: [{
+          type: "tool_result",
+          callId: "reload-call",
+          name: "read",
+          content: "file contents",
+          isError: false,
+        }],
+        createdAt: "2026-01-01T00:00:02.000Z",
+      },
+    }, 4),
+    envelope({
+      type: "message_appended",
+      message: {
+        id: "reload-final",
+        role: "assistant",
+        content: [{ type: "text", text: "final answer" }],
+        stopReason: "stop",
+        createdAt: "2026-01-01T00:00:03.000Z",
+      },
+    }, 5),
+    envelope({ type: "assistant_completed", finishReason: "stop" }, 6),
+  ];
+
+  output.chunks.length = 0;
+  controller.replaceTranscript(snapshot, "main");
+  await tick();
+  const initial = terminalWords(output.text);
+  assert.ok(initial.indexOf("I will read it") < initial.indexOf("Read · [ts] src/main.ts"));
+  assert.ok(initial.indexOf("Read · [ts] src/main.ts") < initial.indexOf("final answer"));
+
+  output.chunks.length = 0;
+  controller.replaceTranscript(snapshot, "main", { preserveExisting: true });
+  await tick();
+  assert.doesNotMatch(terminalWords(output.text), /inspect the file|I will read it|file contents|final answer/u);
+  controller.close();
+});
+
 test("resize causes a fresh bounded frame", async () => {
   const { output, controller } = fullController();
   controller.start();
