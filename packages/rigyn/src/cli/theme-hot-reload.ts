@@ -1,4 +1,5 @@
-import { lstatSync, watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import type { ExtensionTheme } from "../extensions/types.js";
@@ -9,8 +10,11 @@ const RELOAD_DEBOUNCE_MS = 100;
 
 function fileSignature(sourcePath: string): string | undefined {
   try {
-    const information = lstatSync(sourcePath, { bigint: true });
-    return `${information.ino}:${information.size}:${information.mtimeNs}`;
+    const information = lstatSync(sourcePath);
+    if (information.isFile() && information.size <= MAX_THEME_BYTES) {
+      return createHash("sha256").update(readFileSync(sourcePath)).digest("hex");
+    }
+    return `${information.ino}:${information.size}:${information.mtimeMs}`;
   } catch {
     return undefined;
   }
