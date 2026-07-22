@@ -65,7 +65,7 @@ rigyn list --json
 rigyn remove PACKAGE_ID
 ```
 
-Runtime tools, commands, providers, UI contributions, prompts, themes, and skills run inside the active harness. Agent-style subprocess extensions use the bounded `rigyn.exec` boundary; the extension owns its argv, protocol, cancellation, concurrency, and result presentation.
+Runtime tools, commands, providers, UI contributions, prompts, custom themes, and skills run inside the active harness. Agent-style subprocess extensions use the bounded `rigyn.exec` boundary; the extension owns its argv, protocol, cancellation, concurrency, and result presentation.
 
 ## Measure deterministic harness and authoring paths
 

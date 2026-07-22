@@ -13,7 +13,7 @@ my-extension/
   extensions/index.mjs
   skills/review/SKILL.md       # optional
   prompts/review.md            # optional
-  themes/ocean.json            # optional
+  themes/ocean.json            # optional custom theme
   test/runtime.test.mjs        # recommended
 ```
 
@@ -34,7 +34,7 @@ A complete declaration is:
 }
 ```
 
-The `rigyn` object consumes the `extensions`, `skills`, `prompts`, and `themes` string arrays. Paths are package-relative, normalized, and constrained to the package root. Missing paths, symlink escapes, and unsupported resource formats are rejected or reported by resource resolution. Declare only the documented keys; unrecognized `rigyn` keys are not extension configuration.
+The `rigyn` object consumes the `extensions`, `skills`, `prompts`, and `themes` string arrays. Paths are package-relative, normalized, and constrained to the package root. Missing paths, symlink escapes, and unsupported resource formats are rejected or reported by resource resolution. Declare only the documented keys; unrecognized `rigyn` keys are not extension configuration. Rigyn itself ships only the built-in `mono` theme; package declarations add reviewed custom themes.
 
 `peerDependencies.rigyn` is the enforced host-compatibility range. Rigyn validates it before package activation and does not install a nested host runtime. `engines.rigyn` remains optional report metadata for older packages, but it is not an activation gate. Test the packed artifact against every supported Rigyn release before publishing.
 
@@ -201,7 +201,7 @@ Also test malformed input, cancellation, activation failure, repeated reload, cl
 | [`runtime-catalog`](../examples/runtime-catalog/README.md) | Active tools, model selection, command/resource discovery, and user-message delivery |
 | [`session-lifecycle`](../examples/session-lifecycle/README.md) | Session guards, compaction, tree events, and navigation |
 | [`provider-catalog`](../examples/provider-catalog/README.md) | Custom provider, managed OAuth callbacks, and refreshed catalog |
-| [`terminal-workbench`](../examples/terminal-workbench/README.md) | Terminal input, editor helpers, themes, and tool expansion |
+| [`terminal-workbench`](../examples/terminal-workbench/README.md) | Terminal input, editor helpers, custom themes, and tool expansion |
 | [`project-trust`](../examples/project-trust/README.md) | Restricted interactive project-trust decision |
 
 Each example has one `package.json` declaration and one direct factory entry. Combine only the contracts the product actually needs.

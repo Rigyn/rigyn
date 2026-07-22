@@ -65,6 +65,7 @@ import {
 } from "./terminal-image.js";
 import {
   createTheme,
+  normalizeThemeSetting,
   parseAutomaticThemePair,
   resolveThemeSetting,
   THEME_ROLES,
@@ -1089,10 +1090,11 @@ export class TuiController {
       synchronizedOutput: this.#environment.RIGYN_SYNC_UPDATE !== "0",
       imageProtocol: this.capabilities.imageProtocol,
     });
-    this.#themeSetting = options.theme ?? "light/dark";
+    this.#themeSetting = normalizeThemeSetting(options.theme ?? "mono");
     this.#terminalColorScheme = terminalColorSchemeFromEnvironment(this.#environment);
     this.#automaticTheme = parseAutomaticThemePair(this.#themeSetting) !== undefined;
-    this.#themeName = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
+    const configuredTheme = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
+    this.#themeName = configuredTheme === "mono" ? configuredTheme : "mono";
     this.#theme = createTheme(this.#themeName, {
       color: this.capabilities.color,
       unicode: this.capabilities.unicode,
@@ -3222,7 +3224,7 @@ export class TuiController {
   }
 
   setTheme(name: ThemeName): void {
-    const setting = String(name);
+    const setting = normalizeThemeSetting(String(name));
     const pair = parseAutomaticThemePair(setting);
     const names = pair === undefined ? [setting] : [pair.light, pair.dark];
     for (const selected of names) {
@@ -3273,8 +3275,11 @@ export class TuiController {
     for (const theme of themes) selected.set(theme.name, theme);
     this.#customThemes.clear();
     for (const [name, theme] of selected) this.#customThemes.set(name, theme);
-    if (this.#themeName !== "dark" && this.#themeName !== "light" && this.#themeName !== "mono") {
-      this.#applyTheme(this.#customThemes.has(this.#themeName) ? this.#themeName : "dark", "catalog");
+    const configured = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
+    if (this.#themeName !== "mono") {
+      this.#applyTheme(this.#customThemes.has(this.#themeName) ? this.#themeName : "mono", "catalog");
+    } else if (configured !== "mono" && this.#customThemes.has(configured)) {
+      this.#applyTheme(configured, "catalog");
     }
   }
 
@@ -3285,7 +3290,7 @@ export class TuiController {
   }
 
   themeNames(): string[] {
-    return ["dark", "light", "mono", ...this.#customThemes.keys()].sort((left, right) => left.localeCompare(right));
+    return ["mono", ...this.#customThemes.keys()].sort((left, right) => left.localeCompare(right));
   }
 
   async editExternally(operation: (text: string, signal: AbortSignal) => Promise<string> = async (text, signal) => await editTextExternally(text, {

@@ -19,7 +19,7 @@ The context supports:
 - editor text read/write and paste;
 - decoded terminal-input observation;
 - autocomplete wrapping and complete editor replacement;
-- resolved theme inspection, source-path discovery, and interactive theme selection;
+- resolved theme inspection, source-path discovery, and custom-theme selection;
 - completed-tool expansion inspection and override;
 - `custom` components and overlays.
 
@@ -56,7 +56,7 @@ A component must render deterministically and quickly. It may implement input ha
 
 ## Themes
 
-`context.ui.theme` is the current resolved theme. `getAllThemes`, `getTheme`, and `setTheme` operate on validated theme objects, and discovered package themes include their source path. A successful selection in the interactive host updates the live renderer and the user's theme setting; headless hosts cannot persist a terminal selection. Terminal-control data in theme values is rejected by the theme loader.
+`context.ui.theme` is the current resolved theme. `getAllThemes`, `getTheme`, and `setTheme` operate on the sole built-in `mono` theme plus validated discovered custom themes, and custom package themes include their source path. A successful selection in the interactive host updates the live renderer and the user's theme setting; headless hosts cannot persist a terminal selection. Terminal-control data in custom theme values is rejected by the loader.
 
 The explicitly trusted direct TUI is the public TUI runtime backed by the active host renderer. Its dimensions, enhanced-keyboard state, color-scheme notifications and queries, background-color query, redraw count, cursor preference, and clear-on-shrink preference reflect live host state. `start()` and `stop()` pause only the extension generation's components and input listeners; they never take ownership of the process terminal. Forced redraws, input draining, and raw terminal callbacks use the existing controller and expire with the extension generation.
 

@@ -51,7 +51,8 @@ body:
     attributes:
       label: Installation method
       options:
-        - Self-contained installation from npm
+        - One-line installer from GitHub
+        - Standalone archive from GitHub
         - Self-contained installation from a source checkout
         - Development checkout with npm run dev
         - Other

@@ -184,6 +184,66 @@ await main([
   assert.equal(await readFile(trustMarker, "utf8"), "1");
 });
 
+test("RPC startup failures propagate after cleaning up the runtime", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-main-rpc-startup-failure-"));
+  const workspace = join(root, "workspace");
+  const agentDir = join(root, "agent");
+  const entrypoint = join(root, "entrypoint.mjs");
+  await mkdir(workspace);
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+
+  await writeFile(entrypoint, `
+import { main } from ${JSON.stringify(mainModule)};
+
+await main([
+  "--mode", "rpc",
+  "--workspace", ${JSON.stringify(workspace)},
+  "--offline",
+  "--no-extensions",
+  "--no-session",
+], {
+  extensionFactories: [{
+    name: "inline-rpc-startup-failure",
+    factory(rigyn) {
+      rigyn.on("session_start", () => {
+        throw new Error("rpc startup failure sentinel");
+      });
+    },
+  }],
+});
+`);
+
+  const child = spawn(process.execPath, ["--import", "tsx", entrypoint], {
+    cwd: repositoryRoot,
+    env: {
+      ...process.env,
+      RIGYN_CODING_AGENT_DIR: agentDir,
+      RIGYN_OFFLINE: "1",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  child.stdin.end();
+  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`RPC startup failure fixture timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+    }, 30_000);
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolveExit({ code, signal });
+    });
+  });
+
+  assert.deepEqual(exit, { code: 1, signal: null }, stderr);
+  assert.equal(stdout, "");
+  assert.match(stderr, /rpc startup failure sentinel/u);
+});
+
 test("normal main invocations let supplied factories resolve project trust", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-main-inline-project-trust-"));
   const workspace = join(root, "workspace");

@@ -20,7 +20,7 @@ function context(overrides: Partial<RuntimeUiRenderContext> = {}): RuntimeUiRend
     height: 10,
     focused: true,
     expanded: false,
-    theme: { name: "dark", color: true, unicode: true },
+    theme: { name: "mono", color: true, unicode: true },
     ...overrides,
   };
 }

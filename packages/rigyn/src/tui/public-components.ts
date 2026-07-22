@@ -401,7 +401,7 @@ export class ShowImagesSelectorComponent extends ValueSelector<"show" | "hide"> 
 }
 export class ThemeSelectorComponent extends ValueSelector<string> {
   constructor(current: string, onSelect: (theme: string) => void, onCancel: () => void, onPreview: (theme: string) => void) {
-    super(["dark", "light", "mono"], current, onSelect, onCancel); this.list.onSelectionChange = (item) => onPreview(item.value);
+    super(["mono"], current, onSelect, onCancel); this.list.onSelectionChange = (item) => onPreview(item.value);
   }
 }
 

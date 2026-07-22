@@ -35,7 +35,7 @@ function packagePaths(): { readme: string; docs: string; examples: string } {
 }
 
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
-  const tools = options.selectedTools ?? ["read", "bash", "edit", "write"];
+  const tools = options.selectedTools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"];
   const contextFiles = options.contextFiles ?? [];
   const skills = options.skills ?? [];
   const cwd = options.cwd.replaceAll("\\", "/");

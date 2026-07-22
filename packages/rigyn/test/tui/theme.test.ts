@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   createTheme,
@@ -22,22 +23,29 @@ function tokenColors(overrides: Partial<Record<ThemeToken, string | number>> = {
   return { ...Object.fromEntries(THEME_TOKENS.map((token) => [token, ""])), ...overrides } as Record<ThemeToken, string | number>;
 }
 
+test("the published theme schema reserves bundled and compatibility names", async () => {
+  const schema = JSON.parse(await readFile(new URL("../../resources/schemas/theme-v1.json", import.meta.url), "utf8")) as {
+    properties: { name: { not: { enum: string[] } } };
+  };
+  assert.deepEqual(schema.properties.name.not.enum, ["dark", "light", "mono"]);
+});
+
 test("themes honor color and Unicode capability decisions", () => {
-  const colored = createTheme("dark", { color: true, unicode: true });
-  assert.equal(colored.name, "dark");
+  const colored = createTheme("mono", { color: true, unicode: true });
+  assert.equal(colored.name, "mono");
   assert.match(style(colored, "error", "failed"), /\u001b\[/u);
   assert.equal(colored.glyphs.success, "✓");
   const fallback = createTheme("light", { color: false, unicode: false });
   assert.equal(fallback.name, "mono");
   assert.equal(style(fallback, "error", "failed"), "failed");
   assert.equal(fallback.glyphs.success, "+");
-  assert.match(style(colored, "selection", "selected"), /38;5;117;48;5;237m/u);
+  assert.match(style(colored, "selection", "selected"), /38;5;16;48;5;255m/u);
   assert.doesNotMatch(style(colored, "toolSuccess", "passed"), /48;/u);
   assert.doesNotMatch(style(colored, "toolError", "failed"), /48;/u);
 });
 
 test("live themes expose token colors and composable text styles to direct renderers", () => {
-  const colored = createTheme("dark", { color: true, unicode: true });
+  const colored = createTheme("mono", { color: true, unicode: true });
   assert.equal(colored.unicode, true);
   assert.match(colored.fg("accent", "value"), /^\u001b\[[0-9;]+mvalue\u001b\[39m$/u);
   assert.match(colored.bg("selectedBg", "value"), /^\u001b\[[0-9;]+mvalue\u001b\[49m$/u);
@@ -211,13 +219,16 @@ test("token-shaped themes preserve resolved semantic tokens and honor light base
   assert.equal(live.fg("mdHeading", "heading"), "\u001b[38;2;101;67;33mheading\u001b[39m");
   assert.equal(live.getColorMode(), "truecolor");
 
-  const inferred = parseThemeDefinition({ name: "light", colors: tokenColors() });
-  assert.equal(inferred.base, "light");
+  const inferred = parseThemeDefinition({ name: "default-base", colors: tokenColors() });
+  assert.equal(inferred.base, "dark");
 });
 
 test("token-shaped themes validate their complete token, base, variable, and export contracts", () => {
   const missing = tokenColors();
   delete (missing as Partial<Record<ThemeToken, string | number>>).syntaxOperator;
+  for (const name of ["dark", "light", "mono"]) {
+    assert.throws(() => parseThemeDefinition({ name, colors: tokenColors() }), /unique lowercase identifier/u);
+  }
   assert.throws(() => parseThemeDefinition({ name: "missing", colors: missing }), /missing required tokens: syntaxOperator/u);
   assert.throws(() => parseThemeDefinition({
     name: "unknown",

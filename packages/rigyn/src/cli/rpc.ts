@@ -23,6 +23,7 @@ import { loadRuntime, type LoadedRuntime } from "./runtime.js";
 import type { ProjectTrustResolver } from "./project-trust.js";
 import { selectStartupSession } from "./session-picker.js";
 import { createStartupSession } from "./session-startup.js";
+import { activeToolsForSelection, selectedTools } from "./tool-selection.js";
 
 const RPC_STDIN_RELAY_SOURCE = String.raw`
 const { createReadStream, writeFileSync } = require("node:fs");
@@ -244,6 +245,7 @@ async function runRpcServerOperation(
   termination: GracefulTerminationContext,
   options: RpcServerOptions,
 ): Promise<void> {
+  selectedTools(args);
   const workspace = resolve(args.workspace ?? process.cwd());
   const selected = await createStartupSession(args, workspace, args.sessionDir, {
     async selectSession(current, all) { return await selectStartupSession(current, all); },
@@ -277,6 +279,16 @@ async function runRpcServerOperation(
   const dispatcher = new RpcRuntimeDispatcher({
     runtime: owner,
     async output(value) { await writer.send(value); },
+    promptOptions() {
+      const selection = selectedTools(
+        args,
+        owner.services.runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+      );
+      return {
+        ...(selection.allowedTools === undefined ? {} : { allowedTools: selection.allowedTools }),
+        ...(selection.excludedTools === undefined ? {} : { excludedTools: selection.excludedTools }),
+      };
+    },
     async bindSession(session) {
       owner.services.runtime.runtimeExtensions.setDirectUiHandler((extensionId, signal) => bridge.context(extensionId, signal));
       owner.services.runtime.setExtensionShutdownHandler(async () => {
@@ -288,9 +300,16 @@ async function runRpcServerOperation(
         mode: "rpc",
         uiContext: bridge.context("runtime", owner.services.runtime.runtimeExtensions.lifecycleSignal()),
       });
+      const selection = selectedTools(
+        args,
+        owner.services.runtime.runtimeExtensions.tools().map((tool) => tool.definition.name),
+      );
+      session.setActiveTools(activeToolsForSelection(
+        session.getAllTools().map((tool) => tool.definition.name),
+        selection,
+      ));
     },
   });
-  await dispatcher.start();
   const handlers = new Set<Promise<void>>();
   const closeInput = (): void => {
     if (closing) return;
@@ -314,7 +333,11 @@ async function runRpcServerOperation(
     if (response !== undefined) await writer.send(response);
   };
 
+  let started = false;
   try {
+    termination.throwIfTerminated();
+    await dispatcher.start();
+    started = true;
     termination.throwIfTerminated();
     for await (const line of decodeRpcLines(input.stream)) {
       if (closing) break;
@@ -326,6 +349,7 @@ async function runRpcServerOperation(
     const failure = await input.failure();
     if (failure !== undefined) throw failure;
   } catch (error) {
+    if (!started) throw error;
     if (!closing) await writer.send(errorResponse(undefined, "parse", error)).catch(() => undefined);
   } finally {
     closeInput();

@@ -185,7 +185,7 @@ test("every published subpath performs a representative runtime operation", asyn
     height: 5,
     focused: false,
     expanded: false,
-    theme: { name: "dark", color: true, unicode: true },
+    theme: { name: "mono", color: true, unicode: true },
   });
   assert.equal(block.lines.some((line) => line.spans.some((span) => span.text.includes("ready"))), true);
 

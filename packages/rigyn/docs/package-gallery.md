@@ -17,7 +17,7 @@ Each package record contains:
 - package ID, display name, exact semantic version, and optional description;
 - either an exact npm version with SRI archive integrity or a credential-free HTTPS Git repository with a full commit ID;
 - Rigyn host-version range;
-- counts for runtime entries, tools, commands, skills, prompts, themes, and providers;
+- counts for runtime entries, tools, commands, skills, prompts, custom themes, and providers;
 - HTTPS README, optional homepage, and bounded image/video metadata;
 - publication timestamp;
 - explicit integrity and provenance status;

@@ -162,7 +162,7 @@ Raw editor replacement must preserve submission, cancellation, paste, keybinding
 
 Trusted direct extensions can compose subprocess agents through the installed Rigyn CLI. The package owns specialization, concurrency, recursion prevention, cancellation, structured output validation, process-tree cleanup, and failure isolation. See [`subprocess-workers`](../examples/subprocess-workers/README.md).
 
-## Skills, prompts, and themes
+## Skills, prompts, and custom themes
 
 Declare fixed resources in `package.json`. Use `resources_discover` only when paths depend on runtime initialization:
 
@@ -170,7 +170,7 @@ Declare fixed resources in `package.json`. Use `resources_discover` only when pa
 rigyn.on("resources_discover", () => ({
   skillPaths: ["skills"],
   promptPaths: ["prompts"],
-  themePaths: [],
+  themePaths: ["themes"],
 }));
 ```
 

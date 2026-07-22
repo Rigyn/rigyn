@@ -1,5 +1,6 @@
 import {
-  existsSync,
+  chmodSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
@@ -207,21 +208,65 @@ export class FileSettingsStorage implements SettingsStorage {
   withLock(scope: SettingsScope, operation: (current: string | undefined) => string | undefined): void {
     const path = scope === "global" ? this.#globalPath : this.#projectPath;
     const directory = dirname(path);
-    if (!existsSync(path)) {
+    const directoryStats = () => {
+      let stats;
+      try {
+        stats = lstatSync(directory);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+        throw error;
+      }
+      if (!stats.isDirectory() || stats.isSymbolicLink()) {
+        throw new Error(`Settings directory must be a directory and cannot be a symbolic link: ${directory}`);
+      }
+      return stats;
+    };
+    const readCurrent = (): string | undefined => {
+      directoryStats();
+      let stats;
+      try {
+        stats = lstatSync(path);
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+        throw error;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(`Settings path must be a regular file and cannot be a symbolic link: ${path}`);
+      }
+      return readFileSync(path, "utf8");
+    };
+    const writeCurrent = (contents: string): void => {
+      readCurrent();
+      writeFileSync(path, contents, { encoding: "utf8", mode: 0o600 });
+      chmodSync(path, 0o600);
+    };
+    if (readCurrent() === undefined) {
       const initial = operation(undefined);
       if (initial === undefined) return;
       mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const parent = directoryStats();
+      if (parent === undefined) throw new Error(`Settings directory was not created: ${directory}`);
       withFileLockSync(path, () => {
-        const next = existsSync(path) ? operation(readFileSync(path, "utf8")) : initial;
-        if (next !== undefined) writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
+        const lockedParent = directoryStats();
+        if (lockedParent === undefined || lockedParent.dev !== parent.dev || lockedParent.ino !== parent.ino) {
+          throw new Error("Settings directory changed while acquiring its file lock");
+        }
+        const current = readCurrent();
+        const next = current === undefined ? initial : operation(current);
+        if (next !== undefined) writeCurrent(next);
       });
       return;
     }
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const parent = directoryStats();
+    if (parent === undefined) throw new Error(`Settings directory disappeared: ${directory}`);
     withFileLockSync(path, () => {
-      const current = existsSync(path) ? readFileSync(path, "utf8") : undefined;
+      const lockedParent = directoryStats();
+      if (lockedParent === undefined || lockedParent.dev !== parent.dev || lockedParent.ino !== parent.ino) {
+        throw new Error("Settings directory changed while acquiring its file lock");
+      }
+      const current = readCurrent();
       const next = operation(current);
-      if (next !== undefined) writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
+      if (next !== undefined) writeCurrent(next);
     });
   }
 }

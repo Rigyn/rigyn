@@ -29,7 +29,7 @@ Startup resolves platform paths and canonicalizes the workspace before loading a
 4. network transport and proxy settings;
 5. provider adapters and auth bindings;
 6. installed and loose extensions;
-7. skills, prompts, themes, and instruction roots;
+7. skills, prompts, custom themes, and instruction roots;
 8. tool registrations and extension listeners.
 
 `/reload` first emits `session_shutdown` to the active generation, then builds and validates its replacement. The resource pointer changes only after preparation succeeds, and the prior generation is then disposed. A failed replacement is disposed and the previous generation receives `session_start` again. The `SessionManager` object and active JSONL file remain stable across a resource-only reload.
@@ -80,7 +80,7 @@ Authentication is separate from adapters. A provider binding maps a provider ID 
 
 ## Tools and processes
 
-The built-in action space is intentionally small. `read`, `write`, `edit`, and `bash` are active by default; `grep`, `find`, and `ls` are available when requested. Runtime extensions use the same tool contract.
+The built-in action space is intentionally small. `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` are active by default across the CLI, RPC, and direct SDK. Runtime extensions use the same tool contract.
 
 The process runner spawns directly without a shell wrapper unless the tool itself requests the configured shell. It owns timeouts, cancellation, process-tree termination, ordered output callbacks, byte limits, and secret redaction. Large output returns a bounded tail and a path to a private local artifact. Artifact files use an owner-only directory and `0600` mode, are capped at 64 MiB each, and are pruned by age, count, and aggregate size whenever the shell tool starts. The result explicitly reports when the safety cap truncates the artifact.
 
@@ -94,13 +94,13 @@ Complete lines are the crash boundary. An unterminated final fragment is ignored
 
 ## Extensions and packages
 
-Package metadata contributes direct factory files, skills, prompts, and themes. Runtime activation is staged and deterministic. Direct factories can register tools, commands, shortcuts, flags, providers, UI renderers, events, and durable extension state.
+Package metadata contributes direct factory files, skills, prompts, and custom themes. Runtime activation is staged and deterministic. Direct factories can register tools, commands, shortcuts, flags, providers, UI renderers, events, and durable extension state.
 
 The package manager accepts local, npm, and Git sources. It bounds downloads and extraction, validates manifests and paths, records provenance, and atomically swaps staged installs. Project packages are trust-gated. A trusted `.rigyn/packages.json` declaration resolves only through an intentional update into an immutable `.rigyn/packages.lock.json`; startup reconciliation consumes exact locked versions, revisions, and digests without following moving sources. The declarative installed set is privately staged and swapped as one recoverable transaction, with lifecycle scripts disabled and declaration filters applied deterministically.
 
 ## TUI
 
-The terminal renderer owns an inline transcript, editor, overlay stack, pickers, status line, widgets, notifications, and structural tool/session blocks. Components render semantic roles that themes map to terminal styles.
+The terminal renderer owns an inline transcript, editor, overlay stack, pickers, status line, widgets, notifications, and structural tool/session blocks. Components render semantic roles through the built-in monochrome palette or the selected discovered custom theme.
 
 Input decoding handles bracketed paste, wide Unicode, mouse-free navigation, queued messages, image paste, external editor handoff, and resize. Slow work is asynchronous; the editor remains responsive while model catalogs and streams update.
 

@@ -58,7 +58,7 @@ export function validateMaintainedCatalog(models) {
     const key = modelKey(model);
     if (keys.has(key)) throw new Error(`Rigyn's maintained catalog contains a duplicate: ${key}`);
     keys.add(key);
-    if (model.metadataSource !== "maintained") throw new Error(`Rigyn's maintained catalog has invalid provenance at ${key}`);
+    if (model.metadataSource !== "maintained") throw new Error(`Rigyn's maintained catalog has an invalid metadata source at ${key}`);
     if (providerDescriptor(model.provider) === undefined) throw new Error(`Rigyn's maintained catalog uses an unknown provider: ${model.provider}`);
   }
 }

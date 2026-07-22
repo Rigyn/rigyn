@@ -2,9 +2,12 @@
 
 Rigyn is a local-first coding agent for the terminal. Launch it inside a project, describe an outcome, and the selected model can inspect files, run commands, and edit code through bounded tools. Sessions, branches, model choices, usage, and extension state are stored locally so work can continue in a later terminal.
 
-Rigyn supports multiple model providers and their available authentication methods, including OAuth where the provider offers it. It includes an interactive TUI, one-shot and JSON modes, resumable append-only JSONL sessions, context compaction, image input, skills, prompt templates, themes, and trusted TypeScript extension packages. Extensions run inside the active harness and can add tools, commands, providers, authentication, state, events, and UI.
+Rigyn supports multiple model providers and their available authentication methods, including OAuth where the provider offers it. It includes an interactive TUI with one built-in monochrome theme, one-shot and JSON modes, resumable append-only JSONL sessions, context compaction, image input, skills, prompt templates, custom themes, and trusted TypeScript extension packages. Extensions run inside the active harness and can add tools, commands, providers, authentication, state, events, and UI.
 
 Runtime extensions and `bash` execute with your operating-system user privileges. Review executable packages before enabling them; Rigyn is not a process sandbox.
+
+The `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` tools are active by default across interactive, print,
+JSON, RPC, and direct SDK sessions.
 
 ## Install and start
 
@@ -47,6 +50,11 @@ Useful commands include `/settings`, `/model`, `/scoped-models`, `/new`, `/resum
 ```sh
 rigyn -p "Review this project and explain its architecture"
 ```
+
+Personal instructions load first from `~/.rigyn/agent/AGENTS.md` (or
+`$RIGYN_CODING_AGENT_DIR/AGENTS.md`), then from project `AGENTS.md` files in ancestor order. Run
+`rigyn config path` to locate user settings, `rigyn config edit` to edit them safely, or add
+`--scope project` for the trusted workspace settings file.
 
 Read the complete product guide for providers, sessions, configuration, terminal controls, extensions, embedding,
 RPC, security boundaries, and troubleshooting. The [documentation map](packages/rigyn/docs/README.md) links every

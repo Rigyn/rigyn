@@ -17,7 +17,7 @@ Every listener belongs to one activation generation. A failed activation commits
 | Event | Purpose | Allowed result |
 | --- | --- | --- |
 | `project_trust` | Ask whether a protected project may load. It receives only the target path and a limited confirmation context. | `{ trusted: "yes" | "no" | "undecided", remember? }` |
-| `resources_discover` | Add package-relative skill, prompt, or theme paths at startup or reload. | `{ skillPaths?, promptPaths?, themePaths? }` |
+| `resources_discover` | Add package-relative skill, prompt, or custom-theme paths at startup or reload. | `{ skillPaths?, promptPaths?, themePaths? }` |
 | `session_start` | Observe startup, reload, new, resume, or fork. | none |
 | `session_info_changed` | Observe a committed session-name change. | none |
 | `session_before_switch` | Guard a new or resume transition. | `{ cancel?: boolean }` |

@@ -72,7 +72,7 @@ test("model picker uses verified catalogs and falls back to an exact deployment 
 
 test("extension command UI scopes resources and forwards bounded interactions", async () => {
   const calls: Array<{ name: string; values: unknown[] }> = [];
-  let theme = "dark";
+  let theme = "mono";
   let editorText = "draft";
   const record = (name: string, ...values: unknown[]): void => { calls.push({ name, values }); };
   const terminal = {
@@ -85,7 +85,7 @@ test("extension command UI scopes resources and forwards bounded interactions", 
     setExtensionWorkingVisible: (...values: unknown[]) => record("working-visible", ...values),
     setTitle: (...values: unknown[]) => record("title", ...values),
     selectedThemeName: () => theme,
-    themeNames: () => ["dark", "light"],
+    themeNames: () => ["mono", "ocean"],
     setTheme: (value: string) => { theme = value; record("theme", value); },
     choose: async <T>(_prompt: string, choices: Array<{ value: T }>, signal?: AbortSignal): Promise<T> => {
       signal?.throwIfAborted();
@@ -110,8 +110,8 @@ test("extension command UI scopes resources and forwards bounded interactions", 
   ui.setWorkingMessage("working");
   ui.setWorkingVisible(true);
   ui.setTitle("Fixture title");
-  assert.deepEqual(await ui.getTheme(), { name: "dark", available: ["dark", "light"] });
-  assert.deepEqual(await ui.setTheme("light"), { name: "light", available: ["dark", "light"] });
+  assert.deepEqual(await ui.getTheme(), { name: "mono", available: ["mono", "ocean"] });
+  assert.deepEqual(await ui.setTheme("ocean"), { name: "ocean", available: ["mono", "ocean"] });
   assert.equal(await ui.select("Pick", [{ label: "One", value: 1 }]), 1);
   assert.equal(await ui.confirm("Confirm", "Proceed"), true);
   assert.equal(await ui.input("Input", "placeholder"), "typed input");
@@ -137,8 +137,8 @@ test("interactive extension UI binds every host surface across startup, reload, 
   const calls: Array<{ name: string; values: unknown[] }> = [];
   const terminal = new Proxy({}, {
     get(_target, property) {
-      if (property === "selectedThemeName") return () => "dark";
-      if (property === "themeNames") return () => ["dark"];
+      if (property === "selectedThemeName") return () => "mono";
+      if (property === "themeNames") return () => ["mono"];
       if (property === "getToolOutputExpanded") return () => false;
       if (property === "actionsForKey") return () => [];
       return (...values: unknown[]) => { calls.push({ name: String(property), values }); };
@@ -184,7 +184,7 @@ test("interactive extension UI binds every host surface across startup, reload, 
       autocompleteMaxVisible: 10,
       terminal: { showImages: true, imageWidthCells: 40, clearOnShrink: true },
       markdown: { codeBlockIndent: "" },
-      theme: "dark",
+      theme: "mono",
     }),
     runtimeExtensions: fixture.host,
     extensions: {

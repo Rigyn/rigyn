@@ -89,7 +89,6 @@ import {
 import { resolveRuntimeShortcuts } from "./extension-shortcuts.js";
 import { installInteractiveEmergencyRecovery } from "./interactive-emergency.js";
 import { resolveRequestedModel } from "./model-resolution.js";
-import { ThemeHotReloader } from "./theme-hot-reload.js";
 import { combinePromptImages, expandPromptReferences } from "./prompt-input.js";
 import { parseArgs, type Args } from "./args.js";
 import {
@@ -109,12 +108,15 @@ import { runProductInstallAction } from "./product-install.js";
 import { runSessionsCommand } from "./sessions-command.js";
 import { createStartupSession } from "./session-startup.js";
 import { selectStartupSession } from "./session-picker.js";
+import { ThemeHotReloader } from "./theme-hot-reload.js";
 import { applyRuntimeExtensionFlags } from "./extension-flags.js";
 import { agentPaths, expandPath } from "./paths.js";
 import { ProjectTrustResolver } from "./project-trust.js";
 import { RIGYN_VERSION } from "../version.js";
+import { defaultTools, selectedTools } from "./tool-selection.js";
+import { runSettingsConfigCommand } from "./config-settings-command.js";
 
-const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
+export { defaultTools, selectedTools };
 
 class ScopedTrustPrompter implements TerminalPrompter {
   async question(prompt: string, signal?: AbortSignal): Promise<string> {
@@ -156,8 +158,6 @@ async function createInvocationTrustResolver(options: InvocationTrustOptions): P
     }),
   });
 }
-
-export function defaultTools(): string[] { return [...DEFAULT_TOOLS]; }
 
 export interface ModelSelection {
   provider: ProviderId;
@@ -402,21 +402,6 @@ export async function refreshModelPicker(
     else terminal.setPickerItems("model", patterns.length === 0 ? ordered : cycleItems);
     return discovered;
   } finally { terminal.setModelPickerLoading?.(false); }
-}
-
-interface ToolSelection { allowedTools?: string[]; excludedTools?: string[]; noBuiltinTools?: boolean }
-
-export function selectedTools(argumentsValue: Args, extensionToolNames: readonly string[] = []): ToolSelection {
-  const noTools = argumentsValue.noTools === true;
-  const noBuiltins = argumentsValue.noBuiltinTools === true;
-  const configured = argumentsValue.tools;
-  if ([noTools, noBuiltins, configured !== undefined].filter(Boolean).length > 1) {
-    throw new Error("--tools, --no-tools, and --no-builtin-tools are mutually exclusive");
-  }
-  const excludedTools = argumentsValue.excludeTools;
-  if (noTools) return { allowedTools: [], ...(excludedTools === undefined ? {} : { excludedTools }) };
-  if (noBuiltins) return { noBuiltinTools: true, ...(excludedTools === undefined ? {} : { excludedTools }) };
-  return { allowedTools: configured ?? [...new Set([...DEFAULT_TOOLS, ...extensionToolNames])], ...(excludedTools === undefined ? {} : { excludedTools }) };
 }
 
 export { runShellShortcut, shellShortcutEnvironment };
@@ -943,7 +928,7 @@ export class InteractiveExtensionUiBinder {
     });
     const themes = runtime.extensions.bundle().themes;
     terminal.setCustomThemes(themes.map((theme) => theme.definition));
-    const theme = runtime.settings.getTheme();
+    const theme = runtime.settings.getThemeSetting();
     if (theme !== undefined) {
       try { terminal.setTheme(theme); }
       catch { terminal.notify(`Configured theme ${theme} is unavailable`, "warning"); }
@@ -975,7 +960,6 @@ export class InteractiveExtensionUiBinder {
       signal: AbortSignal;
       context: ReturnType<typeof createInteractiveDirectUiContext>;
     }>();
-    const directThemes = runtime.extensions.bundle().themes;
     host.setDirectUiHandler((extensionId, extensionSignal) => {
       const existing = directUi.get(extensionId);
       if (existing?.signal === extensionSignal) return existing.context;
@@ -986,7 +970,7 @@ export class InteractiveExtensionUiBinder {
         extensionSignal,
         {
           settings: runtime.settings,
-          themePath: (name) => directThemes.find((theme) => theme.name === name)?.sourcePath,
+          themePath: (name) => themes.find((theme) => theme.name === name)?.sourcePath,
         },
       );
       directUi.set(extensionId, { signal: extensionSignal, context: created });
@@ -1302,11 +1286,9 @@ async function chatCommandOperation(
   let resolveExit!: () => void;
   const exited = new Promise<void>((resolveValue) => { resolveExit = resolveValue; });
   let actionHandler: (action: TuiAction) => void = () => undefined;
-  const configuredTheme = runtime.settings.getThemeSetting();
   const terminal = new TuiController({
     onAction: (action) => actionHandler(action),
     keybindings,
-    ...(configuredTheme === undefined ? {} : { theme: configuredTheme }),
     doubleEscapeAction: runtime.settings.getDoubleEscapeAction(),
     operatorPreferences: tuiOperatorPreferences(runtime.settings),
   });
@@ -1856,9 +1838,14 @@ async function listModels(
 async function configCommand(
   argumentsValue: ManagementArguments,
   projectTrustResolver?: ProjectTrustResolver,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (await runSettingsConfigCommand(argumentsValue, {
+    ...(projectTrustResolver === undefined ? {} : { projectTrustResolver }),
+    ...(signal === undefined ? {} : { signal }),
+  })) return;
   const action = argumentsValue.positionals[0];
-  if (action !== undefined) throw new Error("config does not accept an action; edit settings.json directly or run config to select package resources");
+  if (action !== undefined) throw new Error("config accepts path or edit; run config without an action to select package resources");
   await runPackageConfigCommand(
     argumentsValue,
     projectTrustResolver === undefined ? {} : { projectTrustResolver },
@@ -1918,7 +1905,11 @@ export async function main(argv = process.argv.slice(2), options: MainOptions = 
             termination.throwIfTerminated();
           });
         } else {
-          await configCommand(management, projectTrustResolver);
+          await withGracefulTermination(async (termination) => {
+            termination.throwIfTerminated();
+            await configCommand(management, projectTrustResolver, termination.signal);
+            termination.throwIfTerminated();
+          });
         }
       } finally {
         await projectTrustResolver.close();

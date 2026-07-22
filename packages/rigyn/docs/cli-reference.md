@@ -40,9 +40,9 @@ rigyn [OPTIONS] [@FILES...] [MESSAGES...]
 
 ## Tools and resources
 
-`--tools LIST` is an allowlist. `--no-tools` disables every tool, while `--no-builtin-tools` keeps extension tools and `--exclude-tools LIST` removes selected names. Repeat `--extension`, `--skill`, `--prompt-template`, or `--theme` to add invocation-only resources.
+The seven built-ins—`read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`—are active by default in interactive, print, JSON, and RPC modes. `--tools LIST` is an allowlist. `--no-tools` disables every tool, while `--no-builtin-tools` keeps extension tools and `--exclude-tools LIST` removes selected names. Repeat `--extension`, `--skill`, `--prompt-template`, or `--theme` to add invocation-only resources.
 
-Automatic discovery can be disabled independently with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes`. `--no-context-files` disables project instruction discovery. `--system-prompt TEXT` replaces the built-in prompt; `--append-system-prompt TEXT` adds to it.
+Automatic discovery can be disabled independently with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, and `--no-themes`. `--no-context-files` disables global and project instruction discovery. `--system-prompt TEXT` replaces the built-in prompt; `--append-system-prompt TEXT` adds to it.
 
 `--approve` trusts project-local resources for this invocation and `--no-approve` ignores them. Neither option grants an operating-system sandbox.
 
@@ -55,6 +55,8 @@ Automatic discovery can be disabled independently with `--no-extensions`, `--no-
 | `update [SOURCE] [--all]` | Update installed packages |
 | `list [-l] [--json]` | List package state |
 | `config [-l]` | Select enabled package resources |
+| `config path [--scope user\|project]` | Print the exact settings path without creating it |
+| `config edit [--scope user\|project]` | Transactionally edit user or trusted-project settings |
 | `packages check` | Validate trusted project declarations and locks |
 | `packages reconcile` | Restore the exact immutable locked package set without resolving moving sources |
 | `packages update ID...` | Intentionally resolve selected declared packages, rewrite the lock, and reconcile |

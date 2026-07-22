@@ -333,6 +333,13 @@ export class InteractiveMode {
   async #bindSession(start: boolean): Promise<void> {
     this.#unbindSession();
     const session = this.#runtime.session;
+    const themes = session.resourceLoader.getThemes().themes;
+    this.#terminal.setCustomThemes(themes.map((theme) => theme.definition));
+    const configuredTheme = session.settingsManager.getThemeSetting();
+    if (configuredTheme !== undefined) {
+      try { this.#terminal.setTheme(configuredTheme); }
+      catch { this.#terminal.notify(`Configured theme ${configuredTheme} is unavailable`, "warning"); }
+    }
     this.#uiBinding = bindInteractiveRuntimeUi(
       this.#terminal,
       session.extensionRunner,

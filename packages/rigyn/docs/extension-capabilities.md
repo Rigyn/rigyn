@@ -26,7 +26,7 @@ The twenty-two examples are intentionally focused:
 - `runtime-catalog`: active tools, model selection, discovery, and user-message delivery;
 - `session-lifecycle`: session guards, compaction, tree events, and navigation;
 - `provider-catalog`: custom providers, managed OAuth callbacks, and refreshed catalogs;
-- `terminal-workbench`: terminal input, editor helpers, themes, and tool expansion;
+- `terminal-workbench`: terminal input, editor helpers, custom themes, and tool expansion;
 - `project-trust`: invocation-scoped interactive trust decisions.
 
 Host names are `tui`, `print`, `json`, `rpc`, and `embedding`. UI-only behavior is marked only for `tui`; registrations and session/process contracts are available wherever the host binds their required context. A package must still provide safe headless behavior when a dialog or visual component is unavailable.

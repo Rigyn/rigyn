@@ -40,7 +40,7 @@ The factory accepts:
 
 When no `resourceLoader` is supplied, the factory creates a `DefaultResourceLoader` and reloads it once. A caller-supplied loader must already be loaded; the factory consumes it without reloading or replacing it.
 
-The default active built-ins are `read`, `bash`, `edit`, and `write`. Custom and extension tools remain available by default. An explicit `tools` list is an allowlist, and `excludeTools` applies afterward. `noTools: "all"` starts without tools; `noTools: "builtin"` suppresses the default built-ins while retaining custom and extension tools.
+The default active built-ins are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. Custom and extension tools remain available by default. An explicit `tools` list is an allowlist, and `excludeTools` applies afterward. `noTools: "all"` starts without tools; `noTools: "builtin"` suppresses the default built-ins while retaining custom and extension tools.
 
 The return value is:
 

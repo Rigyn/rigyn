@@ -12,6 +12,7 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Added public assistant-call retry helpers, kernel compaction and branch-summary retry policy/events, retained-tail session checkpoints, and a configurable default stream function.
 - Added a deterministic, commit-exact source release archive with checksums and a clean-install rebuild gate before GitHub release publication.
 - Added checksum-verified one-line GitHub installers for Linux, macOS, and Windows.
+- Added exact-path and transactional external-editor commands for user and trusted-project settings.
 
 ### Changed
 
@@ -19,6 +20,8 @@ Release-impacting changes are recorded here. The version policy and release proc
 - Moved public installation, verified self-update, and release publication to versioned GitHub Release assets.
 - Deferred live model discovery until after the interactive terminal is visible while retaining cached model hydration at startup and resource-only `/reload` behavior.
 - Restored the shared `Ctrl+O` tool-output expansion binding and made source installation build and verify the matching macOS or Windows terminal helper.
+- Activated `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` by default across CLI, RPC, and direct SDK sessions.
+- Made `mono` the sole bundled and default TUI theme while retaining discovered custom-theme selection.
 
 ### Fixed
 

@@ -248,7 +248,7 @@ test("trusted terminal state, protocol queries, input draining, and ownership co
   const controller = new TuiController({
     input,
     output,
-    theme: "dark",
+    theme: "mono",
     handleSignals: false,
     environment: { TERM: "xterm-256color", LANG: "en_US.UTF-8", KITTY_WINDOW_ID: "1" },
   });

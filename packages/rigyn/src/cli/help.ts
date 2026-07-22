@@ -1,6 +1,6 @@
 import { RIGYN_VERSION } from "../version.js";
 
-const header = `Rigyn ${RIGYN_VERSION} — coding agent with read, bash, edit, and write tools`;
+const header = `Rigyn ${RIGYN_VERSION} — coding agent with read, bash, edit, write, grep, find, and ls tools`;
 
 const GLOBAL = `${header}
 
@@ -19,6 +19,10 @@ Commands:
   rigyn sessions doctor          Validate the canonical JSONL session files
   rigyn diagnostics [FILE]       Create a local redacted support bundle
   rigyn config [-l]              Configure package resources
+  rigyn config path [--scope user|project]
+                                 Print the exact settings path
+  rigyn config edit [--scope user|project]
+                                 Safely edit user or trusted-project settings
   rigyn self-install             Install a self-contained user copy
   rigyn self-update              Update the self-contained user copy
   rigyn uninstall --yes          Remove the product and saved state
@@ -59,7 +63,7 @@ Tools and resources:
                               Append text to the active system prompt
       --theme PATH          Load a theme file or directory; repeatable
       --no-themes           Disable automatic theme discovery
-  -nc, --no-context-files   Disable project instruction-file discovery
+  -nc, --no-context-files   Disable global and project instruction-file discovery
 
 Other:
   -p, --print               Process messages non-interactively and exit
@@ -191,10 +195,14 @@ Dependency lifecycle scripts remain disabled unless --allow-scripts is provided.
 
 Usage:
   rigyn config [-l]
+  rigyn config path [--scope user|project] [--json]
+  rigyn config edit [--scope user|project]
 
-Opens package resource configuration for user or project scope. Persistent settings
-are sparse strict JSON in ~/.rigyn/agent/settings.json and, for trusted projects,
-WORKSPACE/.rigyn/settings.json.
+Without an action, opens package resource configuration for user or project scope.
+Path reports the exact settings file without creating it. Edit opens the selected
+file externally, validates a top-level JSON object, and commits only if the file did
+not change concurrently. Project edits require workspace trust. Persistent settings
+live in ~/.rigyn/agent/settings.json and WORKSPACE/.rigyn/settings.json.
 `,
   diagnostics: `${header}
 

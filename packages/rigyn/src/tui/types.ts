@@ -8,7 +8,7 @@ import type { Keybindings } from "./keybindings.js";
 import type { TerminalImagePlacement, TerminalImageProtocol, TranscriptImage } from "./terminal-image.js";
 
 export type TuiMode = "full" | "classic" | "accessible";
-export type BuiltinThemeName = "dark" | "light" | "mono";
+export type BuiltinThemeName = "mono";
 export type ThemeName = BuiltinThemeName | (string & {});
 export type PickerKind = "command" | "model" | "provider" | "session" | "file" | "generic";
 export type TuiPersistentComponentSlot =

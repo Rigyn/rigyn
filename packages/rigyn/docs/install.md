@@ -152,7 +152,7 @@ Restart the tmux server after changing terminal capabilities. If shortcuts arriv
 node -p "process.version + ' ' + process.platform + ' ' + process.arch"
 rigyn --version
 rigyn --help
-rigyn config
+rigyn config path
 rigyn diagnostics
 rigyn extensions doctor
 ```

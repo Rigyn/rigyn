@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,6 +144,54 @@ test("legacy settings migrate in memory while malformed files remain untouched",
   await invalid.flush();
   assert.equal(await readFile(path, "utf8"), "{broken");
   assert.equal(invalid.drainErrors().length > 0, true);
+});
+
+test("file settings secure existing permissions and reject symbolic-link storage", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-settings-file-safety-"));
+  const agentDirectory = join(root, "agent");
+  const path = join(agentDirectory, "settings.json");
+  await mkdir(agentDirectory);
+  await writeFile(path, '{"theme":"first"}\n', { mode: 0o644 });
+
+  const manager = SettingsManager.create(join(root, "project"), agentDirectory);
+  manager.setTheme("mono");
+  await manager.flush();
+  if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+  if (process.platform !== "win32") {
+    const target = join(root, "auth-sentinel.json");
+    await writeFile(target, '{"token":"secret"}\n', { mode: 0o600 });
+    await rm(path);
+    await symlink(target, path);
+    const linked = SettingsManager.create(join(root, "project"), agentDirectory);
+    assert.equal(linked.drainErrors().some((entry) => /symbolic link/u.test(entry.error.message)), true);
+    linked.setTheme("mono");
+    await linked.flush();
+    assert.equal(await readFile(target, "utf8"), '{"token":"secret"}\n');
+  }
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+});
+
+test("file settings reject a symbolic-link project settings directory", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("directory symlink creation is not guaranteed on Windows runners");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "rigyn-settings-directory-symlink-"));
+  const workspace = join(root, "workspace");
+  const agentDirectory = join(root, "agent");
+  const outside = join(root, "outside");
+  await mkdir(workspace);
+  await mkdir(outside);
+  await writeFile(join(outside, "settings.json"), '{"token":"secret"}\n', { mode: 0o600 });
+  await symlink(outside, join(workspace, ".rigyn"));
+
+  const manager = SettingsManager.create(workspace, agentDirectory);
+  assert.equal(manager.drainErrors().some((entry) => /Settings directory.*symbolic link/u.test(entry.error.message)), true);
+  manager.updateProjectSettings({ theme: "mono" });
+  await manager.flush();
+  assert.equal(await readFile(join(outside, "settings.json"), "utf8"), '{"token":"secret"}\n');
+  context.after(async () => await rm(root, { recursive: true, force: true }));
 });
 
 test("untrusted projects are ignored and cannot be written", async () => {

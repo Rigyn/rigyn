@@ -223,6 +223,35 @@ test("RPC prompt responds only after successful preflight and emits raw agent ev
   await dispatcher.close();
 });
 
+test("RPC prompt applies the current tool policy as an immutable per-run ceiling", async () => {
+  const value = fixture();
+  let allowedTools = ["read"];
+  const dispatcher = new RpcRuntimeDispatcher({
+    runtime: value.runtime,
+    output(record) { value.outputs.push(record); },
+    promptOptions(session) {
+      assert.equal(session, value.runtime.session);
+      return { allowedTools: [...allowedTools], excludedTools: ["bash"] };
+    },
+  });
+  await dispatcher.start();
+
+  await dispatcher.dispatch({ id: "policy_1", type: "prompt", message: "first" });
+  await turn();
+  allowedTools = ["read", "grep"];
+  await dispatcher.dispatch({ id: "policy_2", type: "prompt", message: "second" });
+  await turn();
+
+  assert.deepEqual(value.prompts.map(({ options }) => ({
+    allowedTools: options.allowedTools,
+    excludedTools: options.excludedTools,
+  })), [
+    { allowedTools: ["read"], excludedTools: ["bash"] },
+    { allowedTools: ["read", "grep"], excludedTools: ["bash"] },
+  ]);
+  await dispatcher.close();
+});
+
 test("RPC forwards branch-summary retry lifecycle events without reshaping them", async () => {
   const value = fixture();
   const dispatcher = new RpcRuntimeDispatcher({ runtime: value.runtime, output(record) { value.outputs.push(record); } });

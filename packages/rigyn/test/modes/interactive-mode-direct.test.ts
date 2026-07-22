@@ -31,13 +31,32 @@ test("interactive mode initializes once, binds extensions, accepts native input,
   const cwd = await mkdtemp(join(tmpdir(), "rigyn-interactive-mode-"));
   try {
     const extensionRuntime = createExtensionRuntime();
-    ensureExtensionRuntimeHost(extensionRuntime, cwd);
+    const extensionHost = ensureExtensionRuntimeHost(extensionRuntime, cwd);
+    const themeChanges: unknown[] = [];
+    Object.defineProperty(extensionHost, "dispatch", {
+      configurable: true,
+      value: async (event: string, value: unknown) => {
+        if (event === "theme_change") themeChanges.push(value);
+      },
+    });
     const extensionsResult = { extensions: [], errors: [], runtime: extensionRuntime };
+    const theme = {
+      name: "ocean",
+      extensionId: "theme",
+      sourcePath: join(cwd, "ocean.json"),
+      sha256: "0".repeat(64),
+      definition: {
+        schemaVersion: 1 as const,
+        name: "ocean",
+        base: "dark" as const,
+        styles: { accent: { foreground: "#00aaff" as const } },
+      },
+    };
     const loader: ResourceLoader = {
       getExtensions: () => extensionsResult,
       getSkills: () => ({ skills: [], diagnostics: [] }),
       getPrompts: () => ({ prompts: [], diagnostics: [] }),
-      getThemes: () => ({ themes: [], diagnostics: [] }),
+      getThemes: () => ({ themes: [theme], diagnostics: [] }),
       getAgentsFiles: () => ({ agentsFiles: [] }),
       getSystemPrompt: () => undefined,
       getAppendSystemPrompt: () => [],
@@ -46,7 +65,7 @@ test("interactive mode initializes once, binds extensions, accepts native input,
     };
     const models = new ModelRegistry(createModels());
     await models.refresh({ allowNetwork: false });
-    const settings = SettingsManager.inMemory();
+    const settings = SettingsManager.inMemory({ theme: "ocean" });
     const session = await AgentSession.create({
       sessionManager: SessionManager.inMemory(cwd),
       providers: new ProviderRegistry(),
@@ -83,6 +102,16 @@ test("interactive mode initializes once, binds extensions, accepts native input,
     await mode.init();
     await mode.init();
     assert.equal(starts, 1);
+    assert.equal(terminal.selectedThemeName(), "ocean");
+    assert.deepEqual(terminal.themeNames(), ["mono", "ocean"]);
+    terminal.setTheme("mono");
+    await waitFor(() => themeChanges.length === 1, "embedded theme change was not forwarded to extensions");
+    assert.deepEqual(themeChanges[0], {
+      previous: "ocean",
+      current: "mono",
+      available: ["mono", "ocean"],
+      reason: "selection",
+    });
     assert.equal(settings.getLastChangelogVersion(), RIGYN_VERSION);
     const running = mode.run();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -169,6 +198,19 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
     output.rows = 30;
     output.isTTY = false;
     const terminal = new TuiController({ input, output, mode: "accessible", handleSignals: false });
+    let activeThemeListeners = 0;
+    const onThemeChange = terminal.onThemeChange.bind(terminal);
+    terminal.onThemeChange = (listener, signal) => {
+      activeThemeListeners += 1;
+      const unsubscribe = onThemeChange(listener, signal);
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        activeThemeListeners -= 1;
+        unsubscribe();
+      };
+    };
     const reloadPresentation: Array<[string | undefined, string | undefined]> = [];
     const setInputBlocked = terminal.setInputBlocked.bind(terminal);
     terminal.setInputBlocked = (message?: string, label?: string): void => {
@@ -178,6 +220,7 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
     const mode = new InteractiveMode(runtime, { terminal });
 
     await mode.init();
+    assert.equal(activeThemeListeners, 1);
     assert.deepEqual(terminal.keybindingsManager().getKeys("app.model.select"), ["alt+k"]);
     await writeFile(join(agentDir, "keybindings.json"), JSON.stringify({ "app.model.select": "alt+j" }));
     const running = mode.run();
@@ -192,6 +235,7 @@ test("interactive mode loads persisted keybindings and refreshes them on reload"
       "interactive reload did not refresh persisted keybindings",
     );
     await waitFor(() => reloadPresentation.at(-1)?.[0] === undefined, "interactive reload did not restore terminal input");
+    assert.equal(activeThemeListeners, 1);
     assert.match(reloadPresentation[0]?.[0] ?? "", /keybindings, extensions, skills, prompts, themes, and context files/u);
     assert.equal(reloadPresentation[0]?.[1], "reload");
     assert.deepEqual(reloadPresentation.at(-1), [undefined, undefined]);

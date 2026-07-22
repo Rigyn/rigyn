@@ -164,6 +164,14 @@ export function bindInteractiveRuntimeUi(
   host.setNativeUiHandler((extensionId, extensionSignal) => createNativeUiHost(terminal, extensionId, extensionSignal));
   host.setUnsafeTerminalHandler((extensionId, extensionSignal) => createUnsafeTerminalHost(terminal, extensionId, extensionSignal));
   host.setInteractiveUiHandler((extensionId, extensionSignal) => commandUi(terminal, extensionId, extensionSignal));
+  const unsubscribeThemeChange = terminal.onThemeChange((change) => {
+    void host.dispatch("theme_change", {
+      previous: change.previous,
+      current: change.current,
+      available: [...change.available],
+      reason: change.reason,
+    }).catch(() => undefined);
+  }, signal);
   const direct = new Map<string, {
     signal: AbortSignal;
     context: ReturnType<typeof createInteractiveDirectUiContext>;
@@ -188,6 +196,7 @@ export function bindInteractiveRuntimeUi(
   });
   const dispose = (): void => {
     unsubscribe();
+    unsubscribeThemeChange();
     direct.clear();
   };
   signal.addEventListener("abort", dispose, { once: true });

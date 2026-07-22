@@ -2,6 +2,7 @@ import type { SettingsManager, ThinkingLevel, TransportSetting } from "../core/s
 import type { AgentSession } from "../service/agent-session.js";
 import type { TuiController } from "../tui/controller.js";
 import type { TuiOperatorPreferences, TuiSettingItem } from "../tui/types.js";
+import { normalizeThemeSetting } from "../tui/theme.js";
 
 const BOOLEAN_VALUES = ["on", "off"] as const;
 
@@ -41,7 +42,7 @@ export function interactiveSettingItems(
     "autoCompactionEnabled" | "steeringMode" | "followUpMode" | "thinkingLevel" | "getAvailableThinkingLevels">,
   themes: readonly string[],
 ): TuiSettingItem[] {
-  const selectedTheme = settings.getThemeSetting() ?? "dark";
+  const selectedTheme = normalizeThemeSetting(settings.getThemeSetting() ?? "mono");
   const thinkingLevels = [...new Set([session.thinkingLevel, ...session.getAvailableThinkingLevels()])];
   const availableThemes = [...new Set([selectedTheme, ...themes])].sort((left, right) => left.localeCompare(right));
   return [
@@ -55,7 +56,7 @@ export function interactiveSettingItems(
     { id: "follow-up-mode", label: "Follow-up queue", description: "How queued follow-up messages are delivered", value: session.followUpMode, values: ["one-at-a-time", "all"] },
     { id: "transport", label: "Provider transport", description: "Preferred streaming transport for compatible providers", value: settings.getTransport(), values: ["auto", "sse", "websocket", "websocket-cached"] },
     { id: "thinking-level", label: "Reasoning level", description: "Default reasoning effort for the active model", value: session.thinkingLevel, values: thinkingLevels.length === 0 ? ["off"] : thinkingLevels },
-    { id: "theme", label: "Theme", description: "Active terminal color theme", value: selectedTheme, values: availableThemes.length === 0 ? [selectedTheme] : availableThemes },
+    { id: "theme", label: "Theme", description: "Built-in monochrome or a trusted extension theme", value: selectedTheme, values: availableThemes.length === 0 ? [selectedTheme] : availableThemes },
     booleanItem("hide-thinking", "Hide reasoning blocks", "Collapse model reasoning content in the transcript", settings.getHideThinkingBlock()),
     booleanItem("cache-miss-notices", "Cache miss notices", "Show provider prompt-cache miss diagnostics", settings.getShowCacheMissNotices()),
     booleanItem("collapse-changelog", "Compact update notice", "Use a one-line startup notice after updates; /changelog stays complete", settings.getCollapseChangelog()),
@@ -106,7 +107,7 @@ export function applyInteractiveSetting(
     case "follow-up-mode": session.setFollowUpMode(value as "all" | "one-at-a-time"); return;
     case "transport": settings.setTransport(value as TransportSetting); return;
     case "thinking-level": settings.setDefaultThinkingLevel(value as ThinkingLevel); session.setThinkingLevel(value); return;
-    case "theme": settings.setTheme(value); terminal.setTheme(value); return;
+    case "theme": terminal.setTheme(value); settings.setTheme(value); return;
     case "hide-thinking": settings.setHideThinkingBlock(enabled(value)); break;
     case "cache-miss-notices": settings.setShowCacheMissNotices(enabled(value)); break;
     case "collapse-changelog": settings.setCollapseChangelog(enabled(value)); return;

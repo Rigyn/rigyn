@@ -314,11 +314,25 @@ export function parseAutomaticThemePair(value: string): AutomaticThemePair | und
   return Object.freeze({ light, dark });
 }
 
-export function resolveThemeSetting(value: string, terminal: "dark" | "light"): string {
+function bundledThemeName(value: string): string {
+  return value === "dark" || value === "light" ? "mono" : value;
+}
+
+/** Maps the retired color-theme names to Rigyn's single bundled theme. */
+export function normalizeThemeSetting(value: string): string {
   const pair = parseAutomaticThemePair(value);
+  if (pair === undefined) return bundledThemeName(value);
+  const light = bundledThemeName(pair.light);
+  const dark = bundledThemeName(pair.dark);
+  return light === dark ? light : `${light}/${dark}`;
+}
+
+export function resolveThemeSetting(value: string, terminal: "dark" | "light"): string {
+  const normalized = normalizeThemeSetting(value);
+  const pair = parseAutomaticThemePair(normalized);
   if (pair !== undefined) return terminal === "light" ? pair.light : pair.dark;
-  if (!themeName.test(value)) throw new Error("Theme must be a valid name or LIGHT/DARK pair");
-  return value;
+  if (!themeName.test(normalized)) throw new Error("Theme must be a valid name or LIGHT/DARK pair");
+  return normalized;
 }
 
 const glyphs = {
@@ -343,7 +357,33 @@ const asciiGlyphs = {
   horizontal: "-",
 };
 
-const palettes: Record<"dark" | "light", Record<ThemeRole, string>> = {
+const monochromePalette: Record<ThemeRole, string> = {
+  title: "\u001b[1;97m",
+  muted: "\u001b[38;5;245m",
+  accent: "\u001b[1;97m",
+  info: "\u001b[38;5;252m",
+  link: "\u001b[4;97m",
+  code: "\u001b[38;5;252m",
+  border: "\u001b[38;5;240m",
+  editor: "\u001b[38;5;252m",
+  editorActive: "\u001b[1;97m",
+  working: "\u001b[1;97m",
+  user: "\u001b[38;5;255m",
+  assistant: "\u001b[38;5;252m",
+  success: "\u001b[1;97m",
+  warning: "\u001b[38;5;250m",
+  error: "\u001b[1;97m",
+  selection: "\u001b[38;5;16;48;5;255m",
+  userMessage: "\u001b[38;5;255;48;5;236m",
+  toolPending: "\u001b[38;5;245;48;5;235m",
+  toolRunning: "\u001b[38;5;255;48;5;235m",
+  toolSuccess: "\u001b[38;5;252m",
+  toolError: "\u001b[38;5;255m",
+};
+
+// These palettes are inheritance bases for extension-authored themes, not
+// bundled selectable themes.
+const customBasePalettes: Record<"dark" | "light", Record<ThemeRole, string>> = {
   dark: {
     title: "\u001b[1;97m",
     muted: "\u001b[38;5;245m",
@@ -418,10 +458,10 @@ function tokenTheme(value: Record<string, unknown>): ThemeDefinition {
     throw new Error("theme $schema must be a bounded string");
   }
   if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error("theme schemaVersion must be 1");
-  if (typeof value.name !== "string" || value.name === "" || value.name.includes("/") || value.name.includes("\\")) {
-    throw new Error("theme name must be non-empty and must not contain a path separator");
+  if (typeof value.name !== "string" || !themeName.test(value.name) || value.name === "dark" || value.name === "light" || value.name === "mono") {
+    throw new Error("theme name must be a unique lowercase identifier");
   }
-  const base = value.base ?? (value.name === "light" ? "light" : "dark");
+  const base = value.base ?? "dark";
   if (base !== "dark" && base !== "light") throw new Error("theme base must be dark or light");
 
   const variables = value.vars === undefined ? {} : record(value.vars, "theme vars");
@@ -594,7 +634,7 @@ function colorCode(value: "" | number | `#${string}`, background: boolean): stri
 }
 
 function customCodes(definition: ThemeDefinition): Record<ThemeRole, string> {
-  const base = palettes[definition.base];
+  const base = customBasePalettes[definition.base];
   return Object.fromEntries(THEME_ROLES.map((role) => {
     const selected = definition.styles[role];
     if (selected === undefined) return [role, base[role]];
@@ -712,11 +752,12 @@ export function createTheme(
   options: { color: boolean; unicode: boolean },
   definition?: ThemeDefinition,
 ): Theme {
-  const ansi = options.color && name !== "mono";
+  const resolvedName = definition === undefined ? bundledThemeName(name) : name;
+  const ansi = options.color;
   if (definition === undefined && name !== "dark" && name !== "light" && name !== "mono") throw new Error(`Unknown theme: ${name}`);
   if (definition !== undefined && definition.name !== name) throw new Error(`Theme definition does not match ${name}`);
   const codes = ansi
-    ? definition === undefined ? palettes[name === "light" ? "light" : "dark"] : customCodes(definition)
+    ? definition === undefined ? monochromePalette : customCodes(definition)
     : Object.fromEntries(THEME_ROLES.map((role) => [role, ""])) as Record<ThemeRole, string>;
   const tokens = tokenCodes(ansi, codes, definition);
   const colorMode: ThemeColorMode = definition?.tokens !== undefined
@@ -734,7 +775,7 @@ export function createTheme(
     return value;
   };
   return {
-    name: ansi ? name : "mono",
+    name: ansi ? resolvedName : "mono",
     ansi,
     unicode: options.unicode,
     glyphs: options.unicode ? glyphs : asciiGlyphs,

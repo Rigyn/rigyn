@@ -27,7 +27,7 @@ const commandUi: RuntimeCommandContext["ui"] = {
   setWorkingMessage() {},
   setWorkingVisible() {},
   setTitle() {},
-  async getTheme() { return { name: "dark", available: ["dark"] }; },
+  async getTheme() { return { name: "mono", available: ["dark"] }; },
   async setTheme(name) { return { name, available: [name] }; },
   async select(_prompt, options) { return options[0]!.value; },
   async confirm() { return true; },
@@ -352,11 +352,11 @@ test("direct tool renderers retain shell, component state, result details, and l
     height: 30,
     focused: false,
     expanded: true,
-    theme: { name: "dark" as const, color: true, unicode: true },
+    theme: { name: "mono" as const, color: true, unicode: true },
   };
   let invalidations = 0;
   const bridge = {
-    theme: createTheme("dark", { color: true, unicode: true }),
+    theme: createTheme("mono", { color: true, unicode: true }),
     showImages: true,
     invalidate() { invalidations += 1; },
   };

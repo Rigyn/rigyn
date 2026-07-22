@@ -2,7 +2,7 @@
 
 Rigyn is a local-first coding agent that runs in your terminal. Start it inside a project, describe an outcome, and the selected model can inspect files, run commands, and apply edits through Rigyn's bounded tools. The conversation, tool history, branches, model choice, and extension state are saved locally so work can continue in a later terminal.
 
-Rigyn is both an interactive application and an extensible runtime. The same installation supports an interactive terminal workflow, one-shot commands, JSON events, a newline-delimited command protocol, and an in-process Node.js API. Skills add on-demand instructions; prompt templates add reusable tasks; themes change presentation; and trusted extension packages can add tools, commands, providers, authentication methods, durable state, and structural UI directly to the active harness.
+Rigyn is both an interactive application and an extensible runtime. The same installation supports an interactive terminal workflow, one-shot commands, JSON events, a newline-delimited command protocol, and an in-process Node.js API. Skills add on-demand instructions; prompt templates add reusable tasks; custom themes change presentation; and trusted extension packages can add tools, commands, providers, authentication methods, durable state, and structural UI directly to the active harness.
 
 "Local-first" describes where the runtime, tools, configuration, credentials, and append-only session files live. Requests still go to the model provider you select unless you use a local provider. `bash` and runtime extensions execute with your operating-system user privileges, so Rigyn is not an isolation boundary and installed code should be reviewed.
 
@@ -119,9 +119,14 @@ The default coding tools are:
 - `read` — read text or supported images with bounded continuation;
 - `bash` — execute a command in the active workspace with streamed, bounded output;
 - `edit` — apply one or more exact replacements atomically;
-- `write` — create or replace a file, including missing parent directories.
+- `write` — create or replace a file, including missing parent directories;
+- `grep` — search file contents with bounded output;
+- `find` — find workspace paths by name or pattern;
+- `ls` — list directory entries with bounded metadata.
 
-`grep`, `find`, and `ls` are available as opt-in tools. For example:
+All seven built-ins are active by default in interactive, print, JSON, RPC, and direct SDK sessions. Use `--tools` as
+an allowlist, `--exclude-tools` to remove selected names, `--no-builtin-tools` to retain only extension tools, or
+`--no-tools` to disable every tool. For example, this read-only invocation narrows the active set:
 
 ```sh
 rigyn --tools read,grep,find,ls -p "Review the source tree"
@@ -146,7 +151,7 @@ Useful interactive commands are:
 
 Type `/` to open the command palette. `! command` runs a user shell command without sending it to the model. While a response is active, normal submissions steer the current run and the follow-up shortcut queues work for the next turn. Queue behavior is configurable as one-at-a-time or all-at-once.
 
-The interface includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, bounded live tool output, complete retained tool details after completion, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
+The interface uses one bundled monochrome black-and-white theme; discovered user and trusted-project custom themes remain selectable. It also includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, bounded live tool output, complete retained tool details after completion, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
 
 ## Sessions and continuity
 
@@ -252,6 +257,11 @@ Missing files mean defaults and are not created until a setting is changed. Glob
 
 Project settings are neither read nor writable before trust. The global-only `defaultProjectTrust` setting accepts `ask`, `always`, or `never`; `--approve` and `--no-approve` remain invocation-only overrides.
 
+Personal agent instructions belong in `~/.rigyn/agent/AGENTS.md`, or in
+`$RIGYN_CODING_AGENT_DIR/AGENTS.md` when that directory is overridden. Project instructions belong in `AGENTS.md`
+files along the path to the active working directory. Rigyn appends the global file first and project files from the
+outermost ancestor to the working directory, so more specific instructions appear later. `/reload` rereads them.
+
 Example:
 
 ```json
@@ -267,7 +277,12 @@ Example:
 }
 ```
 
-`rigyn config` selects enabled resources from installed packages; it is not an alternate configuration store. The complete settings contract and resource paths are in [Configuration](docs/configuration.md), with a sparse example at [`resources/settings.example.json`](resources/settings.example.json).
+`rigyn config` selects enabled resources from installed packages. `rigyn config path` prints the exact user settings
+path and `rigyn config edit` opens it through the configured external editor. Add `--scope project` to either command
+for `WORKSPACE/.rigyn/settings.json`; editing that scope requires project trust. Edits validate a top-level JSON object
+and commit under the settings lock only if the file did not change while the editor was open. The complete settings
+contract and resource paths are in [Configuration](docs/configuration.md), with a sparse example at
+[`resources/settings.example.json`](resources/settings.example.json).
 
 ## Automation and embedding
 

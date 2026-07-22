@@ -27,7 +27,7 @@ By default output is written to stdout with backpressure-aware ordering. Embedde
 
 ## Interactive mode
 
-Run `rigyn` without `--print` or `--mode rpc`. The CLI constructs the session owner, hydrates cached model state, loads resources, binds extension UI, then starts the terminal interface. Live model discovery begins in the background only after that interface is visible, so an offline or slow provider cannot hold the terminal before its first render. Session replacement recreates the session-local runtime. `/reload` instead keeps the active session, blocks input until completion, rebinds keybindings, extensions, skills, prompt templates, themes, and context files, and refreshes model state from cached catalogs without waiting for the network.
+Run `rigyn` without `--print` or `--mode rpc`. The CLI constructs the session owner, hydrates cached model state, loads resources, binds extension UI, then starts the terminal interface. Live model discovery begins in the background only after that interface is visible, so an offline or slow provider cannot hold the terminal before its first render. Session replacement recreates the session-local runtime. `/reload` instead keeps the active session, blocks input until completion, rebinds keybindings, extensions, skills, prompt templates, custom themes, and context files, and refreshes model state from cached catalogs without waiting for the network.
 
 `InteractiveMode` is public for terminal hosts that already own an `AgentSessionRuntime` and terminal dependencies. It closes the terminal it creates or receives, but it does not dispose the supplied runtime. Most integrations should use the embedding facade or RPC instead of taking over terminal process state.
 

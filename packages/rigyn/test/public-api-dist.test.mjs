@@ -213,7 +213,7 @@ test("built TUI subpath exposes semantic component builders", () => {
     height: 8,
     focused: false,
     expanded: false,
-    theme: { name: "dark", color: true, unicode: true },
+    theme: { name: "mono", color: true, unicode: true },
   });
   assert.equal(block.lines.some((line) => line.spans.some((span) => span.role === "success")), true);
 });

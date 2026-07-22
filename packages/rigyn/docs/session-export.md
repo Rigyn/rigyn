@@ -48,7 +48,7 @@ Tool results and structural details use native collapsed/expanded controls. Tool
 
 When an arbitrary JSONL file is converted from the shell, live-only metadata may be unavailable. Rigyn derives a stored instruction prompt when possible and always uses the safe generic tool renderer. The conversation tree and stored content are unaffected.
 
-An unavailable or invalid presentation theme falls back to Rigyn's built-in dark export theme. The built-in light theme is preserved when it is active.
+An unavailable or invalid export presentation falls back to the standalone HTML exporter's dark template; its light template is preserved when selected. These templates are part of the generated HTML and do not add built-in TUI themes.
 
 ## JSONL copy
 

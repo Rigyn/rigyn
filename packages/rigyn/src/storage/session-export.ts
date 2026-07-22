@@ -78,7 +78,7 @@ export interface SessionExportData {
 }
 
 export interface RenderSessionHtmlOptions {
-  /** Unknown or unavailable themes deliberately fall back to the built-in dark presentation. */
+  /** Unknown or unavailable themes deliberately use the standalone export's dark presentation. */
   theme?: "dark" | "light" | string;
   systemPrompt?: string;
   tools?: readonly (ToolDefinition & { active?: boolean })[];

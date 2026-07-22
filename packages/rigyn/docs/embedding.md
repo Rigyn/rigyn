@@ -4,7 +4,7 @@
 
 ## Configured harness
 
-`createEmbeddingHarness()` loads the same settings, brokered credentials, providers, tools, trusted extensions, resources, and session policy as the CLI:
+`createEmbeddingHarness()` loads the same settings, brokered credentials, providers, trusted extensions, resources, session policy, and seven default built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`) as the CLI:
 
 ```ts
 import { createEmbeddingHarness } from "rigyn/embedding";
@@ -68,7 +68,7 @@ const second = await harness.session.run({ prompt: "continue this session" });
 console.log(first.results.at(-1)?.finalText, second.results.at(-1)?.finalText);
 ```
 
-This preset does not load credentials, configuration, extensions, context files, skills, or filesystem sessions. It uses an in-memory session manager, has no built-in coding tools unless `tools` are supplied, and performs no ambient credential lookup. Additional caller-owned providers may be supplied through `additionalProviders`.
+This preset does not load credentials, configuration, extensions, context files, skills, or filesystem sessions. It uses an in-memory session manager, activates the same seven built-in tools by default, and performs no ambient credential lookup. Pass `tools`, `excludeTools`, or `noTools` to narrow that set. Additional caller-owned providers may be supplied through `additionalProviders`.
 
 ## Active-run controls
 

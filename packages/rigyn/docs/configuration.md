@@ -1,7 +1,7 @@
 # Settings
 
-Rigyn has one persisted settings model: sparse, strict JSON managed by `SettingsManager`.
-Comments and trailing commas are not accepted. Missing files and missing keys mean defaults; Rigyn does not generate a second “effective configuration” document.
+Rigyn has one persisted settings model: sparse JSON managed by `SettingsManager`.
+Comments and trailing commas are not accepted. Unknown keys are retained but have no effect. Missing files and missing keys mean defaults; Rigyn does not generate a second “effective configuration” document.
 
 ## Locations and precedence
 
@@ -23,17 +23,43 @@ Credentials are stored separately in `auth.json`. Sessions are append-only JSONL
 
 Keybindings are stored separately because they configure both the application and the low-level editor. See [Keybindings](keybindings.md) for the complete action map and file format. `/reload` applies keybinding changes together with settings and extension resources.
 
+## Agent instructions
+
+Use `AGENTS.md` to personalize the agent without changing the built-in system prompt:
+
+```text
+~/.rigyn/agent/AGENTS.md              global instructions
+$RIGYN_CODING_AGENT_DIR/AGENTS.md     global instructions with a custom agent directory
+ANCESTOR/AGENTS.md                    project or directory-specific instructions
+```
+
+Rigyn loads the global file first, then one instruction file from each ancestor directory in filesystem-root-to-working-directory order. More specific instructions therefore appear later. `/reload` rereads the active files, and `--no-context-files` disables instruction-file discovery for one invocation. Instruction files are prompt text; they do not grant extension trust or additional operating-system authority.
+
+## Locate or edit settings
+
+The settings commands default to user scope:
+
+```sh
+rigyn config path
+rigyn config edit
+rigyn config path --scope project
+rigyn config edit --scope project
+```
+
+`path` prints the exact file path without creating it; add `--json` for structured output. `edit` opens the selected file with `externalEditor`, `$VISUAL`, `$EDITOR`, or the platform editor. It accepts only valid JSON whose top level is an object. The edit is committed under the settings lock only when the on-disk file still matches the version opened in the editor, so invalid JSON, editor failure, or a concurrent change leaves the original untouched. Project scope targets `WORKSPACE/.rigyn/settings.json` and honors `--workspace DIR`; editing that scope requires a trusted workspace (or the invocation-only `--approve`). `-l` is the short project-scope form.
+
 ## Supported settings
 
 | Key | Default | Purpose |
 | --- | --- | --- |
+| `lastChangelogVersion` | none | Rigyn-managed marker for startup release notes; normally do not edit. |
 | `defaultProvider` | none | Preferred provider when no session selection exists. |
 | `defaultModel` | none | Preferred model ID. |
 | `defaultThinkingLevel` | model default | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `transport` | `auto` | OpenAI Codex transport: `auto`, `sse`, `websocket`, or `websocket-cached`. |
 | `steeringMode` | `one-at-a-time` | Drain steering messages `one-at-a-time` or `all`. |
 | `followUpMode` | `one-at-a-time` | Drain follow-up messages `one-at-a-time` or `all`. |
-| `theme` | terminal default | Theme name. A value containing `/` is reserved for paired selection and is not treated as one theme name. |
+| `theme` | `mono` | Bundled `mono` or a discovered custom theme name. A `LIGHT/DARK` pair may select two custom themes automatically. |
 | `compaction.enabled` | `true` | Enable automatic compaction. |
 | `compaction.reserveTokens` | `16384` | Reserve output room when deriving the compaction threshold. |
 | `compaction.keepRecentTokens` | `20000` | Recent context retained verbatim where possible. |
@@ -57,7 +83,7 @@ Keybindings are stored separately because they configure both the application an
 | `extensions` | `[]` | Additional extension files or directories. |
 | `skills` | `[]` | Additional skill files or directories. |
 | `prompts` | `[]` | Additional prompt-template files or directories. |
-| `themes` | `[]` | Additional theme files or directories. |
+| `themes` | `[]` | Additional custom theme files or directories. |
 | `enableSkillCommands` | `true` | Register discovered skills as slash commands. |
 | `terminal.showImages` | `true` | Render supported terminal images. |
 | `terminal.imageWidthCells` | `60` | Preferred terminal image width. |
@@ -92,7 +118,7 @@ The first interactive startup records the installed version without replaying ol
   "defaultProvider": "openai-codex",
   "defaultModel": "MODEL_ID",
   "defaultThinkingLevel": "high",
-  "theme": "dark",
+  "theme": "mono",
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,

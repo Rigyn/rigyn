@@ -199,7 +199,7 @@ function commandUi(notices: string[] = []): RuntimeCommandUi {
     setWorkingMessage() {},
     setWorkingVisible() {},
     setTitle() {},
-    async getTheme() { return { name: "dark", available: ["dark"] }; },
+    async getTheme() { return { name: "mono", available: ["dark"] }; },
     async setTheme(name) { return { name, available: [name] }; },
     async select(_prompt, options) { return options[0]!.value; },
     async confirm() { return true; },
@@ -345,7 +345,7 @@ test("tool rendering example replaces a built-in name and supplies live renderer
     height: 30,
     focused: false,
     expanded: true,
-    theme: { name: "dark", color: true, unicode: true },
+    theme: { name: "mono", color: true, unicode: true },
   });
   assert.equal(rendered?.lines[0]?.spans[0]?.text.trimEnd(), "Read replacement · README.md");
 });
@@ -815,7 +815,7 @@ test("terminal workbench exercises input interception, editor helpers, themes, a
     setEditorText(value: string) { editorText = value; operations.push("set-editor"); },
     pasteToEditor(value: string) { editorText += value; operations.push("paste"); },
     async editor(_title: string, prefill?: string) { operations.push(`modal:${prefill}`); return prefill; },
-    getAllThemes() { return [{ name: "dark", path: undefined }, { name: "light", path: undefined }]; },
+    getAllThemes() { return [{ name: "mono", path: undefined }, { name: "light", path: undefined }]; },
     getTheme(name: string) { return name === "light" ? { name: "light" } as never : undefined; },
     setTheme(name: string) { operations.push(`theme:${String(name)}`); return { success: true }; },
     getToolsExpanded() { return false; },

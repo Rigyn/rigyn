@@ -14,7 +14,7 @@ const context: RuntimeUiRenderContext = {
   height: 10,
   focused: true,
   expanded: false,
-  theme: { name: "dark", color: true, unicode: true },
+  theme: { name: "mono", color: true, unicode: true },
 };
 
 test("runtime UI blocks strip terminal controls and clip spans by cell width", () => {

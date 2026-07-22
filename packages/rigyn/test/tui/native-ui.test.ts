@@ -158,8 +158,8 @@ test("native components, theme objects, and editor paste use focused host primit
   assert.equal(Object.isFrozen(current.glyphs), true);
   assert.equal(Object.isFrozen(current.codes), true);
   assert.equal(Object.isFrozen(catalog), true);
-  assert.equal(catalog.length, 3);
-  assert.deepEqual(catalog.map((theme) => theme.name), ["dark", "light", "mono"]);
+  assert.equal(catalog.length, 1);
+  assert.deepEqual(catalog.map((theme) => theme.name), ["mono"]);
   assert.equal(catalog.every((theme) => Object.isFrozen(theme)), true);
   const disposeTheme = host.applyTheme(catalog.find((theme) => theme.name === "mono")!);
   assert.equal(host.currentTheme().name, "mono");

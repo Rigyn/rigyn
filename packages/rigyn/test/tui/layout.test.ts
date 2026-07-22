@@ -282,7 +282,7 @@ test("native tool cards combine bounded previews, metadata, and one frame", () =
 
 test("completed code reads reuse the native syntax tokenizer without changing stored text", () => {
   const source = "const answer: number = 42;\nconst label = \"ready\";";
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([{
     id: "tool:syntax-read",
     kind: "tool",
@@ -405,7 +405,7 @@ test("running tools present structured channel tails and bounded partial errors"
     toolData: {
       partialResult: { content: "permission denied", isError: true, truncated: true },
     },
-  }], 52, createTheme("dark", { color: true, unicode: true }));
+  }], 52, createTheme("mono", { color: true, unicode: true }));
 
   assert.match(progress, /│ ● Bash · npm test · running · 2s/u);
   assert.match(progress, /stdout · 13 bytes · tail/u);
@@ -416,7 +416,7 @@ test("running tools present structured channel tails and bounded partial errors"
   assert.doesNotMatch(progress, /flattened fallback/u);
   assert.match(stripAnsi(partial), /partial result · limited/u);
   assert.match(stripAnsi(partial), /permission denied/u);
-  assert.ok(partial.includes(createTheme("dark", { color: true, unicode: true }).codes.error));
+  assert.ok(partial.includes(createTheme("mono", { color: true, unicode: true }).codes.error));
 });
 
 test("running shell output keeps a small live tail until the canonical result arrives", () => {
@@ -592,10 +592,10 @@ test("footer calls out high context pressure before compaction", () => {
     inputLabel: "you",
     inputMode: "normal",
   };
-  const warning = renderFrame(base, { columns: 40, rows: 8 }, createTheme("dark", { color: true, unicode: true })).text;
-  assert.match(warning, /\u001b\[38;5;221m/u);
-  const error = renderFrame({ ...base, context: { ...base.context, contextTokens: 95 } }, { columns: 40, rows: 8 }, createTheme("dark", { color: true, unicode: true })).text;
-  assert.match(error, /\u001b\[38;5;203m/u);
+  const warning = renderFrame(base, { columns: 40, rows: 8 }, createTheme("mono", { color: true, unicode: true })).text;
+  assert.match(warning, /\u001b\[38;5;250mctx/u);
+  const error = renderFrame({ ...base, context: { ...base.context, contextTokens: 95 } }, { columns: 40, rows: 8 }, createTheme("mono", { color: true, unicode: true })).text;
+  assert.match(error, /\u001b\[1;97mctx/u);
 });
 
 test("footer exposes the active phase, elapsed time, retry countdown, and cancel key", () => {
@@ -1240,7 +1240,7 @@ test("mutation cards render structured input through the existing collapse and k
   ].join("\n"));
   assert.doesNotMatch(write, /sha256/u);
 
-  const coloredTheme = createTheme("dark", { color: true, unicode: true });
+  const coloredTheme = createTheme("mono", { color: true, unicode: true });
   const colored = renderTranscript([{
     id: "tool:patch",
     kind: "tool",
@@ -1292,7 +1292,7 @@ test("tool renderer slots preserve safe span roles and fall back per invalid slo
     text: "built-in result",
     expanded: false,
   };
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([entry], 50, theme, {
     toolRenderBlocks: new Map([["custom", {
       call: { lines: [{ spans: [{ text: "\u001b]2;owned\u0007CUSTOM ", role: "accent" }, { text: "read", role: "warning" }] }] },
@@ -1437,7 +1437,7 @@ test("extension session render blocks override bounded data-only fallbacks", () 
 });
 
 test("assistant Markdown gives headings, fenced code, and diffs distinct terminal roles", () => {
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([{
     id: "assistant",
     kind: "assistant",
@@ -1458,7 +1458,7 @@ test("assistant Markdown presents inline code, emphasis, strong text, and links 
   }], 120, createTheme("mono", { color: false, unicode: false }));
   assert.equal(mono, source);
 
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const colored = renderTranscript([{
     id: "assistant",
     kind: "assistant",
@@ -1562,7 +1562,7 @@ test("assistant Markdown presents list markers, table headers, separators, and f
   }], 120, createTheme("mono", { color: false, unicode: false }));
   assert.equal(mono, source);
 
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const colored = renderTranscript([{
     id: "assistant",
     kind: "assistant",
@@ -1611,7 +1611,7 @@ test("assistant prose wraps on word boundaries at narrow widths", () => {
 
 test("malformed Markdown and HTML-like text remain readable literal text", () => {
   const source = "<b>literal</b> **unclosed [bad](target with space)";
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([{
     id: "assistant",
     kind: "assistant",
@@ -1642,7 +1642,7 @@ test("assistant Markdown keeps nested and loose container source while presentin
   }], 120, createTheme("mono", { color: false, unicode: true }));
   assert.equal(mono, source);
 
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const colored = renderTranscript([{ id: "assistant", kind: "assistant", text: source }], 120, theme);
   const lines = colored.split("\n");
   assert.equal(stripAnsi(colored), source);
@@ -1674,7 +1674,7 @@ test("fenced code highlighting carries lexical state for common coding languages
     "{\"enabled\": true, \"count\": 3}",
     "```",
   ].join("\n");
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([{ id: "assistant", kind: "assistant", text: source }], 120, theme);
   const lines = rendered.split("\n");
   assert.equal(stripAnsi(rendered), source);
@@ -1708,7 +1708,7 @@ test("blockquote and shallow list containers preserve fenced-code prefixes and s
   const mono = renderTranscript([{ id: "assistant", kind: "assistant", text: source }], 120, createTheme("mono", { color: false, unicode: true }));
   assert.equal(mono, source);
 
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const rendered = renderTranscript([{ id: "assistant", kind: "assistant", text: source }], 120, theme);
   const lines = rendered.split("\n");
   assert.equal(stripAnsi(rendered), source);
@@ -1732,7 +1732,7 @@ test("incomplete fenced Markdown is deterministic and append-stable while stream
     "/* still code",
   ].join("\n");
   const completeSource = `${partialSource}\ncontinued */\nconst next = \"ok\";\n\`\`\`\`\nafter`;
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const partial = renderTranscript([{ id: "assistant", kind: "assistant", text: partialSource }], 80, theme);
   const again = renderTranscript([{ id: "assistant", kind: "assistant", text: partialSource }], 80, theme);
   const complete = renderTranscript([{ id: "assistant", kind: "assistant", text: completeSource }], 80, theme);
@@ -1821,7 +1821,7 @@ test("transcript cards distinguish speakers and every tool state without noisy l
   assert.doesNotMatch(rendered, /\b(?:CALL|RESULT|Ctrl\+O)\b/u);
   assert.doesNotMatch(rendered, /\b(?:you|agent)\b/u);
 
-  const coloredTheme = createTheme("dark", { color: true, unicode: true });
+  const coloredTheme = createTheme("mono", { color: true, unicode: true });
   const coloredLines = renderTranscript([
     { id: "u", kind: "user", text: "message" },
     { id: "p", kind: "tool", title: "read", status: "pending", text: "" },
@@ -1839,7 +1839,7 @@ test("transcript cards distinguish speakers and every tool state without noisy l
 });
 
 test("thinking level changes the released composer separator accent", () => {
-  const theme = createTheme("dark", { color: true, unicode: true });
+  const theme = createTheme("mono", { color: true, unicode: true });
   const frame = renderFrame({
     context: { status: "idle", thinking: "high" },
     transcript: [],

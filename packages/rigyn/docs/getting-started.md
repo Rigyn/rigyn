@@ -12,7 +12,7 @@ Rigyn connects a model to a small set of tools running on your computer:
 4. Rigyn executes those requests locally, returns bounded results to the model, and renders the work as it happens.
 5. Rigyn saves the session locally so you can continue, branch, compact, or export it later.
 
-The default tools are `read`, `bash`, `edit`, and `write`. They run with the permissions of the user who launched Rigyn. Project trust controls whether project-local configuration and executable extensions load; it does not approve individual shell commands or create a sandbox.
+The default tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. The same default applies to interactive, print, JSON, RPC, and direct SDK sessions. They run with the permissions of the user who launched Rigyn. Project trust controls whether project-local configuration and executable extensions load; it does not approve individual shell commands or create a sandbox.
 
 Model requests leave your machine when you choose a hosted provider. Use a local provider such as Ollama when the model must also run locally.
 
@@ -167,7 +167,7 @@ Rigyn separates four resource types:
 
 - A **skill** is on-demand instruction content. Only its name and description stay in the base prompt; full guidance loads when relevant.
 - A **prompt template** is a reusable slash command with arguments and defaults.
-- A **theme** changes terminal presentation without adding runtime authority.
+- A **theme** is a custom terminal presentation resource; Rigyn itself ships only the monochrome `mono` theme.
 - A **runtime extension** is trusted code that can add tools, commands, providers, authentication, state, events, shortcuts, and structural UI.
 
 A **package** distributes one or more of those resources. Installed runtime extensions activate inside the current Rigyn process and extend that harness; they do not need to launch a second Rigyn instance.
@@ -201,7 +201,7 @@ Direct development runs use the normal agent directory:
 ~/.rigyn/agent/
 ```
 
-Set `RIGYN_CODING_AGENT_DIR` to choose another root. Persistent preferences are sparse strict JSON at `settings.json`; the file is created only after a setting changes. Run `rigyn config` to select resources from installed packages and `/settings` for common interactive preferences. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Settings](configuration.md).
+Set `RIGYN_CODING_AGENT_DIR` to choose another root. Put personal instructions in `AGENTS.md` inside that agent directory; project `AGENTS.md` files load afterward from outer ancestors through the active working directory. Persistent preferences are sparse strict JSON at `settings.json`; the file is created only after a setting changes. Run `rigyn config path` to print its exact location and `rigyn config edit` to open it transactionally. Add `--scope project` for the trusted workspace file. `rigyn config` without an action selects resources from installed packages, and `/settings` covers common interactive preferences. The complete locations, precedence, keybindings, instructions, and trust behavior are in [Settings](configuration.md).
 
 ## 8. Update, diagnose, or remove
 

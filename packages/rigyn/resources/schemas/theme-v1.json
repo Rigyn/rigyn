@@ -8,7 +8,11 @@
   "properties": {
     "$schema": { "type": "string", "maxLength": 4096 },
     "schemaVersion": { "const": 1 },
-    "name": { "type": "string", "pattern": "^[a-z][a-z0-9._-]{0,62}$" },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,62}$",
+      "not": { "enum": ["dark", "light", "mono"] }
+    },
     "base": { "enum": ["dark", "light"] },
     "vars": {
       "type": "object",

@@ -28,7 +28,7 @@ Rigyn is a local-first terminal coding agent and an extensible agent runtime. If
 - [Runtime extension events](extension-events.md) — event payloads, ordering, bounds, cancellation, and failure isolation.
 - [Package discovery index](package-gallery.md) — public gallery metadata and deterministic discovery checks.
 - [Extension authentication threat model](extension-auth-threat-model.md) — credential brokering and extension authority boundaries.
-- [Resource catalog](resource-catalog.md) — bounded introspection of tools, commands, prompts, skills, themes, providers, packages, and diagnostics.
+- [Resource catalog](resource-catalog.md) — bounded introspection of tools, commands, prompts, skills, custom themes, providers, packages, and diagnostics.
 - [Prompt templates](prompt-templates.md), [Skills](skills.md), and [Themes](themes.md) — authoring formats, discovery, precedence, and safety boundaries.
 - [Subprocess worker example](../examples/subprocess-workers/README.md) — run a bounded argv-based worker protocol from a trusted direct extension.
 

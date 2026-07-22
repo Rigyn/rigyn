@@ -2,7 +2,7 @@
   "defaultProvider": "openai-codex",
   "defaultModel": "MODEL_ID",
   "defaultThinkingLevel": "high",
-  "theme": "dark",
+  "theme": "mono",
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,

@@ -41,6 +41,8 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(global, /--max-steps NUMBER\s+Maximum model turns in each run/u);
   assert.match(global, /--max-output-tokens NUMBER\s+Maximum output tokens requested/u);
   assert.match(renderCliHelp("chat"), /--no-extensions\s+Disable automatic extension discovery/u);
+  assert.match(global, /read, bash, edit, write, grep, find, and ls tools/u);
+  assert.match(global, /config path \[--scope user\|project\]/u);
   assert.match(renderCliHelp("run"), /-p, --print\s+Process messages non-interactively and exit/u);
   assert.match(renderCliHelp("rpc"), /newline-delimited JSON RPC/u);
   assert.match(renderCliHelp("extensions"), /extensions \[list\|doctor\|commands\|prompts\]/u);
@@ -53,6 +55,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(renderCliHelp("uninstall"), /saved configuration, credentials, sessions/u);
   assert.match(renderCliHelp("self-update"), /latest verified Rigyn GitHub release/u);
   assert.match(renderCliHelp("self-update"), /atomically replaces/u);
+  assert.match(renderCliHelp("config"), /validates a top-level JSON object/u);
   assert.throws(() => renderCliHelp("unknown"), /Unknown help topic/u);
 });
 

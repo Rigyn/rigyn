@@ -1,5 +1,5 @@
 import type { ExtensionRunner } from "../extensions/compat-runtime.js";
-import type { AgentSession } from "../service/agent-session.js";
+import type { AgentSession, AgentSessionPromptOptions } from "../service/agent-session.js";
 import type { AgentSessionRuntime } from "../service/agent-session-runtime.js";
 import type { ProviderModelThinkingLevel } from "../providers/models.js";
 import type { RpcUnknownCommand } from "./rpc.js";
@@ -29,6 +29,7 @@ export interface RpcRuntimeDispatcherOptions {
   runtime: RpcSessionRuntime;
   output(value: object): void | Promise<void>;
   bindSession?(session: AgentSession): void | Promise<void>;
+  promptOptions?(session: AgentSession): Pick<AgentSessionPromptOptions, "allowedTools" | "excludedTools">;
 }
 
 function errorMessage(error: unknown): string {
@@ -65,6 +66,7 @@ export class RpcRuntimeDispatcher {
   readonly #runtime: RpcSessionRuntime;
   readonly #output: RpcRuntimeDispatcherOptions["output"];
   readonly #bindSession: RpcRuntimeDispatcherOptions["bindSession"];
+  readonly #promptOptions: RpcRuntimeDispatcherOptions["promptOptions"];
   #unsubscribe: (() => void) | undefined;
   #closed = false;
 
@@ -72,6 +74,7 @@ export class RpcRuntimeDispatcher {
     this.#runtime = options.runtime;
     this.#output = options.output;
     this.#bindSession = options.bindSession;
+    this.#promptOptions = options.promptOptions;
   }
 
   async start(): Promise<void> {
@@ -88,8 +91,10 @@ export class RpcRuntimeDispatcher {
       switch (command.type) {
         case "prompt": {
           const selected = command as Extract<RpcCommand, { type: "prompt" }>;
+          const promptOptions = this.#promptOptions?.(this.#runtime.session) ?? {};
           let acknowledged = false;
           void this.#runtime.session.prompt(selected.message, {
+            ...promptOptions,
             ...(selected.images === undefined ? {} : { images: selected.images }),
             ...(selected.streamingBehavior === undefined ? {} : { streamingBehavior: selected.streamingBehavior }),
             source: "rpc",

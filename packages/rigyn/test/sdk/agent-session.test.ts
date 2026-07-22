@@ -49,6 +49,29 @@ test("SDK installs the default kernel stream fallback", () => {
   assert.equal(typeof agent.streamFunction, "function");
 });
 
+test("SDK activates every built-in tool by default", async () => {
+  const { cwd, agentDir } = await workspace();
+  const { model, runtime } = await modelRuntime();
+  const created = await createAgentSession({
+    cwd,
+    agentDir,
+    modelRuntime: runtime,
+    model,
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager: SettingsManager.inMemory(),
+  });
+  assert.deepEqual(created.session.getActiveTools(), [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+  ]);
+  await created.session.close();
+});
+
 async function modelRuntime(scripts: readonly ScriptedProviderStep[] = []): Promise<{
   model: ProviderModel;
   runtime: ModelRegistry;

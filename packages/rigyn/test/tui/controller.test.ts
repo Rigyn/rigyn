@@ -119,25 +119,30 @@ test("full TUI defaults to an inline surface with raw mode, Unicode editing, and
   assert.match(output.text, /\u001b\[\?2004l/u);
 });
 
-test("paired themes follow terminal color reports and disable notifications after a fixed selection", () => {
-  const { input, output, controller } = fullController({ theme: "light/dark" });
+test("custom paired themes follow terminal color reports while mono is the sole bundled theme", () => {
+  const { input, output, controller } = fullController();
+  controller.setCustomThemes([
+    parseThemeDefinition({ schemaVersion: 1, name: "paper", base: "light", styles: { accent: { foreground: 16 } } }),
+    parseThemeDefinition({ schemaVersion: 1, name: "ocean", base: "dark", styles: { accent: { foreground: 255 } } }),
+  ]);
+  assert.deepEqual(controller.themeNames(), ["mono", "ocean", "paper"]);
+  controller.setTheme("paper/ocean");
   const changes: string[] = [];
   controller.onThemeChange((change) => changes.push(`${change.reason}:${change.current}`));
   controller.start();
-  assert.equal(controller.selectedThemeName(), "dark");
+  assert.equal(controller.selectedThemeName(), "ocean");
   assert.match(output.text, /\u001b\[\?2031h/u);
   assert.match(output.text, /\u001b\[\?996n/u);
   assert.match(output.text, /\u001b\]11;\?\u0007/u);
 
   input.write("\u001b[?997;2n");
-  assert.equal(controller.selectedThemeName(), "light");
-  assert.deepEqual(changes, ["terminal:light"]);
+  assert.equal(controller.selectedThemeName(), "paper");
+  assert.deepEqual(changes, ["terminal:paper"]);
 
-  controller.setTheme("dark");
-  assert.equal(controller.selectedThemeSetting(), "dark");
+  controller.setTheme("mono");
+  assert.equal(controller.selectedThemeName(), "mono");
+  assert.equal(controller.selectedThemeSetting(), "mono");
   assert.match(output.text, /\u001b\[\?2031l/u);
-  input.write("\u001b[?997;2n");
-  assert.equal(controller.selectedThemeName(), "dark");
   controller.close();
 });
 
@@ -2419,7 +2424,7 @@ test("rendered provider events are escaped before reaching the terminal", async 
   controller.close();
 });
 
-test("controller registers and visibly applies declarative package themes", async () => {
+test("controller exposes mono plus declarative extension themes", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
   const controller = new TuiController({
@@ -2434,19 +2439,19 @@ test("controller registers and visibly applies declarative package themes", asyn
     name: "ocean",
     styles: { accent: { foreground: "#00aaff" } },
   })]);
-  assert.deepEqual(controller.themeNames(), ["dark", "light", "mono", "ocean"]);
+  assert.deepEqual(controller.themeNames(), ["mono", "ocean"]);
   output.chunks.length = 0;
   controller.setTheme("ocean");
   await tick();
   assert.match(output.text, /38;2;0;170;255m/u);
   assert.equal(controller.selectedThemeName(), "ocean");
   controller.setCustomThemes([]);
-  assert.equal(controller.selectedThemeName(), "dark");
-  assert.deepEqual(controller.themeNames(), ["dark", "light", "mono"]);
+  assert.equal(controller.selectedThemeName(), "mono");
+  assert.deepEqual(controller.themeNames(), ["mono"]);
   controller.close();
 });
 
-test("theme selection and catalog invalidation emit generation-owned changes", () => {
+test("custom theme selection and catalog invalidation emit generation-owned changes", () => {
   const { controller } = fullController();
   const generation = new AbortController();
   const changes: Array<[string, string, string]> = [];
@@ -2464,11 +2469,11 @@ test("theme selection and catalog invalidation emit generation-owned changes", (
     styles: { accent: { foreground: "#334455" } },
   })]);
   assert.deepEqual(changes, [
-    ["dark", "reactive", "selection"],
+    ["mono", "reactive", "selection"],
     ["reactive", "reactive", "catalog"],
   ]);
   generation.abort();
-  controller.setTheme("dark");
+  controller.setTheme("mono");
   assert.equal(changes.length, 2);
   controller.close();
 });

@@ -12,7 +12,7 @@ import type { TuiController } from "../../src/tui/controller.js";
 
 test("interactive settings expose current values and apply persistent and live changes", () => {
   const settings = SettingsManager.inMemory({
-    theme: "dark",
+    theme: "mono",
     compaction: { enabled: true },
     terminal: { showImages: true, imageWidthCells: 60 },
     editorPaddingX: 0,
@@ -40,26 +40,27 @@ test("interactive settings expose current values and apply persistent and live c
     setOperatorPreferences() { terminalCalls.push("preferences"); },
   } as unknown as Pick<TuiController, "setTheme" | "setDoubleEscapeAction" | "setOperatorPreferences">;
 
-  const items = interactiveSettingItems(settings, session, ["dark", "light"]);
+  const items = interactiveSettingItems(settings, session, ["mono", "ocean"]);
   assert.equal(new Set(items.map((item) => item.id)).size, items.length);
   for (const item of items) assert.equal(item.values.includes(item.value), true, item.id);
   assert.ok(items.length >= 20);
   assert.equal(items.some((item) => item.id === "install-telemetry"), false);
+  assert.deepEqual(items.find((item) => item.id === "theme")?.values, ["mono", "ocean"]);
 
   applyInteractiveSetting({ id: "auto-compact" }, "off", settings, session, terminal);
   applyInteractiveSetting({ id: "transport" }, "websocket-cached", settings, session, terminal);
-  applyInteractiveSetting({ id: "theme" }, "light", settings, session, terminal);
+  applyInteractiveSetting({ id: "theme" }, "ocean", settings, session, terminal);
   applyInteractiveSetting({ id: "editor-padding" }, "2", settings, session, terminal);
   applyInteractiveSetting({ id: "double-escape" }, "fork", settings, session, terminal);
 
   assert.equal(settings.getCompactionEnabled(), false);
   assert.equal(settings.getTransport(), "websocket-cached");
   assert.equal(agent.transport, "auto");
-  assert.equal(settings.getThemeSetting(), "light");
+  assert.equal(settings.getThemeSetting(), "ocean");
   assert.equal(settings.getEditorPaddingX(), 2);
   assert.equal(settings.getDoubleEscapeAction(), "fork");
   assert.deepEqual(calls, ["compact:false"]);
-  assert.deepEqual(terminalCalls, ["theme:light", "preferences", "escape:fork"]);
+  assert.deepEqual(terminalCalls, ["theme:ocean", "preferences", "escape:fork"]);
   assert.equal(tuiOperatorPreferences(settings).editorPaddingX, 2);
 
   assert.throws(

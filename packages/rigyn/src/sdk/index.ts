@@ -43,8 +43,8 @@ import { SessionManager } from "../storage/session-manager.js";
 import type { HarnessTool } from "../tools/types.js";
 
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
-const DEFAULT_ACTIVE_BUILTINS = ["read", "bash", "edit", "write"] as const;
-const BUILTIN_TOOL_NAMES = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+const DEFAULT_ACTIVE_BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(DEFAULT_ACTIVE_BUILTINS);
 
 // Preserve the legacy fallback for extensions that construct Agent instances
 // or invoke low-level loops without passing the renamed streamFn option.

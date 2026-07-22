@@ -12,9 +12,9 @@ import { renderSyntaxCodeLines } from "./markdown.js";
 import { createTheme, style, type Theme } from "./theme.js";
 export type { ThemeColor } from "./theme.js";
 
-let activeTheme = createTheme("dark", { color: process.env.NO_COLOR === undefined, unicode: true });
+let activeTheme = createTheme("mono", { color: process.env.NO_COLOR === undefined, unicode: true });
 
-export function initTheme(name = "dark", _enableWatcher = false): void {
+export function initTheme(name = "mono", _enableWatcher = false): void {
   activeTheme = createTheme(name as Theme["name"], {
     color: process.env.NO_COLOR === undefined,
     unicode: true,

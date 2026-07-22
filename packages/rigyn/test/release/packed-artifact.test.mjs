@@ -33,6 +33,7 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const PACKED_ARTIFACT_TEST_TIMEOUT_MS = 20 * 60_000;
 const PACKED_INSTALL_BOOTSTRAP_TIMEOUT_MS = process.platform === "win32" ? 180_000 : 120_000;
+const SELF_INSTALL_TIMEOUT_MS = process.platform === "win32" ? 180_000 : 120_000;
 const SELF_UPDATE_TIMEOUT_MS = process.platform === "win32" ? 180_000 : 90_000;
 const SENSITIVE_ENVIRONMENT_NAME = /(?:^|_)(?:api_?key|auth(?:orization)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
 const ALLOWED_DOCUMENTS = new Set([
@@ -522,7 +523,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
   const installer = await runCommand(process.execPath, [join(installerPackageRoot, "scripts", "install-user.mjs")], {
     cwd: installerPackageRoot,
     env: installerEnvironment,
-    timeoutMs: 120_000,
+    timeoutMs: SELF_INSTALL_TIMEOUT_MS,
     label: "self-contained user install",
   });
   assert.match(installer.stdout, /Installed a self-contained Rigyn copy/u);
@@ -709,7 +710,7 @@ export default function activate(api: any) {
   }
   const keepRoot = join(paths.installRoot, "keep.txt");
   const keepBin = join(paths.installRoot, "bin", "keep.txt");
-  const customizedSettings = `${JSON.stringify({ theme: "dark", quietStartup: true }, null, 2)}\n`;
+  const customizedSettings = `${JSON.stringify({ theme: "mono", quietStartup: true }, null, 2)}\n`;
   await mkdir(join(paths.installRoot, "agent"), { recursive: true, mode: 0o700 });
   await Promise.all([
     writeFile(keepRoot, "keep root\n"),
@@ -733,7 +734,7 @@ export default function activate(api: any) {
   await runCommand(process.execPath, [join(PROJECT_ROOT, "scripts", "install-user.mjs")], {
     cwd: PROJECT_ROOT,
     env: bootstrapEnvironment,
-    timeoutMs: 120_000,
+    timeoutMs: SELF_INSTALL_TIMEOUT_MS,
     label: "repeat self-contained user install after interrupted swap",
   });
   await assert.rejects(access(interruptedApp), (error) => errno(error) === "ENOENT");
