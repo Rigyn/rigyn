@@ -32,7 +32,7 @@ test("Windows DPAPI keeps the credential key out of argv and round-trips a curre
   assert.equal(isWindowsDpapiEnvelope(envelope), true);
   assert.equal(envelope, `dpapi:v1:${protectedValue}`);
   assert.equal(calls[0]?.input, undefined);
-  assert.doesNotMatch(JSON.stringify(calls[0]?.args), new RegExp(key.toString("base64"), "u"));
+  assert.equal(JSON.stringify(calls[0]?.args).includes(key.toString("base64")), false);
   assert.equal(calls[0]?.environment?.RIGYN_DPAPI_INPUT, key.toString("base64"));
   assert.match(
     calls[0]?.args?.at(-1) ?? "",
@@ -57,7 +57,7 @@ test("Windows DPAPI performs a real current-user Protect and Unprotect round tri
   const key = randomBytes(32);
   const envelope = await protectWindowsCredentialKey(key);
   assert.equal(isWindowsDpapiEnvelope(envelope), true);
-  assert.doesNotMatch(envelope, new RegExp(key.toString("base64"), "u"));
+  assert.equal(envelope.includes(key.toString("base64")), false);
   assert.deepEqual(await unprotectWindowsCredentialKey(envelope), key);
 });
 
@@ -76,7 +76,7 @@ test("Windows DPAPI validates envelopes, plaintext size, and redacts command fai
     }),
     (error: unknown) => {
       assert.match(String(error), /failure/u);
-      assert.doesNotMatch(String(error), new RegExp(secret, "u"));
+      assert.equal(String(error).includes(secret), false);
       return true;
     },
   );
