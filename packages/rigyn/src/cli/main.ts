@@ -115,6 +115,7 @@ import { ProjectTrustResolver } from "./project-trust.js";
 import { RIGYN_VERSION } from "../version.js";
 import { defaultTools, selectedTools } from "./tool-selection.js";
 import { runSettingsConfigCommand } from "./config-settings-command.js";
+import { rigynCompactSignature, rigynTerminalLockup } from "../tui/brand.js";
 
 export { defaultTools, selectedTools };
 
@@ -447,18 +448,34 @@ export interface StartupInventory {
   warnings?: readonly string[];
 }
 
-export function formatStartupReport(inventory: StartupInventory, workspace: string, keybindings = new Keybindings()): string {
+export function formatStartupReport(
+  inventory: StartupInventory,
+  workspace: string,
+  keybindings = new Keybindings(),
+  unicode = true,
+): string {
   const loaded = [
     inventory.extensions?.length ? `${inventory.extensions.length} extensions` : undefined,
     inventory.skills?.length ? `${inventory.skills.length} skills` : undefined,
     inventory.prompts?.length ? `${inventory.prompts.length} prompts` : undefined,
   ].filter(Boolean).join(" · ");
-  return [`Rigyn ${RIGYN_VERSION} · Ready`, formatHotkeys(keybindings), `Workspace: ${workspace}`, loaded === "" ? undefined : `Loaded: ${loaded}`]
+  return [rigynTerminalLockup(RIGYN_VERSION, unicode), formatHotkeys(keybindings), `Workspace: ${workspace}`, loaded === "" ? undefined : `Loaded: ${loaded}`]
     .filter((value): value is string => value !== undefined).join("\n");
 }
 
-export function formatCompactStartupReport(inventory: StartupInventory, workspace: string, keybindings = new Keybindings()): string {
-  return formatStartupReport(inventory, workspace, keybindings);
+export function formatCompactStartupReport(
+  inventory: StartupInventory,
+  workspace: string,
+  keybindings = new Keybindings(),
+  unicode = true,
+): string {
+  const loaded = [
+    inventory.extensions?.length ? `${inventory.extensions.length} extensions` : undefined,
+    inventory.skills?.length ? `${inventory.skills.length} skills` : undefined,
+    inventory.prompts?.length ? `${inventory.prompts.length} prompts` : undefined,
+  ].filter(Boolean).join(" · ");
+  return [rigynCompactSignature(RIGYN_VERSION, unicode), formatHotkeys(keybindings), `Workspace: ${workspace}`, loaded === "" ? undefined : `Loaded: ${loaded}`]
+    .filter((value): value is string => value !== undefined).join("\n");
 }
 
 function shellArgument(value: string): string {
@@ -1123,7 +1140,7 @@ async function runCommandOperation(
     applyExtensionArguments(argumentsValue, runtime);
     await runtime.session.bindExtensions({ mode: argumentsValue.mode === "json" ? "json" : "print" });
     await selectConfiguredModel(runtime, argumentsValue);
-    if (runtime.session.model === undefined) throw new Error("No model selected. Pass --model or run Rigyn interactively and use /model.");
+    if (runtime.session.model === undefined) throw new Error("No model selected. Pass --model or run rigyn interactively and use /model.");
     const messages = [...argumentsValue.messages];
     const first = messages.shift();
     const stdin = await readPipedStdin();
@@ -1809,8 +1826,13 @@ async function chatCommandOperation(
       return true;
     });
     terminal.setStartup(
-      formatCompactStartupReport({ extensions: runtime.extensions.list().map((entry) => entry.id) }, runtime.workspace, keybindings),
-      formatStartupReport({}, runtime.workspace, keybindings),
+      formatCompactStartupReport(
+        { extensions: runtime.extensions.list().map((entry) => entry.id) },
+        runtime.workspace,
+        keybindings,
+        terminal.capabilities.unicode,
+      ),
+      formatStartupReport({}, runtime.workspace, keybindings, terminal.capabilities.unicode),
     );
     bind();
     await presentStartupChangelog(runtime.settings, (message) => terminal.notify(message));

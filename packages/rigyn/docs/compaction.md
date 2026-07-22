@@ -4,7 +4,7 @@ Compaction keeps a long session usable without pretending that an abbreviated co
 
 ## When it runs
 
-Automatic compaction compares a conservative context estimate with the selected model's discovered context window and output reserve. It can run before a request reaches the limit. A typed provider context-overflow response can trigger one additional compact-and-retry path even when the local estimate was low. When a successful response reports usage beyond the threshold, Rigyn keeps that answer and compacts afterward without requesting it again. `/compact [focus]` requests the same machinery manually.
+Automatic compaction compares a conservative context estimate with the selected model's discovered context window and output reserve. It can run before a request reaches the limit. A typed provider context-overflow response can trigger one additional compact-and-retry path even when the local estimate was low. When a successful response reports usage beyond the threshold, rigyn keeps that answer and compacts afterward without requesting it again. `/compact [focus]` requests the same machinery manually.
 
 The relevant configuration is:
 
@@ -33,7 +33,7 @@ The summary request receives:
 
 Opaque provider continuation state and provider-trace reasoning are not summary input. A replacement summary cannot add tool calls or claim source message IDs outside the plan.
 
-On success, a `compaction_completed` event records the summary, exact `sourceMessageIds`, recomputed post-compaction token estimate, and normalized summary-model usage when available. The manual `compact()` result exposes the same committed summary, cut point, token estimates, usage, and optional details. An extension-provided summary may supply normalized usage; Rigyn validates it before committing it.
+On success, a `compaction_completed` event records the summary, exact `sourceMessageIds`, recomputed post-compaction token estimate, and normalized summary-model usage when available. The manual `compact()` result exposes the same committed summary, cut point, token estimates, usage, and optional details. An extension-provided summary may supply normalized usage; rigyn validates it before committing it.
 
 Generated-summary usage contributes to session token, cache, and cost statistics. Usage from before the latest compaction boundary is not reused to trigger a later post-response compaction.
 

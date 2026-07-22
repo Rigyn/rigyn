@@ -3,8 +3,8 @@
 ## Requirements and distribution
 
 The managed one-line installer requires a supported 64-bit Node.js 24.15+ or 26+ runtime and the local npm command.
-It downloads Rigyn only from GitHub Releases; no npm account or registry-hosted Rigyn package is required. The four
-Rigyn archives are platform-neutral, while `@rigyn/terminal` carries the complete prebuilt macOS and Windows helper
+It downloads rigyn only from GitHub Releases; no npm account or registry-hosted rigyn package is required. The four
+rigyn archives are platform-neutral, while `@rigyn/terminal` carries the complete prebuilt macOS and Windows helper
 matrix and npm selects third-party native dependency variants for the current operating system and CPU.
 
 Check the runtime before installation:
@@ -17,13 +17,13 @@ npm --version
 On Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rigyn/rigyn/main/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rigyn/rigyn/main/install.ps1 | iex
 ```
 
 Each installer obtains the latest release identity, downloads all four exact archives and `SHA256SUMS`, verifies every
@@ -31,28 +31,28 @@ archive, and only then invokes the private installer. The equivalent version-pin
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn --version
 ```
 
-This uses npm's one-shot package executor and does not create a global npm installation or resolve Rigyn from the npm
+This uses npm's one-shot package executor and does not create a global npm installation or resolve rigyn from the npm
 registry.
 
-Rigyn releases also provide standalone runtime archives for Linux, macOS, and Windows on x64 and arm64. A standalone
+rigyn releases also provide standalone runtime archives for Linux, macOS, and Windows on x64 and arm64. A standalone
 archive includes the pinned official Node.js runtime and complete production dependency graph, so Node and npm are not
 installation prerequisites. Download the archive matching `process.platform`/`process.arch`, verify it against the
 release `SHA256SUMS`, and extract it with `tar -xzf`. On Linux and macOS, run `bin/rigyn`; on Windows, run
-`bin\rigyn.cmd`. The archive is relocatable and stores user configuration and sessions in the normal Rigyn user
+`bin\rigyn.cmd`. The archive is relocatable and stores user configuration and sessions in the normal rigyn user
 directories rather than beside the executable.
 
 To install from the public source checkout instead:
 
 ```sh
-git clone https://github.com/Rigyn/rigyn.git
+git clone https://github.com/rigyn/rigyn.git
 cd rigyn
 npm run install:user
 rigyn --version
@@ -95,7 +95,7 @@ node -p "process.platform + ' ' + process.arch"
 
 The command path is `~/.local/bin`, as on Linux. If a native dependency falls back to compilation, install the Command Line Tools with `xcode-select --install`, then retry from a clean npm cache only after reviewing the original failure.
 
-Terminal applications may need permission to access files outside the workspace or to control a browser. Rigyn does not bypass macOS privacy controls.
+Terminal applications may need permission to access files outside the workspace or to control a browser. rigyn does not bypass macOS privacy controls.
 
 ## Windows
 
@@ -118,7 +118,7 @@ Windows Terminal is recommended for Unicode and color. ConPTY-compatible termina
 
 ## WSL
 
-Install and run the Linux Node.js build inside WSL; do not reuse a Windows `node_modules` directory or Windows Rigyn installation. Keep active repositories in the WSL filesystem when performance matters. The Linux command remains `~/.local/bin/rigyn`.
+Install and run the Linux Node.js build inside WSL; do not reuse a Windows `node_modules` directory or Windows rigyn installation. Keep active repositories in the WSL filesystem when performance matters. The Linux command remains `~/.local/bin/rigyn`.
 
 Browser launch and clipboard integration depend on the WSL distribution, desktop integration, and terminal. Copy an OAuth URL manually when automatic opening is unavailable. Paths passed to tools are Linux paths and retain the invoking WSL user's access.
 
@@ -166,7 +166,7 @@ rigyn uninstall --yes
 ```
 
 Install, self-update, and uninstall are serialized across processes. Update and uninstall refuse to mutate the
-installation while another Rigyn runtime is active; close the other terminal first. The default self-update verifies
+installation while another rigyn runtime is active; close the other terminal first. The default self-update verifies
 the latest public GitHub release and refuses to replace the installation with an older version;
 `RIGYN_UPDATE_SPEC` remains an explicit operator override for a reviewed local `rigyn-<version>.tgz` accompanied by
 the other three same-version package archives. An interrupted install or

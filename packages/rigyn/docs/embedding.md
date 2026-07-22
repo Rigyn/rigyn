@@ -1,6 +1,6 @@
-# Embedding Rigyn
+# Embedding rigyn
 
-`rigyn/embedding` exposes one active Rigyn session through a narrow in-process Node.js facade. It supports prompting, streaming event subscriptions, cancellation, steering, follow-ups, model selection, reload, and cleanup without returning credential stores or authentication material.
+`rigyn/embedding` exposes one active rigyn session through a narrow in-process Node.js facade. It supports prompting, streaming event subscriptions, cancellation, steering, follow-ups, model selection, reload, and cleanup without returning credential stores or authentication material.
 
 ## Configured harness
 

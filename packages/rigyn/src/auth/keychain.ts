@@ -111,7 +111,7 @@ export class PlatformKeychainAdapter implements KeychainAdapter {
           })
         : await this.#run({
             command: "/usr/bin/secret-tool",
-            args: ["store", `--label=Rigyn: ${service}`, "service", service, "account", account],
+            args: ["store", `--label=rigyn: ${service}`, "service", service, "account", account],
             environment: this.#environment,
             input: secret,
             ...(signal === undefined ? {} : { signal }),

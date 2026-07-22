@@ -121,6 +121,6 @@ export class ModelRegistry {
 /** @internal Bridge used by the SDK without making its implementation registry public. */
 export function unwrapPublicModelRegistry(registry: ModelRegistry): InternalModelRegistry {
   const runtime = publicRegistryRuntimes.get(registry);
-  if (runtime === undefined) throw new TypeError("ModelRegistry was not created by this Rigyn runtime");
+  if (runtime === undefined) throw new TypeError("ModelRegistry was not created by this rigyn runtime");
   return runtime.internalRegistry();
 }

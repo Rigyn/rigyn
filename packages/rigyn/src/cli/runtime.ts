@@ -35,7 +35,7 @@ import {
   type PackageActivationCandidate,
   type ResolvedPaths,
 } from "../core/package-manager.js";
-import { SettingsManager } from "../core/settings-manager.js";
+import { SettingsManager, type ThinkingLevel } from "../core/settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../core/slash-commands.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import {
@@ -1821,7 +1821,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           );
           candidate.runtimeExtensions.setHostContext({ mode: previous.runtimeExtensions.hostContext().mode });
           if (candidate.sessionDirectory !== previous.sessionDirectory) {
-            throw new Error("sessionDirectory cannot change during /reload; restart Rigyn to use the new location");
+            throw new Error("sessionDirectory cannot change during /reload; restart rigyn to use the new location");
           }
           candidateSession = await AgentSession.create({
             sessionManager,
@@ -1980,6 +1980,7 @@ export async function loadRuntime(options: RuntimeOptions = {}): Promise<LoadedR
           const model = selected === undefined ? undefined : target.modelRegistry.find(selected.provider, selected.id);
           return model === undefined ? {} : { model };
         })(),
+        thinkingLevel: runtime.session.thinkingLevel as ThinkingLevel,
         isIdle() { return runtime.session.isIdle; },
         hasPendingMessages() { return runtime.session.hasPendingMessages; },
         abort() { runtime.session.abort("Cancelled by extension"); },

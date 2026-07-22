@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Active tool, model, command, and resource discovery example for Rigyn",
+  "description": "Active tool, model, command, and resource discovery example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

@@ -24,8 +24,8 @@ const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const userHome = homedir();
 const explicitUpdateSpec = process.env.RIGYN_UPDATE_SPEC;
 const sensitiveEnvironmentName = /(?:^|_)(?:api_?key|auth(?:orization|_?token)?|cookie|credential|id_?token|password|passwd|private_?key|refresh_?token|secret|token)(?:_|$)/iu;
-const latestReleaseApi = "https://api.github.com/repos/Rigyn/rigyn/releases/latest";
-const releaseDownloadRoot = "https://github.com/Rigyn/rigyn/releases/download";
+const latestReleaseApi = "https://api.github.com/repos/rigyn/rigyn/releases/latest";
+const releaseDownloadRoot = "https://github.com/rigyn/rigyn/releases/download";
 const releaseManifestKeys = [
   "schemaVersion", "product", "version", "tag", "packaging", "node", "nodeRuntime", "archive", "archives",
   "source", "standalones", "checksumFile", "releaseNotes", "targets",
@@ -135,16 +135,16 @@ function releaseAssetMap(release) {
     || release.draft !== false
     || release.prerelease !== false
     || !Array.isArray(release.assets)) {
-    throw new Error("Latest Rigyn GitHub release metadata is invalid");
+    throw new Error("Latest rigyn GitHub release metadata is invalid");
   }
   const assets = new Map();
   for (const asset of release.assets) {
     if (asset === null || typeof asset !== "object" || Array.isArray(asset)
       || typeof asset.name !== "string" || asset.name === ""
       || !Number.isSafeInteger(asset.size) || asset.size < 1) {
-      throw new Error("Latest Rigyn GitHub release contains invalid asset metadata");
+      throw new Error("Latest rigyn GitHub release contains invalid asset metadata");
     }
-    if (assets.has(asset.name)) throw new Error(`Latest Rigyn GitHub release repeats asset ${asset.name}`);
+    if (assets.has(asset.name)) throw new Error(`Latest rigyn GitHub release repeats asset ${asset.name}`);
     assets.set(asset.name, asset);
   }
   return assets;
@@ -155,7 +155,7 @@ function expectedArchiveFile(name, version) {
 }
 
 export function validateGitHubReleaseManifest(value, tagName) {
-  const manifest = exactKeys(value, releaseManifestKeys, "Rigyn release manifest");
+  const manifest = exactKeys(value, releaseManifestKeys, "rigyn release manifest");
   if (manifest.schemaVersion !== 4
     || manifest.product !== "rigyn"
     || typeof manifest.version !== "string"
@@ -172,11 +172,11 @@ export function validateGitHubReleaseManifest(value, tagName) {
     || !Array.isArray(manifest.targets)
     || !Array.isArray(manifest.archives)
     || manifest.archives.length !== RIGYN_PRODUCT_PACKAGE_GRAPH.length) {
-    throw new Error("Rigyn release manifest does not describe a supported GitHub release");
+    throw new Error("rigyn release manifest does not describe a supported GitHub release");
   }
 
   const archives = manifest.archives.map((value, index) => {
-    const archive = exactKeys(value, archiveKeys, `Rigyn release archive ${index + 1}`);
+    const archive = exactKeys(value, archiveKeys, `rigyn release archive ${index + 1}`);
     const expectedName = RIGYN_PRODUCT_PACKAGE_GRAPH[index]?.name;
     if (archive.name !== expectedName
       || archive.version !== manifest.version
@@ -186,14 +186,14 @@ export function validateGitHubReleaseManifest(value, tagName) {
       || !Number.isSafeInteger(archive.bytes)
       || archive.bytes < 1
       || archive.bytes > maxReleaseArchiveBytes) {
-      throw new Error(`Rigyn release archive metadata is invalid for ${expectedName}`);
+      throw new Error(`rigyn release archive metadata is invalid for ${expectedName}`);
     }
     return archive;
   });
   const productArchive = archives.at(-1);
-  const primaryArchive = exactKeys(manifest.archive, archiveKeys, "Rigyn primary release archive");
+  const primaryArchive = exactKeys(manifest.archive, archiveKeys, "rigyn primary release archive");
   if (!archiveKeys.every((key) => primaryArchive[key] === productArchive[key])) {
-    throw new Error("Rigyn primary release archive does not match the product archive");
+    throw new Error("rigyn primary release archive does not match the product archive");
   }
   return { manifest, archives };
 }
@@ -239,30 +239,30 @@ export async function downloadLatestGitHubReleaseBundle(directory, options = {})
   const releaseResponse = await fetchReleaseResponse(
     fetcher,
     latestReleaseApi,
-    "Latest Rigyn GitHub release metadata",
+    "Latest rigyn GitHub release metadata",
     "application/vnd.github+json",
   );
   const release = parseJson(
-    await readBoundedResponse(releaseResponse, maxReleaseMetadataBytes, "Latest Rigyn GitHub release metadata"),
-    "Latest Rigyn GitHub release metadata",
+    await readBoundedResponse(releaseResponse, maxReleaseMetadataBytes, "Latest rigyn GitHub release metadata"),
+    "Latest rigyn GitHub release metadata",
   );
   const assets = releaseAssetMap(release);
   const manifestAsset = assets.get("release-manifest.json");
   if (manifestAsset === undefined || manifestAsset.size > maxReleaseManifestBytes) {
-    throw new Error("Latest Rigyn GitHub release has no bounded release-manifest.json asset");
+    throw new Error("Latest rigyn GitHub release has no bounded release-manifest.json asset");
   }
   const manifestResponse = await fetchReleaseResponse(
     fetcher,
     `${releaseDownloadRoot}/${encodeURIComponent(release.tag_name)}/release-manifest.json`,
-    "Rigyn release manifest",
+    "rigyn release manifest",
     "application/octet-stream",
   );
-  const manifestContents = await readBoundedResponse(manifestResponse, manifestAsset.size, "Rigyn release manifest");
+  const manifestContents = await readBoundedResponse(manifestResponse, manifestAsset.size, "rigyn release manifest");
   if (manifestContents.byteLength !== manifestAsset.size) {
-    throw new Error("Rigyn release manifest size does not match GitHub asset metadata");
+    throw new Error("rigyn release manifest size does not match GitHub asset metadata");
   }
   const { manifest, archives } = validateGitHubReleaseManifest(
-    parseJson(manifestContents, "Rigyn release manifest"),
+    parseJson(manifestContents, "rigyn release manifest"),
     release.tag_name,
   );
 
@@ -273,7 +273,7 @@ export async function downloadLatestGitHubReleaseBundle(directory, options = {})
       const archive = archives[index];
       const asset = assets.get(archive.file);
       if (asset === undefined || asset.size !== archive.bytes) {
-        throw new Error(`Latest Rigyn GitHub release asset metadata does not match ${archive.file}`);
+        throw new Error(`Latest rigyn GitHub release asset metadata does not match ${archive.file}`);
       }
       const response = await fetchReleaseResponse(
         fetcher,
@@ -299,7 +299,7 @@ async function explicitUpdateSpecs(callerCwd) {
     metadata = await lstat(localArchive);
   } catch (error) {
     if (errno(error) === "ENOENT") {
-      throw new Error(`RIGYN_UPDATE_SPEC must name an existing local Rigyn product archive: ${localArchive}`);
+      throw new Error(`RIGYN_UPDATE_SPEC must name an existing local rigyn product archive: ${localArchive}`);
     }
     throw error;
   }
@@ -321,11 +321,11 @@ async function explicitUpdateSpecs(callerCwd) {
     try {
       archiveMetadata = await lstat(path);
     } catch (error) {
-      if (errno(error) === "ENOENT") throw new Error(`Local Rigyn update bundle is incomplete beside ${localArchive}`);
+      if (errno(error) === "ENOENT") throw new Error(`Local rigyn update bundle is incomplete beside ${localArchive}`);
       throw error;
     }
     if (!archiveMetadata.isFile() || archiveMetadata.isSymbolicLink()) {
-      throw new Error(`Local Rigyn update archive is unsafe: ${path}`);
+      throw new Error(`Local rigyn update archive is unsafe: ${path}`);
     }
   }
   return paths;
@@ -337,15 +337,15 @@ async function run(command, args, options) {
 
 export function assertUpdateVersionPolicy(currentVersion, nextVersion, explicitRequest) {
   if (typeof nextVersion !== "string" || valid(nextVersion) === null) {
-    throw new Error("Downloaded Rigyn package version is invalid");
+    throw new Error("Downloaded rigyn package version is invalid");
   }
   if (explicitRequest) return;
   if (typeof currentVersion !== "string" || valid(currentVersion) === null) {
-    throw new Error("Installed Rigyn version is invalid; set RIGYN_UPDATE_SPEC to a reviewed local release bundle to recover");
+    throw new Error("Installed rigyn version is invalid; set RIGYN_UPDATE_SPEC to a reviewed local release bundle to recover");
   }
   if (lt(nextVersion, currentVersion)) {
     throw new Error(
-      `Refusing to replace Rigyn ${currentVersion} with older ${nextVersion}; set RIGYN_UPDATE_SPEC to a reviewed local release bundle to downgrade`,
+      `Refusing to replace rigyn ${currentVersion} with older ${nextVersion}; set RIGYN_UPDATE_SPEC to a reviewed local release bundle to downgrade`,
     );
   }
 }
@@ -366,7 +366,7 @@ async function update() {
     const lifecycleManifest = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
     const nodeTypesVersion = lifecycleManifest.devDependencies?.["@types/node"];
     if (typeof nodeTypesVersion !== "string" || nodeTypesVersion === "") {
-      throw new Error("Installed Rigyn package does not pin @types/node");
+      throw new Error("Installed rigyn package does not pin @types/node");
     }
 
     const staging = await mkdtemp(join(tmpdir(), "rigyn-update-"));
@@ -399,7 +399,7 @@ async function update() {
         "--",
         ...specs,
       ]);
-      await run(npm.command, npm.args, { cwd: staging, env: environment, label: "Rigyn download" });
+      await run(npm.command, npm.args, { cwd: staging, env: environment, label: "rigyn download" });
       const packageRoot = join(prefix, "node_modules", "rigyn");
       const manifests = new Map();
       for (const { name } of RIGYN_PRODUCT_PACKAGE_GRAPH) {
@@ -419,7 +419,7 @@ async function update() {
         throw new Error("Downloaded package identity is invalid");
       }
       if (updateSource.version !== undefined && manifest.version !== updateSource.version) {
-        throw new Error("Downloaded Rigyn package does not match the GitHub release manifest");
+        throw new Error("Downloaded rigyn package does not match the GitHub release manifest");
       }
       for (const [name, downloadedManifest] of manifests) {
         if (downloadedManifest.version !== manifest.version) {
@@ -435,13 +435,13 @@ async function update() {
       await run(process.execPath, [installer], {
         cwd: callerCwd,
         env: { ...environment, HOME: userHome, USERPROFILE: userHome },
-        label: "Rigyn update installation",
+        label: "rigyn update installation",
       });
       const installedMarker = await readInstallationMarker(installRoot);
       if (installedMarker === undefined || installedMarker.marker.version !== manifest.version) {
         throw new Error("Updated installation marker does not match the downloaded package");
       }
-      writeFileSync(1, `Updated Rigyn from ${markerRecord.marker.version} to ${manifest.version}\n`);
+      writeFileSync(1, `Updated rigyn from ${markerRecord.marker.version} to ${manifest.version}\n`);
     } finally {
       await rm(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rigyn:schema:package-gallery:v1",
-  "title": "Rigyn extension package gallery index",
+  "title": "rigyn extension package gallery index",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "packages"],

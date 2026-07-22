@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "System prompt and compaction control example for Rigyn",
+  "description": "System prompt and compaction control example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

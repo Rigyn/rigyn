@@ -42,6 +42,7 @@ export const REQUIRED_SOURCE_PATHS = Object.freeze([
   "packages/rigyn/src/providers/maintained-model-catalog.ts",
   "packages/rigyn/resources/AGENTS.md",
   "packages/rigyn/resources/settings.example.json",
+  "packages/rigyn/resources/schemas/theme-v1.json",
   "packages/rigyn/scripts/install-user.mjs",
   "packages/rigyn/scripts/lifecycle-common.mjs",
 ]);

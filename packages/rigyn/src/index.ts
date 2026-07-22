@@ -240,7 +240,7 @@ export type { ReadonlyFooterDataProvider } from "./tui/footer-data.js";
 export { Theme } from "./tui/theme.js";
 
 // Generic coding-agent compatibility surface. These are thin facades over the
-// same modules used by Rigyn's CLI and SDK; no second runtime is constructed.
+// same modules used by rigyn's CLI and SDK; no second runtime is constructed.
 export { VERSION, getDocsPath, getExamplesPath, getPackageDir, getReadmePath } from "./config/paths.js";
 export {
   ProjectTrustStore,

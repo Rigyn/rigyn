@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Generation and agent lifecycle observation example for Rigyn",
+  "description": "Generation and agent lifecycle observation example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

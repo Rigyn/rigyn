@@ -1,4 +1,5 @@
 import type { EventEnvelope, RunState } from "../core/events.js";
+import type { BackgroundCell } from "@rigyn/terminal";
 import type { JsonValue } from "../core/json.js";
 import type { ImageBlock, ModelInfo, NormalizedUsage } from "../core/types.js";
 import type { ImageCoordinateMetadata } from "../images/preprocess.js";
@@ -8,7 +9,7 @@ import type { Keybindings } from "./keybindings.js";
 import type { TerminalImagePlacement, TerminalImageProtocol, TranscriptImage } from "./terminal-image.js";
 
 export type TuiMode = "full" | "classic" | "accessible";
-export type BuiltinThemeName = "mono";
+export type BuiltinThemeName = "mono" | "signal";
 export type ThemeName = BuiltinThemeName | (string & {});
 export type PickerKind = "command" | "model" | "provider" | "session" | "file" | "generic";
 export type TuiPersistentComponentSlot =
@@ -367,6 +368,7 @@ export interface TuiViewState {
   notice?: string;
   queuedMessages?: readonly QueuedMessage[];
   inputImages?: readonly TuiInputImageSummary[];
+  backgroundCells?: readonly BackgroundCell[];
   runtimeComponent?: RuntimeUiBlock;
   rawRuntimeComponent?: TuiRawBlock;
   runtimeHeaderComponents?: readonly RuntimeUiBlock[];

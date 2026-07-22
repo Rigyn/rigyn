@@ -1,12 +1,12 @@
-# Rigyn
+# rigyn
 
-Rigyn is a local-first coding agent that runs in your terminal. Start it inside a project, describe an outcome, and the selected model can inspect files, run commands, and apply edits through Rigyn's bounded tools. The conversation, tool history, branches, model choice, and extension state are saved locally so work can continue in a later terminal.
+rigyn is a local-first coding agent that runs in your terminal. Start it inside a project, describe an outcome, and the selected model can inspect files, run commands, and apply edits through rigyn's bounded tools. The conversation, tool history, branches, model choice, and extension state are saved locally so work can continue in a later terminal.
 
-Rigyn is both an interactive application and an extensible runtime. The same installation supports an interactive terminal workflow, one-shot commands, JSON events, a newline-delimited command protocol, and an in-process Node.js API. Skills add on-demand instructions; prompt templates add reusable tasks; custom themes change presentation; and trusted extension packages can add tools, commands, providers, authentication methods, durable state, and structural UI directly to the active harness.
+rigyn is both an interactive application and an extensible runtime. The same installation supports an interactive terminal workflow, one-shot commands, JSON events, a newline-delimited command protocol, and an in-process Node.js API. Skills add on-demand instructions; prompt templates add reusable tasks; custom themes change presentation; and trusted extension packages can add tools, commands, providers, authentication methods, durable state, and structural UI directly to the active harness.
 
-"Local-first" describes where the runtime, tools, configuration, credentials, and append-only session files live. Requests still go to the model provider you select unless you use a local provider. `bash` and runtime extensions execute with your operating-system user privileges, so Rigyn is not an isolation boundary and installed code should be reviewed.
+"Local-first" describes where the runtime, tools, configuration, credentials, and append-only session files live. Requests still go to the model provider you select unless you use a local provider. `bash` and runtime extensions execute with your operating-system user privileges, so rigyn is not an isolation boundary and installed code should be reviewed.
 
-The agent loop, canonical provider mappings, normalized events, and subscription transports are implemented in this repository. Exact-pinned official SDKs act only as transport adapters where a supported protocol uses them, including OpenAI and compatible routes, Anthropic API-key calls, AWS Bedrock, Google Gemini and Vertex, and Mistral. Provider-specific OAuth, subscription, and local transports that do not use those adapters stay within Rigyn. Other third-party dependencies provide HTTP transport, image conversion, YAML parsing, ignore matching, and the bundled ripgrep executable.
+The agent loop, canonical provider mappings, normalized events, and subscription transports are implemented in this repository. Exact-pinned official SDKs act only as transport adapters where a supported protocol uses them, including OpenAI and compatible routes, Anthropic API-key calls, AWS Bedrock, Google Gemini and Vertex, and Mistral. Provider-specific OAuth, subscription, and local transports that do not use those adapters stay within rigyn. Other third-party dependencies provide HTTP transport, image conversion, YAML parsing, ignore matching, and the bundled ripgrep executable.
 
 The project is pre-release. Standalone archives include the pinned runtime. Source and package-archive installations
 require Node.js 24.15 or a current Node.js 26-or-newer release.
@@ -22,40 +22,40 @@ copy.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rigyn/rigyn/main/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rigyn/rigyn/main/install.ps1 | iex
 ```
 
-Neither command needs an npm account or resolves a Rigyn package from the npm registry. The equivalent version-pinned
+Neither command needs an npm account or resolves a rigyn package from the npm registry. The equivalent version-pinned
 manual command is:
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn
 ```
 
 This uses npm's one-shot package executor with version-pinned GitHub assets; it does not create a global npm
-installation or download a Rigyn package from the npm registry.
+installation or download a rigyn package from the npm registry.
 
 To install without Node.js or npm, download the standalone archive matching your platform from the
-[v0.5.1 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.1), verify it against `SHA256SUMS`, and
+[v0.5.1 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.5.1), verify it against `SHA256SUMS`, and
 extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/rigyn`
 on Linux or macOS and `bin\rigyn.cmd` on Windows.
 
 From the public source checkout today:
 
 ```sh
-git clone https://github.com/Rigyn/rigyn.git
+git clone https://github.com/rigyn/rigyn.git
 cd rigyn
 npm run install:user
 rigyn
@@ -84,7 +84,7 @@ See [installation and platform troubleshooting](docs/install.md) for Linux, macO
 
 ## First run
 
-Change to the project you want Rigyn to work on, start the interface, connect a provider, and select one of that provider's currently available models:
+Change to the project you want rigyn to work on, start the interface, connect a provider, and select one of that provider's currently available models:
 
 ```sh
 cd /path/to/your/project
@@ -96,7 +96,7 @@ rigyn
 /model
 ```
 
-The directory where you launch Rigyn is the workspace unless you pass `--workspace DIR`. The self-contained command works from any directory and does not redirect execution to the Rigyn source checkout. Workspace scope controls project instructions, trusted project resources, tool working directories, and the default session list; it is not a filesystem sandbox.
+The directory where you launch rigyn is the workspace unless you pass `--workspace DIR`. The self-contained command works from any directory and does not redirect execution to the rigyn source checkout. Workspace scope controls project instructions, trusted project resources, tool working directories, and the default session list; it is not a filesystem sandbox.
 
 `/login` offers only the authentication methods supported by the selected provider: subscription OAuth, browser or device OAuth, an environment credential, an API key, a cloud identity, or a local connection. Self-contained installs keep stored secrets in the installation's encrypted local credential store; on Windows its key is protected with DPAPI. Source and portable runs without an existing local key probe the current user's macOS Keychain or Linux Secret Service and create a private encrypted fallback when the desktop service is unavailable.
 
@@ -151,7 +151,7 @@ Useful interactive commands are:
 
 Type `/` to open the command palette. `! command` runs a user shell command without sending it to the model. While a response is active, normal submissions steer the current run and the follow-up shortcut queues work for the next turn. Queue behavior is configurable as one-at-a-time or all-at-once.
 
-The interface uses one bundled monochrome black-and-white theme; discovered user and trusted-project custom themes remain selectable. It also includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, bounded live tool output, complete retained tool details after completion, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
+The interface includes the default monochrome `mono` theme and the operational `signal` theme; discovered user and trusted-project custom themes remain selectable. `signal` visually separates reasoning, active tools, outcomes, warnings, diffs, selections, and status while retaining the same textual and structural cues. The TUI also includes immediate animated work/retry/compaction status, streaming text and provider-supplied reasoning summaries, bounded live tool output, complete retained tool details after completion, token/cache/cost status, model and thinking-level cycling, current/all-workspace session switching, transcript scrolling, external-editor support, command and path completion, image-or-text clipboard paste, queued-input recovery, and configurable keybindings. `Ctrl+T` expands or collapses reasoning summaries, and `Shift+Tab` cycles thinking levels supported by the selected model. Ctrl+Z restores the terminal before suspending on Unix; Ctrl+C twice exits; double-Escape on an empty editor follows `doubleEscapeAction`. Run `/hotkeys` for bindings in the current installation.
 
 ## Sessions and continuity
 
@@ -235,7 +235,7 @@ An extension package can contribute:
 
 Runtime extensions are trusted local code and can use the same Node.js and operating-system access as the harness. Project-local executable resources are ignored until the workspace is trusted; declarative user resources do not trigger repeated prompts.
 
-External protocols are integrated by trusted direct extensions rather than a core catch-all configuration file. The [subprocess worker example](examples/subprocess-workers/README.md) runs specialized Rigyn children concurrently and demonstrates structured output validation, recursion prevention, timeouts, cancellation, bounded aggregation, and failure isolation.
+External protocols are integrated by trusted direct extensions rather than a core catch-all configuration file. The [subprocess worker example](examples/subprocess-workers/README.md) runs specialized rigyn children concurrently and demonstrates structured output validation, recursion prevention, timeouts, cancellation, bounded aggregation, and failure isolation.
 
 Managed packages support production dependencies with lifecycle scripts disabled by default. A reviewed install or update may opt in for that transaction with `--allow-scripts`; source-package prepare/pack scripts remain disabled. Immutable npm/Git pins, source provenance, SSH-agent authentication, and private per-package module trees are enforced by the package manager. Authoring tools report optional `engines.rigyn` metadata, but the current loader does not treat it as an activation gate; verify the packed package against each supported host release. See the package guide for the `rigyn` package.json convention and configurable npm/Git wrapper argv.
 
@@ -259,7 +259,7 @@ Project settings are neither read nor writable before trust. The global-only `de
 
 The self-contained installer creates a ready-to-edit personal template at `~/.rigyn/agent/AGENTS.md` and preserves it on updates. Personal agent instructions belong there, or in
 `$RIGYN_CODING_AGENT_DIR/AGENTS.md` when that directory is overridden. Project instructions belong in `AGENTS.md`
-files along the path to the active working directory. Rigyn appends the global file first and project files from the
+files along the path to the active working directory. rigyn appends the global file first and project files from the
 outermost ancestor to the working directory, so more specific instructions appear later. `/reload` rereads them.
 
 Example:
@@ -357,16 +357,16 @@ npm run check
 
 `npm run check` type-checks source and tests, executes the full unit and PTY suite, builds distributable JavaScript and declarations, compiles an external consumer, tests the built package, and installs a packed artifact into an isolated home for an offline end-to-end run.
 
-`npm run benchmark:offline --workspace rigyn` runs a credential-free, deterministic harness-plumbing corpus through the real service and tools. Its versioned JSON report tracks completion, pass@1, multi-file and continuation scenarios, provider/tool recovery, parallel tool batches, mutation preservation, verification, usage/cost, compaction, and crash recovery. It does not measure model intelligence. See [Outcome benchmarks](https://github.com/Rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md) for metric definitions and limitations.
+`npm run benchmark:offline --workspace rigyn` runs a credential-free, deterministic harness-plumbing corpus through the real service and tools. Its versioned JSON report tracks completion, pass@1, multi-file and continuation scenarios, provider/tool recovery, parallel tool batches, mutation preservation, verification, usage/cost, compaction, and crash recovery. It does not measure model intelligence. See [Outcome benchmarks](https://github.com/rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md) for metric definitions and limitations.
 
 `npm run benchmark:extensions --workspace rigyn` is a second credential-free verifier. It runs extension candidates through managed install, public discovery, activation, reload, and removal and reports pass@1/pass@3 with zero model calls.
 
-`npm run benchmark:runtime --workspace rigyn` measures eleven deterministic startup, large-package reload, small/large session resume, bounded cold-history paging, and cursor-paged RPC replay scenarios against generous freeze-regression ceilings. `npm run test:coverage:risk` aggregates subprocess-aware coverage and enforces separate line, branch, and function floors for the extension runtime, CLI, TUI controller, agent session, and JSONL session manager. The paid `npm run benchmark:compare --workspace rigyn` command is opt-in and gives two CLIs the same model, task files, and external verifier; it does not claim one harness is better without evidence. See [Outcome benchmarks](https://github.com/Rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md).
+`npm run benchmark:runtime --workspace rigyn` measures eleven deterministic startup, large-package reload, small/large session resume, bounded cold-history paging, and cursor-paged RPC replay scenarios against generous freeze-regression ceilings. `npm run test:coverage:risk` aggregates subprocess-aware coverage and enforces separate line, branch, and function floors for the extension runtime, CLI, TUI controller, agent session, and JSONL session manager. The paid `npm run benchmark:compare --workspace rigyn` command is opt-in and gives two CLIs the same model, task files, and external verifier; it does not claim one harness is better without evidence. See [Outcome benchmarks](https://github.com/rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md).
 
 The high-level component map is in [Architecture](docs/ARCHITECTURE.md). Practical operations are covered by the [cookbook](docs/cookbook.md), [local diagnostics](docs/diagnostics.md), [troubleshooting guide](docs/troubleshooting.md), and [platform notes](docs/platforms.md).
 
-Contribution expectations, security reporting, release-visible changes, and the deterministic release procedure are in [CONTRIBUTING.md](https://github.com/Rigyn/rigyn/blob/main/CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [docs/releasing.md](docs/releasing.md).
+Contribution expectations, security reporting, release-visible changes, and the deterministic release procedure are in [CONTRIBUTING.md](https://github.com/rigyn/rigyn/blob/main/CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [docs/releasing.md](docs/releasing.md).
 
 ## License
 
-Rigyn is released under the [MIT License](LICENSE).
+rigyn is released under the [MIT License](LICENSE).

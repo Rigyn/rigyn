@@ -119,13 +119,21 @@ test("full TUI defaults to an inline surface with raw mode, Unicode editing, and
   assert.match(output.text, /\u001b\[\?2004l/u);
 });
 
-test("custom paired themes follow terminal color reports while mono is the sole bundled theme", () => {
+test("signal is selectable at startup without custom-theme discovery", () => {
+  const { controller } = fullController({ theme: "signal" });
+  assert.equal(controller.selectedThemeName(), "signal");
+  assert.equal(controller.selectedThemeSetting(), "signal");
+  assert.deepEqual(controller.themeNames(), ["mono", "signal"]);
+  controller.close();
+});
+
+test("custom paired themes follow terminal color reports alongside both built-in themes", () => {
   const { input, output, controller } = fullController();
   controller.setCustomThemes([
     parseThemeDefinition({ schemaVersion: 1, name: "paper", base: "light", styles: { accent: { foreground: 16 } } }),
     parseThemeDefinition({ schemaVersion: 1, name: "ocean", base: "dark", styles: { accent: { foreground: 255 } } }),
   ]);
-  assert.deepEqual(controller.themeNames(), ["mono", "ocean", "paper"]);
+  assert.deepEqual(controller.themeNames(), ["mono", "ocean", "paper", "signal"]);
   controller.setTheme("paper/ocean");
   const changes: string[] = [];
   controller.onThemeChange((change) => changes.push(`${change.reason}:${change.current}`));
@@ -143,6 +151,9 @@ test("custom paired themes follow terminal color reports while mono is the sole 
   assert.equal(controller.selectedThemeName(), "mono");
   assert.equal(controller.selectedThemeSetting(), "mono");
   assert.match(output.text, /\u001b\[\?2031l/u);
+  controller.setTheme("signal");
+  assert.equal(controller.selectedThemeName(), "signal");
+  assert.equal(controller.selectedThemeSetting(), "signal");
   controller.close();
 });
 
@@ -2493,7 +2504,7 @@ test("rendered provider events are escaped before reaching the terminal", async 
   controller.close();
 });
 
-test("controller exposes mono plus declarative extension themes", async () => {
+test("controller exposes both built-ins plus declarative extension themes", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
   const controller = new TuiController({
@@ -2503,12 +2514,18 @@ test("controller exposes mono plus declarative extension themes", async () => {
     handleSignals: false,
   });
   controller.start();
+  assert.throws(() => controller.setCustomThemes([{
+    schemaVersion: 1,
+    name: "signal",
+    base: "dark",
+    styles: { accent: { foreground: 203 } },
+  }]), /conflicts with a built-in theme/u);
   controller.setCustomThemes([parseThemeDefinition({
     schemaVersion: 1,
     name: "ocean",
     styles: { accent: { foreground: "#00aaff" } },
   })]);
-  assert.deepEqual(controller.themeNames(), ["mono", "ocean"]);
+  assert.deepEqual(controller.themeNames(), ["mono", "ocean", "signal"]);
   output.chunks.length = 0;
   controller.setTheme("ocean");
   await tick();
@@ -2516,7 +2533,7 @@ test("controller exposes mono plus declarative extension themes", async () => {
   assert.equal(controller.selectedThemeName(), "ocean");
   controller.setCustomThemes([]);
   assert.equal(controller.selectedThemeName(), "mono");
-  assert.deepEqual(controller.themeNames(), ["mono"]);
+  assert.deepEqual(controller.themeNames(), ["mono", "signal"]);
   controller.close();
 });
 

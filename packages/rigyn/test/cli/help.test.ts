@@ -25,7 +25,7 @@ function cli(args: string[], overrides: NodeJS.ProcessEnv = {}) {
 
 test("CLI help has concise global and command-specific surfaces", () => {
   const global = renderCliHelp();
-  assert.match(global, /^Rigyn \S+ — coding agent/u);
+  assert.match(global, /^rigyn \S+ — coding agent/u);
   assert.match(global, /Usage:\n  rigyn \[OPTIONS\] \[@FILES\.\.\.\] \[MESSAGES\.\.\.\]/u);
   assert.match(global, /-p, --print\s+Process messages non-interactively and exit/u);
   assert.ok(global.indexOf("Model:") < global.indexOf("Sessions:"));
@@ -53,7 +53,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(renderCliHelp("install"), /disabled unless --allow-scripts/u);
   assert.match(renderCliHelp("update"), /only to this update transaction/u);
   assert.match(renderCliHelp("uninstall"), /saved configuration, credentials, sessions/u);
-  assert.match(renderCliHelp("self-update"), /latest verified Rigyn GitHub release/u);
+  assert.match(renderCliHelp("self-update"), /latest verified rigyn GitHub release/u);
   assert.match(renderCliHelp("self-update"), /atomically replaces/u);
   assert.match(renderCliHelp("config"), /validates a top-level JSON object/u);
   assert.throws(() => renderCliHelp("unknown"), /Unknown help topic/u);
@@ -91,7 +91,7 @@ test("subcommand --help exits before loading runtime state", () => {
 test("recursive harness launches stop at a fixed process-depth boundary", () => {
   const result = cli(["--version"], { RIGYN_RECURSION_DEPTH: "4" });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Refusing recursive Rigyn launch at depth 5/u);
+  assert.match(result.stderr, /Refusing recursive rigyn launch at depth 5/u);
   assert.equal(result.stdout, "");
 });
 

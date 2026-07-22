@@ -100,6 +100,7 @@ async function loadExample(
     sessionManager: extensionSessionManager(session),
     modelRegistry: new ModelRegistry(models),
     model: selectedModel,
+    thinkingLevel: "off",
     isIdle: () => true,
     hasPendingMessages() { calls.push({ name: "hasPendingMessages", values: [] }); return true; },
     abort() { calls.push({ name: "abort", values: [] }); },

@@ -252,7 +252,7 @@ async function stage(output, sourceRef) {
       writeFile(resolve(staging, "SHA256SUMS"), checksums, { mode: 0o600 }),
       writeFile(
         resolve(staging, "RELEASE_NOTES.md"),
-        `# Rigyn ${manifest.version}\n\n${metadata.releaseBody}\n`,
+        `# rigyn ${manifest.version}\n\n${metadata.releaseBody}\n`,
         { mode: 0o600 },
       ),
       writeFile(

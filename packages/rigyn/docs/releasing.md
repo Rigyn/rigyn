@@ -2,7 +2,7 @@
 
 ## Version policy
 
-Rigyn uses `major.minor.patch` versions and `v<version>` Git tags. While the project is below 1.0:
+rigyn uses `major.minor.patch` versions and `v<version>` Git tags. While the project is below 1.0:
 
 - patch releases contain backward-compatible fixes, security updates, and documentation corrections;
 - minor releases may add features and may contain a documented breaking change;

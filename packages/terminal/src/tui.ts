@@ -10,6 +10,18 @@ export interface Component {
   wantsKeyRelease?: boolean;
   invalidate(): void;
 }
+/** One zero-based, single-column glyph on a host-owned background plane. */
+export interface BackgroundCell {
+  row: number;
+  column: number;
+  text: string;
+}
+/** A bounded background projection. The host remains the only terminal writer. */
+export interface BackgroundComponent {
+  render(width: number, height: number): readonly BackgroundCell[];
+  invalidate(): void;
+  dispose?(): void;
+}
 export interface Focusable { focused: boolean }
 export function isFocusable(component: Component | null): component is Component & Focusable { return component !== null && "focused" in component; }
 export const CURSOR_MARKER = "\x1b_rigyn:c\x07";

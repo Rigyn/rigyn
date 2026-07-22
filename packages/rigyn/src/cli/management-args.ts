@@ -38,7 +38,7 @@ const SHORT_FLAGS: Record<string, string> = {
   ne: "no-extensions",
 };
 
-/** Internal parser for Rigyn's package and maintenance subcommands. */
+/** Internal parser for rigyn's package and maintenance subcommands. */
 export interface ManagementArguments {
   command: string;
   positionals: string[];

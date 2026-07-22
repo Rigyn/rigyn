@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Redacted provider wire lifecycle example for Rigyn",
+  "description": "Redacted provider wire lifecycle example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

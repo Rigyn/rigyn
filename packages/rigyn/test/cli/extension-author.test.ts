@@ -131,7 +131,7 @@ test("extension author pack emits one reviewed artifact and report aggregates ev
   ]);
 });
 
-test("an authored archive with a host-satisfied Rigyn peer installs, reloads, and removes", async (t) => {
+test("an authored archive with a host-satisfied rigyn peer installs, reloads, and removes", async (t) => {
   const { root } = await fixture(t);
   const packed = await packExtensionPackage(root, join(root, "artifacts"));
   const agentDir = join(root, "agent");

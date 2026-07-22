@@ -22,13 +22,15 @@ test("startup and hotkey reports derive labels from current bounded keybindings"
     prompts: ["/explain", "/inspect"],
   };
   const report = formatStartupReport(inventory, "/workspace", keybindings);
-  assert.equal(report.split("\n", 1)[0], `Rigyn ${RIGYN_VERSION} · Ready`);
+  assert.match(report, new RegExp(`rigyn ${RIGYN_VERSION.replaceAll(".", "\\.")}`, "u"));
+  assert.match(report, /programmable agent harness/u);
   assert.match(report, /^ctrl\+X interrupt · ctrl\+C clear\/exit · ctrl\+D exit · \/ commands$/mu);
   assert.match(report, /^Workspace: \/workspace$/mu);
   assert.match(report, /^Loaded: 1 extensions · 1 skills · 2 prompts$/mu);
 
   const compact = formatCompactStartupReport(inventory, "/workspace", keybindings);
-  assert.equal(compact, report);
+  assert.equal(compact.split("\n", 1)[0], `rigyn ${RIGYN_VERSION} · ready  ◇─┬─◆`);
+  assert.notEqual(compact, report);
 
   const hotkeys = formatHotkeys(keybindings);
   assert.equal(hotkeys, "ctrl+X interrupt · ctrl+C clear/exit · ctrl+D exit · / commands");
@@ -40,7 +42,8 @@ test("startup report remains concise when no optional resources are present", ()
   assert.doesNotMatch(report, /^Loaded:/mu);
   const compact = formatCompactStartupReport(inventory, "/workspace");
   assert.doesNotMatch(compact, /^Loaded:/mu);
-  assert.equal(compact, report);
+  assert.match(compact, /^rigyn .* · ready/u);
+  assert.notEqual(compact, report);
   assert.equal(formatHotkeys(new Keybindings()), "Esc interrupt · ctrl+C clear/exit · ctrl+D exit · / commands");
 });
 

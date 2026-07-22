@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { runProcess } from "../src/process/index.js";
+import type { CommandResult } from "../src/process/types.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG = join(ROOT, "benchmarks", "risk-coverage.config.json");
@@ -62,6 +63,34 @@ export interface RiskCoverageReport {
   }>;
   targets: RiskCoverageResult[];
   passed: boolean;
+}
+
+type RiskCoverageProcessFailure = Pick<
+  CommandResult,
+  "exitCode" | "signal" | "stdout" | "stderr" | "stdoutBytes" | "stderrBytes" | "timedOut" | "cancelled"
+>;
+
+export function formatRiskCoverageFailure(
+  groupId: string,
+  result: RiskCoverageProcessFailure,
+): { diagnostic: string; message: string } {
+  const sections: string[] = [];
+  const append = (label: "stdout" | "stderr", value: Buffer): void => {
+    if (value.length === 0) return;
+    const output = value.toString("utf8");
+    sections.push(`[risk coverage ${label}]\n${output}${output.endsWith("\n") ? "" : "\n"}`);
+  };
+  append("stdout", result.stdout);
+  append("stderr", result.stderr);
+  const outcome = result.timedOut ? "timed out" : result.cancelled ? "was cancelled" : "failed";
+  return {
+    diagnostic: sections.join(""),
+    message: `Risk coverage group ${groupId} ${outcome} (`
+      + `exitCode=${String(result.exitCode)}, signal=${result.signal ?? "none"}, `
+      + `timedOut=${String(result.timedOut)}, cancelled=${String(result.cancelled)}, `
+      + `stdout=${result.stdout.length}/${result.stdoutBytes} retained/observed bytes, `
+      + `stderr=${result.stderr.length}/${result.stderrBytes} retained/observed bytes)`,
+  };
 }
 
 function portable(path: string): string {
@@ -282,9 +311,9 @@ export async function runRiskCoverageCheck(): Promise<RiskCoverageReport> {
         outputLimitBytes: 16 * 1024 * 1024,
       }, new AbortController().signal);
       if (result.exitCode !== 0 || result.timedOut || result.cancelled) {
-        const diagnostic = result.stderr.toString("utf8").slice(-16 * 1024);
+        const { diagnostic, message } = formatRiskCoverageFailure(group.id, result);
         if (diagnostic !== "") process.stderr.write(diagnostic);
-        throw new Error(result.timedOut ? `Risk coverage group ${group.id} timed out` : `Risk coverage group ${group.id} failed`);
+        throw new Error(message);
       }
       const groupCoverage = parseV8Coverage(await readFile(join(reportDirectory, "coverage-report.json"), "utf8"));
       for (const file of group.targets) {

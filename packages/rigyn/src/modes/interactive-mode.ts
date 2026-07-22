@@ -17,6 +17,7 @@ import { resolveModelsForScope, SCOPED_MODELS_NONE } from "../providers/model-sc
 import type { AgentSession } from "../service/agent-session.js";
 import type { AgentSessionRuntime } from "../service/agent-session-runtime.js";
 import { TuiController } from "../tui/controller.js";
+import { rigynCompactSignature, rigynTerminalLockup } from "../tui/brand.js";
 import { Keybindings as ConfiguredKeybindings, loadKeybindings } from "../tui/keybindings.js";
 import type { PickerItem, TuiAction, TuiControllerOptions, TuiInputImageAttachment } from "../tui/types.js";
 import {
@@ -35,6 +36,7 @@ import { runInteractiveShell } from "./interactive-shell.js";
 import { InteractiveSessionOperations } from "./interactive-session-operations.js";
 import { bindInteractiveRuntimeUi, type InteractiveRuntimeUiBinding } from "./interactive-runtime-ui.js";
 import { presentStartupChangelog, readPackageChangelog } from "./startup-changelog.js";
+import { RIGYN_VERSION } from "../version.js";
 
 export interface InteractiveModeOptions {
   migratedProviders?: string[];
@@ -222,8 +224,8 @@ export class InteractiveMode {
     this.#terminal.setKeybindings(this.#keybindings);
     this.#terminal.start();
     this.#terminal.setStartup(
-      "Rigyn · Ready · /help commands",
-      "Rigyn interactive mode\n/exit quit · /cancel interrupt · /model choose · /reload resources · !command shell",
+      `${rigynCompactSignature(RIGYN_VERSION, this.#terminal.capabilities.unicode)}\n/help commands`,
+      `${rigynTerminalLockup(RIGYN_VERSION, this.#terminal.capabilities.unicode)}\n/exit quit · /cancel interrupt · /model choose · /reload resources · !command shell`,
     );
     this.#terminal.setInterruptHandler(() => {
       if (this.#runtime.session.isIdle) return false;

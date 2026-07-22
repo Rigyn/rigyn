@@ -196,14 +196,14 @@ test("project archive installs activate and resolve by the package name inside t
   await assertNoResidue(value);
 });
 
-test("an incompatible Rigyn peer is rejected before package code or settings commit", async (context) => {
+test("an incompatible rigyn peer is rejected before package code or settings commit", async (context) => {
   const value = await fixture(context);
   process.env.RIGYN_TEST_PACKAGE_VERSION = "1.0.0";
   process.env.RIGYN_TEST_HOST_RANGE = ">=999.0.0";
   process.env.RIGYN_TEST_EXTENSION_SOURCE = "export default () => {};\n";
   const manager = packageManager(value);
 
-  await assert.rejects(manager.installAndPersist("npm:candidate-package"), /requires Rigyn >=999\.0\.0/u);
+  await assert.rejects(manager.installAndPersist("npm:candidate-package"), /requires rigyn >=999\.0\.0/u);
 
   assert.equal(existsSync(join(value.agentDir, "npm")), false);
   assert.deepEqual(value.settings.getGlobalSettings().packages, undefined);

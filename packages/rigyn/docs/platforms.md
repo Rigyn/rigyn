@@ -1,6 +1,6 @@
 # Platform notes
 
-Rigyn requires Node.js 24.15 or a current Node.js 26-or-newer release. The source and packed-artifact checks run on Linux, macOS, and Windows. Release verification covers x64 and arm64, and macOS/Windows runners load the matching TUI helper from the installed archive.
+rigyn requires Node.js 24.15 or a current Node.js 26-or-newer release. The source and packed-artifact checks run on Linux, macOS, and Windows. Release verification covers x64 and arm64, and macOS/Windows runners load the matching TUI helper from the installed archive.
 
 ## Linux
 
@@ -10,7 +10,7 @@ If a desktop keyring is unavailable in SSH or a minimal container, keep the conf
 
 ## macOS
 
-Source and portable runs can use the current user's Keychain through the system `security` command after a bounded functional probe. Self-contained installs use their installation-local encrypted store. The native clipboard and iTerm/Kitty-capable terminals are supported. If an external editor or browser login opens in the wrong desktop context, launch Rigyn from the same user session as the terminal.
+Source and portable runs can use the current user's Keychain through the system `security` command after a bounded functional probe. Self-contained installs use their installation-local encrypted store. The native clipboard and iTerm/Kitty-capable terminals are supported. If an external editor or browser login opens in the wrong desktop context, launch rigyn from the same user session as the terminal.
 
 ## Windows
 

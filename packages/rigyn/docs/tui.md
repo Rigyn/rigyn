@@ -1,6 +1,6 @@
 # Terminal UI
 
-Rigyn uses an inline transcript, a word-wrapped composer, and a compact footer for workspace, session, model, reasoning, token, cache, cost, and context telemetry. Narrow terminals wrap content vertically. Completed output remains in scrollback unless `RIGYN_ALT_SCREEN=1` is selected.
+rigyn uses an inline transcript, a word-wrapped composer, and a compact footer for workspace, session, model, reasoning, token, cache, cost, and context telemetry. Narrow terminals wrap content vertically. Completed output remains in scrollback unless `RIGYN_ALT_SCREEN=1` is selected.
 
 The interactive mode is selected automatically for a raw TTY. `RIGYN_TUI_MODE=full`, `classic`, or `accessible` requests a mode explicitly; `RIGYN_ACCESSIBLE=1` is the accessibility shortcut and `RIGYN_ASCII=1` selects ASCII glyphs. Accessible mode emits no cursor-control sequences.
 
@@ -21,6 +21,7 @@ The context supports:
 - autocomplete wrapping and complete editor replacement;
 - resolved theme inspection, source-path discovery, and custom-theme selection;
 - completed-tool expansion inspection and override;
+- a persistent content-safe background plane;
 - `custom` components and overlays.
 
 UI registrations are generation-owned. Failed activation, reload, host reset, and shutdown restore the nearest surviving owner and dispose stale components. An extension-owned timer, watcher, socket, or other resource still needs `rigyn.onDispose`.
@@ -46,6 +47,22 @@ rigyn.registerCommand("status-panel", {
 
 A component must render deterministically and quickly. It may implement input handling and `dispose()`. Perform I/O outside rendering, invalidate only after state changes, and release component-owned work on disposal. The host owns terminal teardown, resize, focus transfer, and final screen restoration.
 
+`context.ui.setBackground(factory)` installs a generation-owned `BackgroundComponent`; passing `undefined` clears that extension's background and reveals the nearest surviving owner. Its `render(width, height)` method receives the current terminal dimensions and returns zero-based `{ row, column, text }` cells. Each `text` must be exactly one printable, single-column grapheme. The host applies the theme's muted role, rejects terminal controls, and draws a cell only when the transcript, editor, overlays, and terminal images leave that position unoccupied. There is no alpha or background-color blending.
+
+```js
+context.ui.setBackground(() => ({
+  render(width, height) {
+    return width < 24 || height < 6 ? [] : [
+      { row: 1, column: width - 3, text: "·" },
+      { row: 2, column: width - 2, text: "·" },
+    ];
+  },
+  invalidate() {},
+}));
+```
+
+Alternate-screen mode exposes the complete viewport. Inline mode intersects the plane with the mutable live surface so committed transcript scrollback is never repainted or cleared. Resize invalidates the active component, and clearing, reload, failure, or shutdown repaints stale cells through the normal differential renderer.
+
 ## Editor and autocomplete
 
 `context.ui.addAutocompleteProvider(factory)` wraps the current autocomplete provider for the active generation. Validate and bound completions, preserve existing behavior unless replacement is intentional, and stop asynchronous work when the generation signal aborts.
@@ -56,7 +73,7 @@ A component must render deterministically and quickly. It may implement input ha
 
 ## Themes
 
-`context.ui.theme` is the current resolved theme. `getAllThemes`, `getTheme`, and `setTheme` operate on the sole built-in `mono` theme plus validated discovered custom themes, and custom package themes include their source path. A successful selection in the interactive host updates the live renderer and the user's theme setting; headless hosts cannot persist a terminal selection. Terminal-control data in custom theme values is rejected by the loader.
+`context.ui.theme` is the current resolved theme. `getAllThemes`, `getTheme`, and `setTheme` operate on the built-in `mono` and `signal` themes plus validated discovered custom themes, and custom package themes include their source path. A successful selection in the interactive host updates the live renderer and the user's theme setting; headless hosts cannot persist a terminal selection. Terminal-control data in custom theme values is rejected by the loader.
 
 The explicitly trusted direct TUI is the public TUI runtime backed by the active host renderer. Its dimensions, enhanced-keyboard state, color-scheme notifications and queries, background-color query, redraw count, cursor preference, and clear-on-shrink preference reflect live host state. `start()` and `stop()` pause only the extension generation's components and input listeners; they never take ownership of the process terminal. Forced redraws, input draining, and raw terminal callbacks use the existing controller and expire with the extension generation.
 
@@ -90,7 +107,7 @@ A renderer must be a pure projection of the stored value and supplied theme so r
 
 ## Headless behavior
 
-Notifications and simple state can be projected by supported non-TUI hosts, but custom terminal components require an interactive TUI. A command that fundamentally requires a dialog or overlay should report that requirement and stop safely when `context.hasUI` is false. Model-controlled input is never user approval; destructive actions require an actual confirmation interaction.
+Notifications and simple state can be projected by supported non-TUI hosts, but custom terminal components require an interactive TUI. Background registration is a safe no-op in RPC, print, JSON, classic, accessible, and embedding hosts. A command that fundamentally requires a dialog or overlay should report that requirement and stop safely when `context.hasUI` is false. Model-controlled input is never user approval; destructive actions require an actual confirmation interaction.
 
 ## Lifecycle checklist
 

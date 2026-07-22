@@ -87,14 +87,14 @@ test("OAuth credential path prefers the models variable and validates explicit c
       RIGYN_CODING_AGENT_DIR: agentDirectory,
       RIGYN_MODELS_AUTH_FILE: join(agentDirectory, "auth.json"),
     }, home),
-    /must not replace the Rigyn agent credential store/u,
+    /must not replace the rigyn agent credential store/u,
   );
   assert.throws(
     () => resolveOAuthCredentialFile({
       RIGYN_CODING_AGENT_DIR: pathToFileURL(agentDirectory).href,
       RIGYN_MODELS_AUTH_FILE: join(agentDirectory, "auth.json"),
     }, home),
-    /must not replace the Rigyn agent credential store/u,
+    /must not replace the rigyn agent credential store/u,
   );
 });
 
@@ -389,7 +389,7 @@ test("OAuth CLI fails closed on malformed and unsafe credential stores", async (
     output,
     error,
   }), 1);
-  assert.match(error.text(), /must not replace the Rigyn agent credential store/u);
+  assert.match(error.text(), /must not replace the rigyn agent credential store/u);
 });
 
 test("OAuth CLI cancellation returns 130, closes interaction state, and writes nothing", async (context) => {

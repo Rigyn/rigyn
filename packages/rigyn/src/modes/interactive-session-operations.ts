@@ -284,7 +284,7 @@ export class InteractiveSessionOperations {
     else if (action === "descendants") await store.trustDescendants(workspace);
     else if (action === "deny") await store.deny(workspace);
     else await store.untrust(workspace);
-    this.#terminal.notify("Saved project trust decision. Restart Rigyn for it to take effect.");
+    this.#terminal.notify("Saved project trust decision. Restart rigyn for it to take effect.");
   }
 
   showContext(): void {

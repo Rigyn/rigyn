@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Session transition and tree lifecycle example for Rigyn",
+  "description": "Session transition and tree lifecycle example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

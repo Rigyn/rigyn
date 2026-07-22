@@ -397,7 +397,7 @@ function assertPackageHostCompatibility(root: string): void {
     throw new Error("Extension package peerDependencies.rigyn must be a valid semantic-version range");
   }
   if (!satisfies(RIGYN_VERSION, range, { includePrerelease: true })) {
-    throw new Error(`Extension package requires Rigyn ${range}; current version is ${RIGYN_VERSION}`);
+    throw new Error(`Extension package requires rigyn ${range}; current version is ${RIGYN_VERSION}`);
   }
 }
 

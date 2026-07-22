@@ -2,7 +2,7 @@
   "name": "@rigyn/kernel",
   "version": "0.5.1",
   "private": true,
-  "description": "Reusable agent loop, durable session primitives, and execution environment for Rigyn",
+  "description": "Reusable agent loop, durable session primitives, and execution environment for rigyn",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,7 +24,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rigyn/rigyn.git",
+    "url": "git+https://github.com/rigyn/rigyn.git",
     "directory": "packages/kernel"
   },
   "scripts": {

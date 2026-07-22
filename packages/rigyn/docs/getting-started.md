@@ -2,21 +2,21 @@
 
 This guide takes a new installation from an empty terminal to a useful, resumable coding session. For a complete topic list, see the [documentation map](README.md).
 
-## What Rigyn does
+## What rigyn does
 
-Rigyn connects a model to a small set of tools running on your computer:
+rigyn connects a model to a small set of tools running on your computer:
 
 1. You enter a task in the terminal interface or as a one-shot command.
-2. Rigyn sends the conversation and tool definitions to the selected provider.
+2. rigyn sends the conversation and tool definitions to the selected provider.
 3. The model may request file reads, shell commands, or edits.
-4. Rigyn executes those requests locally, returns bounded results to the model, and renders the work as it happens.
-5. Rigyn saves the session locally so you can continue, branch, compact, or export it later.
+4. rigyn executes those requests locally, returns bounded results to the model, and renders the work as it happens.
+5. rigyn saves the session locally so you can continue, branch, compact, or export it later.
 
-The default tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. The same default applies to interactive, print, JSON, RPC, and direct SDK sessions. They run with the permissions of the user who launched Rigyn. Project trust controls whether project-local configuration and executable extensions load; it does not approve individual shell commands or create a sandbox.
+The default tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. The same default applies to interactive, print, JSON, RPC, and direct SDK sessions. They run with the permissions of the user who launched rigyn. Project trust controls whether project-local configuration and executable extensions load; it does not approve individual shell commands or create a sandbox.
 
 Model requests leave your machine when you choose a hosted provider. Use a local provider such as Ollama when the model must also run locally.
 
-## 1. Install Rigyn
+## 1. Install rigyn
 
 For a private per-user installation, first install a supported 64-bit Node.js 24.15+ or 26+ runtime and npm:
 
@@ -30,24 +30,24 @@ Then run the one-line installer for your platform.
 Linux or macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rigyn/rigyn/main/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rigyn/rigyn/main/install.ps1 | iex
 ```
 
 The installers fetch and verify all four package archives from the latest GitHub release. They require no npm account
-and do not resolve Rigyn from the npm registry. The equivalent version-pinned manual command is:
+and do not resolve rigyn from the npm registry. The equivalent version-pinned manual command is:
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/Rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
   -- rigyn self-install
 rigyn --version
 ```
@@ -60,7 +60,7 @@ npm; extract it and run `bin/rigyn` (`bin\rigyn.cmd` on Windows).
 To install from the public source checkout instead:
 
 ```sh
-git clone https://github.com/Rigyn/rigyn.git
+git clone https://github.com/rigyn/rigyn.git
 cd rigyn
 npm run install:user
 rigyn --version
@@ -70,14 +70,14 @@ The managed one-line installer and source-install route create a self-contained 
 
 ## 2. Open a workspace
 
-Launch Rigyn from the project you want it to work on:
+Launch rigyn from the project you want it to work on:
 
 ```sh
 cd /path/to/your/project
 rigyn
 ```
 
-The launch directory becomes the workspace. It determines the starting directory for tools, the project instruction and resource roots, and which sessions `/resume` shows by default. You can launch the global `rigyn` command from any directory; it does not run inside or modify the Rigyn source checkout merely because that checkout was used for installation.
+The launch directory becomes the workspace. It determines the starting directory for tools, the project instruction and resource roots, and which sessions `/resume` shows by default. You can launch the global `rigyn` command from any directory; it does not run inside or modify the rigyn source checkout merely because that checkout was used for installation.
 
 To select a different workspace without changing the shell directory:
 
@@ -113,7 +113,7 @@ rigyn --model PROVIDER/MODEL:high
 
 The optional suffix selects a supported thinking level. See [Providers and authentication](providers.md) for provider IDs, environment variables, OAuth behavior, custom endpoints, and model metadata.
 
-## 4. Give Rigyn a task
+## 4. Give rigyn a task
 
 Start with a task that has a concrete result and a verification step:
 
@@ -121,7 +121,7 @@ Start with a task that has a concrete result and a verification step:
 Explain how this project starts, then identify the smallest safe fix for the failing test. Do not edit yet.
 ```
 
-After reviewing the answer, ask it to implement and verify the change. Rigyn displays model text, reasoning summaries when supplied by the provider, bounded live command output, complete retained tool details after completion, edits, token usage, cache usage, and cost metadata when known. `Ctrl+T` expands reasoning summaries.
+After reviewing the answer, ask it to implement and verify the change. rigyn displays model text, reasoning summaries when supplied by the provider, bounded live command output, complete retained tool details after completion, edits, token usage, cache usage, and cost metadata when known. `Ctrl+T` expands reasoning summaries.
 
 Type `/` for the command palette or `/hotkeys` for the active key map. Prefix a command with `!` to run it yourself without sending it to the model:
 
@@ -163,14 +163,14 @@ Automatic context compaction keeps long sessions within the selected model's con
 
 ## 6. Add reusable behavior
 
-Rigyn separates four resource types:
+rigyn separates four resource types:
 
 - A **skill** is on-demand instruction content. Only its name and description stay in the base prompt; full guidance loads when relevant.
 - A **prompt template** is a reusable slash command with arguments and defaults.
-- A **theme** is a custom terminal presentation resource; Rigyn itself ships only the monochrome `mono` theme.
+- A **theme** is a terminal presentation resource; rigyn ships the default monochrome `mono` and operational `signal` themes, and can discover custom themes.
 - A **runtime extension** is trusted code that can add tools, commands, providers, authentication, state, events, shortcuts, and structural UI.
 
-A **package** distributes one or more of those resources. Installed runtime extensions activate inside the current Rigyn process and extend that harness; they do not need to launch a second Rigyn instance.
+A **package** distributes one or more of those resources. Installed runtime extensions activate inside the current rigyn process and extend that harness; they do not need to launch a second rigyn instance.
 
 Install and inspect a reviewed package with:
 
@@ -183,7 +183,7 @@ rigyn remove my-package
 
 Use `rigyn --extension ./my-package/extensions/index.mjs` for one invocation without persisting the package. Runtime extensions are ordinary Node.js code with your user's access, so review the package, its runtime entries, and production dependencies first. Dependency lifecycle scripts may be enabled only for reviewed install or update transactions with `--allow-scripts`.
 
-To have Rigyn build a package, enter `/build-extension <request>` in a disposable workspace. The bundled authoring workflow uses installed API documentation and verifies the result through the real install, reload, and remove path. See [Extensions](extensions.md), [Package authoring and the local gallery](packages.md), and the [Extension TUI](tui.md).
+To have rigyn build a package, enter `/build-extension <request>` in a disposable workspace. The bundled authoring workflow uses installed API documentation and verifies the result through the real install, reload, and remove path. See [Extensions](extensions.md), [Package authoring and the local gallery](packages.md), and the [Extension TUI](tui.md).
 
 ## 7. Know where data lives
 
@@ -214,7 +214,7 @@ rigyn extensions doctor
 rigyn uninstall --yes
 ```
 
-`self-update` downloads and verifies the latest public GitHub release. Close other running Rigyn processes before
+`self-update` downloads and verifies the latest public GitHub release. Close other running rigyn processes before
 update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration,
 credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
 
@@ -227,5 +227,5 @@ For common failures, see [Troubleshooting](troubleshooting.md), [Platform notes]
 - Configure providers and models: [Providers and authentication](providers.md).
 - Understand persistence: [Sessions and context](sessions.md) and [Context compaction](compaction.md).
 - Install or author extensions: [Extensions](extensions.md) and [Packages](packages.md).
-- Automate or embed Rigyn: [RPC](rpc.md), [Embedding](embedding.md), and [Public API](public-api.md).
+- Automate or embed rigyn: [RPC](rpc.md), [Embedding](embedding.md), and [Public API](public-api.md).
 - Understand the implementation: [Architecture](ARCHITECTURE.md).

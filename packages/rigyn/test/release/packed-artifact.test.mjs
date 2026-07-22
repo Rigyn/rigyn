@@ -350,6 +350,7 @@ function assertSafePackageFiles(files) {
     "resources/package-gallery.json",
     "resources/settings.example.json",
     "resources/schemas/package-gallery-v1.json",
+    "resources/schemas/theme-v1.json",
     "resources/prompts/build-extension.md",
     "resources/skills/build-extension/SKILL.md",
     "resources/skills/build-extension/references/dashboard.md",
@@ -361,7 +362,7 @@ function assertSafePackageFiles(files) {
 }
 
 test("Windows command shims use the isolated command processor without a shell", () => {
-  const command = String.raw`C:\Rigyn Home\bin\rigyn.cmd`;
+  const command = String.raw`C:\rigyn Home\bin\rigyn.cmd`;
   const comspec = String.raw`C:\Windows\System32\cmd.exe`;
   assert.deepEqual(
     commandInvocation(command, ["--version"], { platform: "win32", environment: { COMSPEC: comspec } }),
@@ -538,7 +539,7 @@ test("packed artifact bootstraps into a blank home and completes a cached offlin
     timeoutMs: SELF_INSTALL_TIMEOUT_MS,
     label: "self-contained user install",
   });
-  assert.match(installer.stdout, /Installed a self-contained Rigyn copy/u);
+  assert.match(installer.stdout, /Installed a self-contained rigyn copy/u);
   if (process.platform !== "win32") assert.match(installer.stdout, /Run rigyn from any directory\./u);
   assert.equal(await readFile(globalSentinel, "utf8"), "must remain untouched\n");
   const packageRoot = join(paths.installRoot, "app", "node_modules", "rigyn");
@@ -727,7 +728,7 @@ export default function activate(api: any) {
     timeoutMs: 30_000,
     label: "installed launcher --help",
   });
-  assert.ok(help.stdout.startsWith(`Rigyn ${packed[0].version} —`));
+  assert.ok(help.stdout.startsWith(`rigyn ${packed[0].version} —`));
   assert.match(help.stdout, /Usage:\n/u);
   assert.equal(help.stderr, "");
   assert.deepEqual(await readdir(paths.config), []);
@@ -796,7 +797,7 @@ export default function activate(api: any) {
     timeoutMs: SELF_UPDATE_TIMEOUT_MS,
     label: "offline self update from packed artifact",
   });
-  assert.match(selfUpdate.stdout, /Updated Rigyn from .* to /u);
+  assert.match(selfUpdate.stdout, /Updated rigyn from .* to /u);
   assert.equal(selfUpdate.stderr, "");
   assert.equal(await readFile(globalInstructionsPath, "utf8"), customizedInstructions);
   assert.equal(await readFile(globalSettingsPath, "utf8"), customizedSettings);
@@ -964,7 +965,7 @@ export default function activate(api) {
       timeoutMs: 30_000,
       label: "uninstall while another runtime is active",
     }),
-    /Close the other running Rigyn process/u,
+    /Close the other running rigyn process/u,
   );
   await Promise.all([access(paths.installRoot), access(commandLink)]);
   await assert.rejects(access(`${paths.installRoot}.uninstall.json`), (error) => errno(error) === "ENOENT");
@@ -983,7 +984,7 @@ export default function activate(api) {
     timeoutMs: 30_000,
     label: "marker-verified product uninstall",
   });
-  assert.match(uninstalled.stdout, /Removed the self-contained Rigyn installation/u);
+  assert.match(uninstalled.stdout, /Removed the self-contained rigyn installation/u);
   await assert.rejects(access(paths.installRoot), (error) => errno(error) === "ENOENT");
   await assert.rejects(access(commandLink), (error) => errno(error) === "ENOENT");
   await assert.rejects(access(`${paths.installRoot}.uninstalling`), (error) => errno(error) === "ENOENT");
@@ -1125,7 +1126,7 @@ process.exit(31);
       timeoutMs: 30_000,
       label: "argument-isolated self update",
     }),
-    /RIGYN_UPDATE_SPEC must name an existing local Rigyn product archive/u,
+    /RIGYN_UPDATE_SPEC must name an existing local rigyn product archive/u,
   );
   await assert.rejects(access(capture), (error) => errno(error) === "ENOENT");
 });
@@ -1153,7 +1154,7 @@ test("self-uninstall succeeds when the installation is already absent", async (c
     },
   );
 
-  assert.equal(result.stdout, `Rigyn is not installed at ${installRoot}\n`);
+  assert.equal(result.stdout, `rigyn is not installed at ${installRoot}\n`);
   assert.equal(result.stderr, "");
   await assert.rejects(access(installRoot), (error) => errno(error) === "ENOENT");
 });

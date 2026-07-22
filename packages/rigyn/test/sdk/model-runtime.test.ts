@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -61,6 +61,37 @@ test("ModelRuntime loads modelsPath and exposes public model protocols", async (
     configured: true,
     source: "models_json_key",
   });
+});
+
+test("ModelRuntime defaults never parse or replace the CLI-owned catalog", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "rigyn-model-runtime-default-"));
+  context.after(async () => await rm(directory, { recursive: true, force: true }));
+  const catalog = `${JSON.stringify({ version: 1, savedAt: "2026-07-22T00:00:00.000Z", providers: [] })}\n`;
+  await writeFile(join(directory, "models.json"), catalog);
+  await writeFile(join(directory, "model-providers.json"), JSON.stringify({
+    providers: {
+      "default-custom": {
+        baseUrl: "https://example.test/v1",
+        apiKey: "default-test-key",
+        api: "openai-completions",
+        models: [{ id: "default-model" }],
+      },
+    },
+  }));
+  const previousAgentDir = process.env.RIGYN_CODING_AGENT_DIR;
+  process.env.RIGYN_CODING_AGENT_DIR = directory;
+  try {
+    const runtime = await ModelRuntime.create({
+      credentials: AuthStorage.inMemory(),
+      allowModelNetwork: false,
+    });
+    assert.equal(runtime.getModel("default-custom", "default-model")?.id, "default-model");
+    assert.equal(runtime.getError(), undefined);
+    assert.equal(await readFile(join(directory, "models.json"), "utf8"), catalog);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.RIGYN_CODING_AGENT_DIR;
+    else process.env.RIGYN_CODING_AGENT_DIR = previousAgentDir;
+  }
 });
 
 test("runtime API-key overrides are effective, removable, and never persisted", async () => {

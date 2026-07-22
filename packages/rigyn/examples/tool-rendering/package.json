@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Built-in tool replacement and structural rendering example for Rigyn",
+  "description": "Built-in tool replacement and structural rendering example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

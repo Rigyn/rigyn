@@ -47,7 +47,7 @@ export function planStartupChangelog(input: StartupChangelogInput): StartupChang
   return {
     recordVersion: input.currentVersion,
     notice: input.collapse
-      ? `Rigyn updated to ${input.currentVersion}. Run /changelog for full release notes.`
+      ? `rigyn updated to ${input.currentVersion}. Run /changelog for full release notes.`
       : releases.map((release) => release.markdown).join("\n\n"),
   };
 }

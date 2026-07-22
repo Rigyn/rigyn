@@ -1,6 +1,6 @@
 # Community conduct
 
-Rigyn discussions and contributions should be safe, practical, and focused on the work.
+rigyn discussions and contributions should be safe, practical, and focused on the work.
 
 Participants are expected to:
 

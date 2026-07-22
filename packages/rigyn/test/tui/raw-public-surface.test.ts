@@ -68,7 +68,7 @@ const selectTheme: SelectListTheme = {
 };
 const editorTheme: EditorTheme = { borderColor: identity, selectList: selectTheme };
 
-test("Rigyn raw UI exports delegate to the terminal package", () => {
+test("rigyn raw UI exports delegate to the terminal package", () => {
   assert.equal(Editor, PackageEditor);
   assert.equal(StdinBuffer, PackageStdinBuffer);
   assert.equal(TUI, PackageTUI);

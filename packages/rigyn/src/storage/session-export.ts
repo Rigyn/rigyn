@@ -60,7 +60,7 @@ export interface SessionExportTree {
 
 export interface SessionExportData {
   schemaVersion: 1;
-  product: "Rigyn";
+  product: "rigyn";
   title: string;
   theme: "dark" | "light";
   header: SessionHeader;
@@ -357,8 +357,8 @@ export function buildSessionExportData(
   const renderedTools = preRenderTools(entries, options.toolRenderer, theme);
   const data: SessionExportData = {
     schemaVersion: 1,
-    product: "Rigyn",
-    title: manager.getSessionName() ?? "Rigyn session",
+    product: "rigyn",
+    title: manager.getSessionName() ?? "rigyn session",
     theme,
     header: structuredClone(header),
     entries: structuredClone(entries),
@@ -389,7 +389,7 @@ export function renderSessionHtml(manager: SessionManager, options: RenderSessio
     '<html lang="en"><head><meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
     '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: https: http:; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">',
-    "<title>Rigyn session export</title>",
+    "<title>rigyn session export</title>",
     `<style>${SESSION_EXPORT_STYLE}</style></head><body>`,
     '<div id="overlay"></div><div id="app">',
     '<aside id="sidebar"><div class="sidebar-head">',

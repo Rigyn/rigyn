@@ -65,7 +65,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
   addGuideline("Use clear file paths when discussing files");
 
   const paths = packagePaths();
-  let prompt = `You are an expert coding assistant running inside Rigyn. You help users inspect code, execute commands, edit files, and create new files.
+  let prompt = `You are an expert coding assistant running inside rigyn. You help users inspect code, execute commands, edit files, and create new files.
 
 Available tools:
 ${toolList}
@@ -75,12 +75,12 @@ Projects and extensions may supply additional tools.
 Guidelines:
 ${guidelines.map((guideline) => `- ${guideline}`).join("\n")}
 
-Rigyn documentation (consult it when a user asks about Rigyn, its SDK, extensions, themes, skills, prompts, models, packages, keybindings, or terminal UI):
+rigyn documentation (consult it when a user asks about rigyn, its SDK, extensions, themes, skills, prompts, models, packages, keybindings, or terminal UI):
 - Main documentation: ${paths.readme}
 - Topic documentation: ${paths.docs}
 - Working examples: ${paths.examples}
 - Resolve documentation and example paths against those directories, not the active project
-- Read the relevant documents and directly referenced Markdown files completely before implementing Rigyn-specific work`;
+- Read the relevant documents and directly referenced Markdown files completely before implementing rigyn-specific work`;
   prompt += append;
   prompt = appendContext(prompt, contextFiles);
   if (tools.includes("read") && skills.length > 0) prompt += formatSkillsForPrompt(skills);

@@ -243,6 +243,7 @@ const noUi: ExtensionUIContext = {
   setWorkingVisible() {},
   setWorkingIndicator() {},
   setHiddenThinkingLabel() {},
+  setBackground() {},
   setWidget() {},
   setFooter() {},
   setHeader() {},
@@ -309,6 +310,7 @@ export class ExtensionRunner {
   #shortcutDiagnostics: ResourceDiagnostic[] = [];
   #commandDiagnostics: ResourceDiagnostic[] = [];
   #getModel: () => Model<Api> | undefined = () => undefined;
+  #getThinkingLevel: ExtensionActions["getThinkingLevel"] = () => "off";
   #isIdle: () => boolean = () => true;
   #isProjectTrusted: () => boolean = () => true;
   #getSignal: () => AbortSignal | undefined = () => undefined;
@@ -428,6 +430,7 @@ export class ExtensionRunner {
       actions.setThinkingLevel(level);
     };
     this.#getModel = contextActions.getModel;
+    this.#getThinkingLevel = actions.getThinkingLevel;
     this.#isIdle = contextActions.isIdle;
     this.#isProjectTrusted = contextActions.isProjectTrusted;
     this.#getSignal = contextActions.getSignal;
@@ -666,6 +669,7 @@ export class ExtensionRunner {
       get sessionManager() { runner.#assertActive(); return runner.#publicSessionManager; },
       get modelRegistry() { runner.#assertActive(); return runner.#publicModelRegistry; },
       get model() { runner.#assertActive(); return runner.#getModel(); },
+      get thinkingLevel() { runner.#assertActive(); return runner.#getThinkingLevel(); },
       isIdle: () => { runner.#assertActive(); return runner.#isIdle(); },
       isProjectTrusted: () => { runner.#assertActive(); return runner.#isProjectTrusted(); },
       get signal() { runner.#assertActive(); return runner.#getSignal(); },
@@ -1286,6 +1290,7 @@ export class ExtensionRunner {
         sessionManager: runner.#publicSessionManager,
         modelRegistry: runner.#modelRegistry,
         ...(model === undefined ? {} : { model }),
+        thinkingLevel: runner.#getThinkingLevel(),
         isIdle: () => runner.#isIdle(),
         hasPendingMessages: () => runner.#hasPendingMessages(),
         abort: () => runner.#abort(),
@@ -1337,6 +1342,7 @@ export class ExtensionRunner {
       sessionManager: context.sessionManager,
       modelRegistry: context.modelRegistry,
       model: context.model,
+      thinkingLevel: context.thinkingLevel,
       isIdle: () => context.isIdle(),
       hasPendingMessages: () => context.hasPendingMessages(),
       abort: () => context.abort(),

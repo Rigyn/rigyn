@@ -1,5 +1,5 @@
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
-import { sliceByColumn, truncateToWidth, visibleWidth } from "@rigyn/terminal";
+import { sliceByColumn, truncateToWidth, visibleWidth, type BackgroundCell } from "@rigyn/terminal";
 import { formatUsageCost } from "../core/usage.js";
 import type { Frame, PickerItem, TranscriptEntry, TuiRawBlock, TuiViewState } from "./types.js";
 import {
@@ -33,6 +33,7 @@ interface RenderedLine {
   semanticZoneEnd?: boolean;
   image?: Omit<TerminalImagePlacement, "row" | "column">;
   imageOffset?: number;
+  occupancy?: readonly boolean[];
 }
 
 function rawLines(value: TuiRawBlock | undefined, width: number, maximumLines: number): RenderedLine[] {
@@ -1291,6 +1292,57 @@ function styleFrameLine(line: RenderedLine, width: number, theme: Theme, hyperli
   return `${semanticPrefix}${style(theme, line.role, padCells(line.text, width))}`;
 }
 
+const BACKGROUND_CELL_RESET = "\u001b[0m\u001b]8;;\u0007";
+
+function composeBackgroundCells(
+  styled: readonly string[],
+  foreground: readonly RenderedLine[],
+  cells: readonly BackgroundCell[] | undefined,
+  images: readonly TerminalImagePlacement[],
+  width: number,
+  theme: Theme,
+): string[] {
+  if (cells === undefined || cells.length === 0) return [...styled];
+  const occupancy = foreground.map((line) => lineCells(line, width).map((cell) => cell?.occupied === true));
+  for (const image of images) {
+    for (let row = image.row; row < image.row + image.rows && row < occupancy.length; row += 1) {
+      for (let column = image.column; column < image.column + image.columns && column < width; column += 1) {
+        occupancy[row]![column] = true;
+      }
+    }
+  }
+  const selected = new Map<number, Map<number, string>>();
+  for (const cell of cells) {
+    if (!Number.isSafeInteger(cell.row) || !Number.isSafeInteger(cell.column)
+      || cell.row < 0 || cell.row >= styled.length || cell.column < 0 || cell.column >= width
+      || typeof cell.text !== "string" || sanitizeTerminalText(cell.text) !== cell.text
+      || splitGraphemes(cell.text).length !== 1 || cellWidth(cell.text) !== 1
+      || occupancy[cell.row]?.[cell.column] === true) continue;
+    const row = selected.get(cell.row) ?? new Map<number, string>();
+    row.set(cell.column, cell.text);
+    selected.set(cell.row, row);
+  }
+  const output = [...styled];
+  for (const [row, replacements] of selected) {
+    const line = foreground[row];
+    const semanticPrefix = `${line?.semanticZoneStart === true ? OSC133_ZONE_START : ""}${line?.semanticZoneEnd === true ? `${OSC133_ZONE_END}${OSC133_ZONE_FINAL}` : ""}`;
+    const base = output[row]!
+      .replaceAll(OSC133_ZONE_START, "")
+      .replaceAll(OSC133_ZONE_END, "")
+      .replaceAll(OSC133_ZONE_FINAL, "");
+    let column = 0;
+    let composed = semanticPrefix;
+    for (const [target, text] of [...replacements].sort(([left], [right]) => left - right)) {
+      composed += sliceByColumn(base, column, target - column, true);
+      composed += `${BACKGROUND_CELL_RESET}${style(theme, "muted", text)}${BACKGROUND_CELL_RESET}`;
+      column = target + 1;
+    }
+    composed += sliceByColumn(base, column, width - column, true);
+    output[row] = composed;
+  }
+  return output;
+}
+
 function terminalImagePlacements(lines: readonly RenderedLine[]): TerminalImagePlacement[] {
   const placements: TerminalImagePlacement[] = [];
   for (const [row, line] of lines.entries()) {
@@ -1351,6 +1403,7 @@ interface StyledCell {
   role: ThemeRole;
   width: number;
   continuation?: boolean;
+  occupied: boolean;
 }
 
 function lineCells(line: RenderedLine, width: number): Array<StyledCell | undefined> {
@@ -1374,27 +1427,36 @@ function lineCells(line: RenderedLine, width: number): Array<StyledCell | undefi
         continue;
       }
       if (column + selectedWidth > width) break;
-      cells[column] = { text: grapheme, role, width: selectedWidth };
+      const occupied = line.occupancy?.[column] ?? true;
+      cells[column] = { text: grapheme, role, width: selectedWidth, occupied };
       for (let offset = 1; offset < selectedWidth; offset += 1) {
-        cells[column + offset] = { text: "", role, width: 0, continuation: true };
+        cells[column + offset] = {
+          text: "",
+          role,
+          width: 0,
+          continuation: true,
+          occupied: line.occupancy?.[column + offset] ?? occupied,
+        };
       }
       column += selectedWidth;
     }
     if (column >= width) break;
   }
   for (let index = 0; index < width; index += 1) {
-    if (cells[index] === undefined) cells[index] = { text: " ", role: line.role, width: 1 };
+    if (cells[index] === undefined) {
+      cells[index] = { text: " ", role: line.role, width: 1, occupied: line.occupancy?.[index] ?? line.fill === true };
+    }
   }
   return cells;
 }
 
-function clearStyledCell(cells: Array<StyledCell | undefined>, column: number, role: ThemeRole): void {
+function clearStyledCell(cells: Array<StyledCell | undefined>, column: number, role: ThemeRole, occupied: boolean): void {
   if (column < 0 || column >= cells.length) return;
   let head = column;
   while (head > 0 && cells[head]?.continuation === true) head -= 1;
   const width = Math.max(1, cells[head]?.width ?? 1);
   for (let offset = 0; offset < width && head + offset < cells.length; offset += 1) {
-    cells[head + offset] = { text: " ", role, width: 1 };
+    cells[head + offset] = { text: " ", role, width: 1, occupied };
   }
 }
 
@@ -1406,7 +1468,7 @@ function cellsLine(cells: Array<StyledCell | undefined>): RenderedLine {
     if (previous?.role === cell.role) previous.text += cell.text;
     else spans.push({ text: cell.text, role: cell.role });
   }
-  return { text: "", role: "muted", spans, fill: true };
+  return { text: "", role: "muted", spans, occupancy: cells.map((cell) => cell?.occupied === true) };
 }
 
 function composeRuntimeOverlayLine(
@@ -1420,7 +1482,7 @@ function composeRuntimeOverlayLine(
   const end = Math.min(frameWidth, column + overlayWidth);
   const fillRole = overlay.spans[0]?.role ?? "muted";
   if (overlay.fill === true) {
-    for (let index = column; index < end; index += 1) clearStyledCell(cells, index, fillRole);
+    for (let index = column; index < end; index += 1) clearStyledCell(cells, index, fillRole, true);
   }
   let relativeColumn = 0;
   for (const span of overlay.spans) {
@@ -1439,10 +1501,10 @@ function composeRuntimeOverlayLine(
       }
       if (relativeColumn + selectedWidth > overlayWidth || column + relativeColumn + selectedWidth > frameWidth) break;
       const target = column + relativeColumn;
-      for (let offset = 0; offset < selectedWidth; offset += 1) clearStyledCell(cells, target + offset, role);
-      cells[target] = { text: grapheme, role, width: selectedWidth };
+      for (let offset = 0; offset < selectedWidth; offset += 1) clearStyledCell(cells, target + offset, role, true);
+      cells[target] = { text: grapheme, role, width: selectedWidth, occupied: true };
       for (let offset = 1; offset < selectedWidth; offset += 1) {
-        cells[target + offset] = { text: "", role, width: 0, continuation: true };
+        cells[target + offset] = { text: "", role, width: 0, continuation: true, occupied: true };
       }
       relativeColumn += selectedWidth;
     }
@@ -1767,7 +1829,14 @@ export function renderFrame(
     && view.runtimeOverlay === undefined
     && view.transcriptOffset === 0;
   const images = imagesAllowed ? terminalImagePlacements(selectedLines) : [];
-  const styledLines = selectedLines.map((line) => styleFrameLine(line, width, theme, options.hyperlinks === true));
+  const styledLines = composeBackgroundCells(
+    selectedLines.map((line) => styleFrameLine(line, width, theme, options.hyperlinks === true)),
+    selectedLines,
+    view.backgroundCells,
+    images,
+    width,
+    theme,
+  );
   for (const rawOverlay of view.rawRuntimeOverlays ?? []) {
     const margins = overlayMargins(rawOverlay.options.margin);
     const availableWidth = Math.max(1, width - margins.left - margins.right);

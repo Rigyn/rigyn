@@ -430,8 +430,8 @@ export function average(values) {
         maxSteps: EXTENSION_MAX_STEPS,
         additionalInstructions: [
           `All writes must stay under ${workspace}.`,
-          "Bundled Rigyn documentation, skills, and examples are read-only references.",
-          "Never install the package globally or into the user's Rigyn directories.",
+          "Bundled rigyn documentation, skills, and examples are read-only references.",
+          "Never install the package globally or into the user's rigyn directories.",
         ].join(" "),
         prompt: [
           "Use the advertised build-extension skill to create a fresh package at dogfood-extension/.",

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Runtime-discovered skill and prompt example for Rigyn",
+  "description": "Runtime-discovered skill and prompt example for rigyn",
   "rigyn": {
     "extensions": ["extensions/index.mjs"]
   }

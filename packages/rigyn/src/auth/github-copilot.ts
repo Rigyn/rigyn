@@ -50,7 +50,7 @@ function githubEndpoints(host: string): { device: string; token: string; copilot
 function copilotHeaders(): HeadersInit {
   return {
     accept: "application/json",
-    "user-agent": `Rigyn/${RIGYN_VERSION}`,
+    "user-agent": `rigyn/${RIGYN_VERSION}`,
     "editor-version": `rigyn/${RIGYN_VERSION}`,
     "editor-plugin-version": `rigyn/${RIGYN_VERSION}`,
     "copilot-integration-id": "vscode-chat",

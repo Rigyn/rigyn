@@ -1,6 +1,6 @@
 # Session export
 
-Rigyn stores each conversation as an append-only version 3 JSONL tree. An HTML export is a self-contained, offline viewer for that tree; it is not a second session database.
+rigyn stores each conversation as an append-only version 3 JSONL tree. An HTML export is a self-contained, offline viewer for that tree; it is not a second session database.
 
 ## Create an export
 
@@ -46,7 +46,7 @@ The viewer embeds its styles, program, and UTF-8 session payload. It does not fe
 
 Tool results and structural details use native collapsed/expanded controls. Tools and thinking can also be hidden globally. The session-tree width is stored locally in the browser and is clamped to a safe range. The navigation becomes an overlay on narrow screens.
 
-When an arbitrary JSONL file is converted from the shell, live-only metadata may be unavailable. Rigyn derives a stored instruction prompt when possible and always uses the safe generic tool renderer. The conversation tree and stored content are unaffected.
+When an arbitrary JSONL file is converted from the shell, live-only metadata may be unavailable. rigyn derives a stored instruction prompt when possible and always uses the safe generic tool renderer. The conversation tree and stored content are unaffected.
 
 An unavailable or invalid export presentation falls back to the standalone HTML exporter's dark template; its light template is preserved when selected. These templates are part of the generated HTML and do not add built-in TUI themes.
 
@@ -62,6 +62,6 @@ An export is private data. It can contain source code, local paths, prompts, too
 
 The viewer treats every session field as data. Session values are carried in a base64-encoded JSON payload and inserted with DOM text operations rather than HTML interpolation. Markdown-like HTML stays visible as text. Links and images use a positive scheme and media allowlist after C0 controls are stripped. Entry identifiers are mapped to generated DOM positions, and a restrictive content-security policy blocks external scripts, forms, base URLs, and other active content.
 
-These protections prevent session text from becoming viewer code; they do not redact sensitive information. Rigyn does not upload an export automatically, and an ordinary export is not share-safe anonymization.
+These protections prevent session text from becoming viewer code; they do not redact sensitive information. rigyn does not upload an export automatically, and an ordinary export is not share-safe anonymization.
 
 `/share`, `/export --redact`, and shell `--redact` remove registered credentials, recognized token formats, authorization values, and values under common secret-bearing keys from the exported header, entries, prompt metadata, rendered tool data, and downloadable JSONL. Redaction is intentionally described as review-required: it cannot infer every private value, source fragment, personal identifier, or novel credential format. Inspect the result before sharing it.

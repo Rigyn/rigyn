@@ -95,6 +95,8 @@ export {
   type TerminalCapabilities,
 } from "./terminal-image.js";
 export {
+  type BackgroundCell,
+  type BackgroundComponent,
   type Component,
   Container,
   CURSOR_MARKER,

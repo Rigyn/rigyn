@@ -1,6 +1,6 @@
 # Terminal setup
 
-Rigyn needs a terminal that preserves streaming output, resize events, ordinary UTF-8 text, and the key sequences you plan to use. Color, Unicode glyphs, clipboard images, and inline images are optional capabilities with fallbacks.
+rigyn needs a terminal that preserves streaming output, resize events, ordinary UTF-8 text, and the key sequences you plan to use. Color, Unicode glyphs, clipboard images, and inline images are optional capabilities with fallbacks.
 
 ## Baseline checks
 
@@ -19,7 +19,7 @@ Use a UTF-8 locale and a terminal description installed on the remote host. When
 
 ## macOS
 
-Launch Rigyn from the same desktop user session as the browser and terminal when using browser OAuth, Keychain, or clipboard integration. iTerm-compatible image display is detected separately from basic text operation. If a shortcut is captured by a global macOS binding, change the terminal mapping rather than expecting the application to receive it.
+Launch rigyn from the same desktop user session as the browser and terminal when using browser OAuth, Keychain, or clipboard integration. iTerm-compatible image display is detected separately from basic text operation. If a shortcut is captured by a global macOS binding, change the terminal mapping rather than expecting the application to receive it.
 
 ## Windows
 

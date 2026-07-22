@@ -32,7 +32,7 @@ import type { SessionInfo, SessionTreeNode } from "../storage/types.js";
 import type { TruncationResult } from "../tools/truncate.js";
 import type { KeybindingAction } from "./keybindings.js";
 import { currentTheme, getEditorTheme, getMarkdownTheme, getSelectListTheme, getSettingsListTheme } from "./public-theme.js";
-import type { Theme } from "./theme.js";
+import { BUILTIN_THEME_NAMES, type Theme } from "./theme.js";
 import { stripAnsi } from "./unicode.js";
 
 export type AppKeybinding = KeybindingAction;
@@ -401,7 +401,7 @@ export class ShowImagesSelectorComponent extends ValueSelector<"show" | "hide"> 
 }
 export class ThemeSelectorComponent extends ValueSelector<string> {
   constructor(current: string, onSelect: (theme: string) => void, onCancel: () => void, onPreview: (theme: string) => void) {
-    super(["mono"], current, onSelect, onCancel); this.list.onSelectionChange = (item) => onPreview(item.value);
+    super(BUILTIN_THEME_NAMES, current, onSelect, onCancel); this.list.onSelectionChange = (item) => onPreview(item.value);
   }
 }
 

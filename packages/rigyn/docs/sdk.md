@@ -34,7 +34,7 @@ The factory accepts:
 
 - `cwd` and `agentDir`
 - `modelRuntime`, `model`, `thinkingLevel`, and `scopedModels`
-- `noTools`, `tools`, `excludeTools`, and `customTools`
+- `noTools`, `tools`, `excludeTools`, `customTools`, and a host-owned `toolBackend`
 - `resourceLoader`, `sessionManager`, and `settingsManager`
 - `sessionStartEvent` metadata for extension startup
 
@@ -71,6 +71,8 @@ Compaction and branch-summary backoff are visible through three public events. `
 `agent.subscribe()` emits the low-level `AgentEvent` sequence, including prompt and assistant message events. Use `session.subscribe()` for the broader coding-session lifecycle such as compaction, retry, queue, session-entry, and settings events. A `prepareNextTurn` context may replace messages, the system prompt, or the complete tool set; a new tool registry is installed atomically after the completed tool batch and before the next provider request.
 
 `session.modelRuntime` is the public asynchronous `ModelRuntime` used by the session. When the factory receives a `ModelRuntime`, the property preserves that exact object. It exposes model snapshots and asynchronous availability refresh, authentication/login/logout, configuration reload, and `stream()`/`streamSimple()` rather than the internal synchronous registry.
+
+`ModelRuntime.create()` reads optional editable provider declarations from `~/.rigyn/agent/model-providers.json` by default. Its top level is a provider map: `{ "providers": { "provider-id": { ... } } }`. This is separate from the CLI-owned `models.json` catalog snapshot, whose `providers` field is an array and which the CLI may rewrite. The CLI does not read `model-providers.json`. Pass `modelsPath` to select an explicit SDK configuration file or `modelsPath: null` to disable file loading.
 
 `continue()` resumes from an existing non-assistant history tail without appending an empty user message. `steer()` and `followUp()` return promises and expand prompt templates before queueing. The direct session also exposes prompting, abort, model/thinking selection, active-tool selection, compaction, bash execution, tree navigation, statistics, and HTML export.
 

@@ -203,7 +203,7 @@ test("PTY login stores an extension-provided device credential, selects a model,
   child.stderr.on("data", (chunk: Buffer) => { rendered += chunk.toString("utf8"); });
   const read = () => rendered;
 
-  await waitForOutput(read, `Rigyn ${RIGYN_VERSION} · Ready`);
+  await waitForOutput(read, `rigyn ${RIGYN_VERSION} · ready`);
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
   assert.doesNotMatch(read(), /Model catalogs:/u);
   child.stdin.write("/login\r");

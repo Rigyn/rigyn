@@ -29,11 +29,11 @@ async function uninstall() {
   await withLifecycleLock(installRoot, async () => {
     const recovered = await recoverInterruptedUninstall(installRoot);
     if (recovered && !(await exists(installRoot))) {
-      writeFileSync(1, `Removed the self-contained Rigyn installation at ${installRoot}\n`);
+      writeFileSync(1, `Removed the self-contained rigyn installation at ${installRoot}\n`);
       return;
     }
     if (!(await exists(installRoot))) {
-      writeFileSync(1, `Rigyn is not installed at ${installRoot}\n`);
+      writeFileSync(1, `rigyn is not installed at ${installRoot}\n`);
       return;
     }
     const rootMetadata = await lstat(installRoot);
@@ -53,7 +53,7 @@ async function uninstall() {
     if (process.platform !== "win32") await rm(paths.command, { force: true });
     await rm(record.tombstone, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     await rm(recordPath, { force: true });
-    writeFileSync(1, `Removed the self-contained Rigyn installation at ${installRoot}\n`);
+    writeFileSync(1, `Removed the self-contained rigyn installation at ${installRoot}\n`);
   });
 }
 

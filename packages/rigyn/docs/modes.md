@@ -1,6 +1,6 @@
 # Run modes
 
-Rigyn has interactive, print, and RPC command-line modes. `rigyn/modes` exposes reusable adapters with explicit, different ownership rules.
+rigyn has interactive, print, and RPC command-line modes. `rigyn/modes` exposes reusable adapters with explicit, different ownership rules.
 
 ## Print mode
 

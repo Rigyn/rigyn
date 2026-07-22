@@ -46,6 +46,7 @@ function bindContext(host: RuntimeExtensionHost, root: string): void {
   host.setDirectContextHandler(() => ({
     sessionManager: extensionSessionManager(sessionManager),
     modelRegistry: new ModelRegistry(createModels()),
+    thinkingLevel: "off",
     isIdle: () => true,
     hasPendingMessages: () => false,
     abort() {},

@@ -148,7 +148,7 @@ const { basename } = require("node:path");
   const url = args.at(-1);
   await appendFile(process.env.RIGYN_TEST_CURL_CAPTURE, JSON.stringify({ args, url }) + "\\n");
   if (url.endsWith("/latest")) {
-    process.stdout.write("https://github.com/Rigyn/rigyn/releases/tag/v0.5.1");
+    process.stdout.write("https://github.com/rigyn/rigyn/releases/tag/v0.5.1");
   } else {
     const outputIndex = args.indexOf("--output");
     await copyFile(process.env.RIGYN_TEST_FIXTURE + "/" + basename(new URL(url).pathname), args[outputIndex + 1]);
@@ -211,15 +211,15 @@ async function runNode(args, options = {}) {
 
 test("source installation builds and verifies only the matching desktop native helper", () => {
   const portable = [
-    ["@rigyn/terminal", "build", "Rigyn terminal source build"],
-    ["@rigyn/models", "build:offline", "Rigyn model catalog source build"],
-    ["@rigyn/kernel", "build", "Rigyn kernel source build"],
-    ["rigyn", "build", "Rigyn application source build"],
+    ["@rigyn/terminal", "build", "rigyn terminal source build"],
+    ["@rigyn/models", "build:offline", "rigyn model catalog source build"],
+    ["@rigyn/kernel", "build", "rigyn kernel source build"],
+    ["rigyn", "build", "rigyn application source build"],
   ];
   assert.deepEqual(sourceBuildSteps("linux"), portable);
   for (const [platform, label] of [["darwin", "macOS"], ["win32", "Windows"]]) {
     assert.deepEqual(sourceBuildSteps(platform), [
-      ["@rigyn/terminal", "build", "Rigyn terminal source build"],
+      ["@rigyn/terminal", "build", "rigyn terminal source build"],
       ["@rigyn/terminal", "native:build", `${label} native terminal helper build`],
       ["@rigyn/terminal", "native:verify", `${label} native terminal helper verification`],
       ...portable.slice(1),
@@ -382,7 +382,7 @@ exec "\${REAL_NODE}" "$@"
 `, { mode: 0o755 }),
     writeFile(productBin, `#!/usr/bin/env node
 if (process.env.XDG_CONFIG_HOME !== process.env.EXPECTED_PRIVATE_CONFIG) {
-  throw new Error("Rigyn private XDG config was not applied");
+  throw new Error("rigyn private XDG config was not applied");
 }
 process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.argv.slice(2) }) + "\\n");
 `),
@@ -543,17 +543,17 @@ test("implicit self-update is monotonic while an explicit local bundle may downg
   assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.3.0", false));
   assert.throws(
     () => assertUpdateVersionPolicy("0.2.0", "0.1.7", false),
-    /Refusing to replace Rigyn 0\.2\.0 with older 0\.1\.7/u,
+    /Refusing to replace rigyn 0\.2\.0 with older 0\.1\.7/u,
   );
   assert.throws(
     () => assertUpdateVersionPolicy("not-semver", "0.3.0", false),
-    /Installed Rigyn version is invalid/u,
+    /Installed rigyn version is invalid/u,
   );
   assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.1.7", true));
   assert.doesNotThrow(() => assertUpdateVersionPolicy("not-semver", "0.1.7", true));
   assert.throws(
     () => assertUpdateVersionPolicy("0.2.0", "not-semver", true),
-    /Downloaded Rigyn package version is invalid/u,
+    /Downloaded rigyn package version is invalid/u,
   );
 });
 
@@ -572,7 +572,7 @@ test("GitHub self-update downloads and verifies the complete release package gra
     assert.deepEqual(await readFile(path), fixture.files.get(fixture.archives[index].file));
   }
   assert.equal(calls.length, 2 + RIGYN_PRODUCT_PACKAGE_GRAPH.length);
-  assert.equal(calls[0].url, "https://api.github.com/repos/Rigyn/rigyn/releases/latest");
+  assert.equal(calls[0].url, "https://api.github.com/repos/rigyn/rigyn/releases/latest");
   assert.equal(calls.every(({ init }) => init.redirect === "follow" && init.signal instanceof AbortSignal), true);
 });
 
@@ -638,7 +638,7 @@ test("streamed POSIX bootstrap verifies four GitHub archives before self-install
   assert.match(npm.cache, /temporary files/u);
   const curlCalls = (await readFile(run.curlCapture, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(curlCalls.length, 2 + RIGYN_PRODUCT_PACKAGE_GRAPH.length);
-  assert.equal(curlCalls[0].url, "https://github.com/Rigyn/rigyn/releases/latest");
+  assert.equal(curlCalls[0].url, "https://github.com/rigyn/rigyn/releases/latest");
   assert.deepEqual(await readdir(run.temporary), []);
 });
 
@@ -657,7 +657,7 @@ test("streamed POSIX bootstrap rejects a checksum mismatch before npm", {
 test("PowerShell bootstrap verifies GitHub archives and splats quoted npm arguments", async () => {
   const scriptPath = join(REPOSITORY_ROOT, "install.ps1");
   const script = await readFile(scriptPath, "utf8");
-  assert.match(script, /api\.github\.com\/repos\/Rigyn\/rigyn\/releases\/latest/u);
+  assert.match(script, /api\.github\.com\/repos\/rigyn\/rigyn\/releases\/latest/u);
   assert.match(script, /Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256/u);
   for (const name of ["terminal", "models", "kernel"]) {
     assert.match(script, new RegExp(`"rigyn-${name}-\\$version\\.tgz"`, "u"));
@@ -705,7 +705,7 @@ test("Windows npm invocation resolves npm-cli beside Node without a command shel
 test("path containment rejects Windows cross-drive candidates deterministically", () => {
   assert.equal(inside("C:\\Users\\alice\\.rigyn", "C:\\Users\\alice\\.rigyn\\current"), true);
   assert.equal(inside("C:\\Users\\alice\\.rigyn", "C:\\Users\\alice\\source"), false);
-  assert.equal(inside("C:\\Users\\alice\\.rigyn", "D:\\Rigyn"), false);
+  assert.equal(inside("C:\\Users\\alice\\.rigyn", "D:\\rigyn"), false);
 });
 
 test("lifecycle path identity folds Windows casing and preserves POSIX casing", () => {
@@ -1138,7 +1138,7 @@ test("uninstall resumes an interrupted tombstone transaction", async (context) =
     },
   });
 
-  assert.match(result.stdout, /Removed the self-contained Rigyn installation/u);
+  assert.match(result.stdout, /Removed the self-contained rigyn installation/u);
   for (const path of [installRoot, tombstone, `${installRoot}.uninstall.json`, command]) {
     await assert.rejects(access(path), { code: "ENOENT" });
   }

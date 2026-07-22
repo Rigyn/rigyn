@@ -14,7 +14,7 @@ rigyn diagnostics ./rigyn-support.json
 
 File creation is exclusive and owner-only. An existing file is never replaced.
 
-The bundle contains the Rigyn and Node versions, operating-system identity, project-trust status, configuration key names, file metadata, extension and skill summaries, bounded loader diagnostics, and elapsed time for each local probe. Timings use a monotonic process clock and are visibility aids, not cross-machine performance benchmarks.
+The bundle contains the rigyn and Node versions, operating-system identity, project-trust status, configuration key names, file metadata, extension and skill summaries, bounded loader diagnostics, and elapsed time for each local probe. Timings use a monotonic process clock and are visibility aids, not cross-machine performance benchmarks.
 
 The collector never opens the credential store or session JSONL files for content. It reads bounded configuration, manifest, contribution, and skill-frontmatter data for static validation, but it does not include configuration values, descriptions, instructions, templates, custom themes, or runtime code in the bundle, and it never executes extension code. Paths below the workspace become `<workspace>` and paths below the home directory become `~`. Known secret shapes, authenticated URL user information, and credential-like query parameters are redacted again before serialization.
 

@@ -1,6 +1,6 @@
 # Extension authentication threat model
 
-Rigyn extensions are trusted in-process Node.js code. Installing one grants it the filesystem, process, environment, and network authority of the Rigyn process. Package review, immutable package records, project trust, and operating-system isolation are the security boundary; the extension API is not a JavaScript sandbox.
+rigyn extensions are trusted in-process Node.js code. Installing one grants it the filesystem, process, environment, and network authority of the rigyn process. Package review, immutable package records, project trust, and operating-system isolation are the security boundary; the extension API is not a JavaScript sandbox.
 
 ## Direct provider authentication
 

@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Widget, status, header, and custom overlay example for Rigyn",
+  "description": "Widget, status, header, and custom overlay example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

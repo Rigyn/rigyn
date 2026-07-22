@@ -6,11 +6,33 @@ import test from "node:test";
 
 import {
   evaluateRiskCoverage,
+  formatRiskCoverageFailure,
   parseRiskCoverageConfig,
   parseV8Coverage,
   selectRiskCoverageTests,
   validateRiskCoverageTargets,
 } from "../../benchmarks/risk-coverage.js";
+
+test("risk coverage failure diagnostics preserve early failures and process metadata", () => {
+  const trailingOutput = "✓ later passing test\n".repeat(1_000);
+  const stderr = Buffer.from(`✗ original failure marker\n${trailingOutput}`, "utf8");
+  assert.ok(stderr.length > 16 * 1024);
+  const formatted = formatRiskCoverageFailure("service-storage", {
+    exitCode: 1,
+    signal: "SIGTERM",
+    stdout: Buffer.from("coverage worker output\n", "utf8"),
+    stderr,
+    stdoutBytes: 23,
+    stderrBytes: stderr.length + 512,
+    timedOut: false,
+    cancelled: false,
+  });
+  assert.match(formatted.diagnostic, /original failure marker/u);
+  assert.match(formatted.diagnostic, /later passing test/u);
+  assert.match(formatted.message, /exitCode=1, signal=SIGTERM/u);
+  assert.match(formatted.message, /stdout=23\/23 retained\/observed bytes/u);
+  assert.match(formatted.message, new RegExp(`stderr=${stderr.length}/${stderr.length + 512} retained/observed bytes`, "u"));
+});
 
 test("risk coverage evaluates each configured module independently", () => {
   const parsed = parseV8Coverage(JSON.stringify({

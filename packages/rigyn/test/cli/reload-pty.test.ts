@@ -91,7 +91,7 @@ await main([
   child.stdout.on("data", (chunk: Buffer) => { rendered += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { rendered += chunk.toString("utf8"); });
 
-  await waitFor(() => rendered.includes(`Rigyn ${RIGYN_VERSION} · Ready`), `CLI did not become ready:\n${rendered}`);
+  await waitFor(() => rendered.includes(`rigyn ${RIGYN_VERSION} · ready`), `CLI did not become ready:\n${rendered}`);
   await waitFor(async () => existsSync(refreshLog) && (await readFile(refreshLog, "utf8")).includes("true"),
     `startup live model discovery did not run:\n${rendered}`);
   child.stdin.write(`!printf reload-transcript-sentinel && touch ${shellQuote(shellMarker)}\r`);

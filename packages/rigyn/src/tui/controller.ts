@@ -1,5 +1,7 @@
 import {
   setKeybindings as setPublicKeybindings,
+  type BackgroundCell,
+  type BackgroundComponent,
   type Component,
   type EditorComponent,
   type KeybindingsManager,
@@ -64,7 +66,9 @@ import {
   validateTerminalImage,
 } from "./terminal-image.js";
 import {
+  BUILTIN_THEME_NAMES,
   createTheme,
+  isBuiltinThemeName,
   normalizeThemeSetting,
   parseAutomaticThemePair,
   resolveThemeSetting,
@@ -136,6 +140,8 @@ const ACTIVITY_FRAME_MS = 120;
 const MAX_ADVANCED_UI_SLOT_COMPONENTS = 16;
 const MAX_ADVANCED_UI_SLOT_LINES = 4;
 const MAX_ADVANCED_UI_SLOT_BYTES = 16 * 1024;
+const MAX_BACKGROUND_COMPONENTS = 16;
+const MAX_BACKGROUND_BYTES = 2 * 1024 * 1024;
 const MIN_WORKING_INDICATOR_MS = 50;
 const MAX_WORKING_INDICATOR_MS = 2_000;
 const CONTROLLER_ADVANCED_UI_KEY = "controller:default";
@@ -334,6 +340,14 @@ interface PersistentRuntimeComponentOwner {
 interface PersistentRawComponentOwner {
   mount: RawComponentMount<void>;
   hidden: boolean;
+}
+
+interface RawBackgroundOwner {
+  key: string;
+  component: BackgroundComponent;
+  signal: AbortSignal;
+  onAbort(): void;
+  disposed: boolean;
 }
 
 interface WorkingIndicatorOwner {
@@ -962,6 +976,7 @@ export class TuiController {
     "header-replacement": new Map(),
     "footer-replacement": new Map(),
   };
+  readonly #rawBackgrounds = new Map<string, RawBackgroundOwner>();
   readonly #workingIndicators = new Map<string, WorkingIndicatorOwner>();
   readonly #hiddenReasoningLabels = new Map<string, HiddenReasoningLabelOwner>();
   readonly #toolOutputExpansions = new Map<string, ToolOutputExpansionOwner>();
@@ -1060,7 +1075,14 @@ export class TuiController {
     }
   };
 
-  readonly #onResize = () => this.#scheduleRender();
+  readonly #onResize = () => {
+    const active = [...this.#rawBackgrounds.values()].at(-1);
+    if (active !== undefined) {
+      try { active.component.invalidate(); }
+      catch (cause) { this.#removeRawBackground(active, cause); }
+    }
+    this.#scheduleRender();
+  };
   readonly #onStreamError = (cause: unknown) => this.#fail(error(cause));
   readonly #onInputEnd = () => {
     this.close();
@@ -1094,7 +1116,7 @@ export class TuiController {
     this.#terminalColorScheme = terminalColorSchemeFromEnvironment(this.#environment);
     this.#automaticTheme = parseAutomaticThemePair(this.#themeSetting) !== undefined;
     const configuredTheme = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
-    this.#themeName = configuredTheme === "mono" ? configuredTheme : "mono";
+    this.#themeName = isBuiltinThemeName(configuredTheme) ? configuredTheme : "mono";
     this.#theme = createTheme(this.#themeName, {
       color: this.capabilities.color,
       unicode: this.capabilities.unicode,
@@ -1712,6 +1734,59 @@ export class TuiController {
     if (mount.closed) return;
     components.set(selectedKey, owner);
     previous?.mount.close();
+    this.#scheduleRender();
+  }
+
+  /** @internal Mounts one generation-owned, content-safe terminal background. */
+  setRawBackgroundComponent(
+    key: string,
+    component?: BackgroundComponent,
+    signal?: AbortSignal,
+  ): void {
+    const selectedKey = persistentComponentKey(key);
+    const previous = this.#rawBackgrounds.get(selectedKey);
+    if (component === undefined) {
+      if (previous !== undefined) this.#removeRawBackground(previous);
+      return;
+    }
+    if (this.mode !== "full") return;
+    if (signal === undefined) throw new Error("Raw backgrounds require a generation signal");
+    signal.throwIfAborted();
+    if (component === null || typeof component !== "object"
+      || typeof component.render !== "function" || typeof component.invalidate !== "function") {
+      throw new TypeError("Raw background components must provide render() and invalidate()");
+    }
+    if (previous === undefined && this.#rawBackgrounds.size >= MAX_BACKGROUND_COMPONENTS) {
+      throw new Error(`Raw backgrounds are limited to ${MAX_BACKGROUND_COMPONENTS} components`);
+    }
+    const owner: RawBackgroundOwner = {
+      key: selectedKey,
+      component,
+      signal,
+      onAbort: () => this.#removeRawBackground(owner),
+      disposed: false,
+    };
+    this.#rawBackgrounds.delete(selectedKey);
+    this.#rawBackgrounds.set(selectedKey, owner);
+    signal.addEventListener("abort", owner.onAbort, { once: true });
+    if (previous !== undefined) this.#removeRawBackground(previous);
+    if (signal.aborted) owner.onAbort();
+    this.#scheduleRender();
+  }
+
+  #removeRawBackground(owner: RawBackgroundOwner, cause?: unknown): void {
+    owner.signal.removeEventListener("abort", owner.onAbort);
+    if (this.#rawBackgrounds.get(owner.key) === owner) this.#rawBackgrounds.delete(owner.key);
+    if (!owner.disposed) {
+      owner.disposed = true;
+      try { owner.component.dispose?.(); }
+      catch (disposeCause) {
+        try { this.notify(`Raw background disposal failed: ${defaultSecretRedactor.redact(error(disposeCause).message).slice(0, 4_096)}`, "warning"); } catch {}
+      }
+    }
+    if (cause !== undefined) {
+      try { this.notify(`Raw background failed: ${defaultSecretRedactor.redact(error(cause).message).slice(0, 4_096)}`, "warning"); } catch {}
+    }
     this.#scheduleRender();
   }
 
@@ -3294,13 +3369,16 @@ export class TuiController {
 
   setCustomThemes(themes: readonly ThemeDefinition[]): void {
     const selected = new Map<string, ThemeDefinition>();
-    for (const theme of themes) selected.set(theme.name, theme);
+    for (const theme of themes) {
+      if (isBuiltinThemeName(theme.name)) throw new Error(`Custom theme ${theme.name} conflicts with a built-in theme`);
+      selected.set(theme.name, theme);
+    }
     this.#customThemes.clear();
     for (const [name, theme] of selected) this.#customThemes.set(name, theme);
     const configured = resolveThemeSetting(this.#themeSetting, this.#terminalColorScheme);
-    if (this.#themeName !== "mono") {
+    if (!isBuiltinThemeName(this.#themeName)) {
       this.#applyTheme(this.#customThemes.has(this.#themeName) ? this.#themeName : "mono", "catalog");
-    } else if (configured !== "mono" && this.#customThemes.has(configured)) {
+    } else if (!isBuiltinThemeName(configured) && this.#customThemes.has(configured)) {
       this.#applyTheme(configured, "catalog");
     }
   }
@@ -3312,7 +3390,7 @@ export class TuiController {
   }
 
   themeNames(): string[] {
-    return ["mono", ...this.#customThemes.keys()].sort((left, right) => left.localeCompare(right));
+    return [...BUILTIN_THEME_NAMES, ...this.#customThemes.keys()].sort((left, right) => left.localeCompare(right));
   }
 
   async editExternally(operation: (text: string, signal: AbortSignal) => Promise<string> = async (text, signal) => await editTextExternally(text, {
@@ -3609,6 +3687,7 @@ export class TuiController {
       for (const owner of [...this.#persistentRawComponents[slot].values()]) owner.mount.close();
       this.#persistentRawComponents[slot].clear();
     }
+    for (const owner of [...this.#rawBackgrounds.values()]) this.#removeRawBackground(owner);
     this.#rawRuntimeComponent?.mount.close();
     this.#rawRuntimeComponent = undefined;
     for (const owner of [...this.#rawRuntimeOverlays].reverse()) owner.mount.close();
@@ -3624,7 +3703,7 @@ export class TuiController {
     this.#extensionWorkingMessages.clear();
     this.#extensionWorkingVisibility.clear();
     this.#model.setContext({ extensionStatus: "", widgets: [], extensionHeaders: [], extensionFooters: [] });
-    this.setTitle("Rigyn");
+    this.setTitle("rigyn");
     this.#scheduleRender();
   }
 
@@ -3881,6 +3960,42 @@ export class TuiController {
     return blocks;
   }
 
+  #renderRawBackground(size: { columns: number; rows: number }): readonly BackgroundCell[] | undefined {
+    const owner = [...this.#rawBackgrounds.values()].at(-1);
+    if (owner === undefined) return undefined;
+    try {
+      const rendered = owner.component.render(size.columns, size.rows);
+      if (!Array.isArray(rendered)) throw new TypeError("Raw background render() must return an array of cells");
+      if (rendered.length > size.columns * size.rows) {
+        throw new RangeError("Raw background cannot contain more cells than the terminal plane");
+      }
+      const occupied = new Set<string>();
+      let bytes = 0;
+      return Object.freeze(rendered.map((cell, index) => {
+        if (cell === null || typeof cell !== "object" || Array.isArray(cell)) {
+          throw new TypeError(`Raw background cell ${index} must be an object`);
+        }
+        if (!Number.isSafeInteger(cell.row) || cell.row < 0 || cell.row >= size.rows
+          || !Number.isSafeInteger(cell.column) || cell.column < 0 || cell.column >= size.columns) {
+          throw new RangeError(`Raw background cell ${index} is outside the terminal plane`);
+        }
+        if (typeof cell.text !== "string" || sanitizeTerminalText(cell.text) !== cell.text
+          || splitGraphemes(cell.text).length !== 1 || cellWidth(cell.text) !== 1) {
+          throw new TypeError(`Raw background cell ${index} must contain one printable, single-column grapheme`);
+        }
+        const coordinate = `${cell.row}:${cell.column}`;
+        if (occupied.has(coordinate)) throw new Error(`Raw background cell ${index} duplicates ${coordinate}`);
+        occupied.add(coordinate);
+        bytes += Buffer.byteLength(cell.text, "utf8");
+        if (bytes > MAX_BACKGROUND_BYTES) throw new RangeError("Raw background exceeds the 2 MiB frame limit");
+        return Object.freeze({ row: cell.row, column: cell.column, text: cell.text });
+      }));
+    } catch (cause) {
+      this.#removeRawBackground(owner, cause);
+      return undefined;
+    }
+  }
+
   #activeWorkingIndicator(): WorkingIndicatorOwner | undefined {
     return [...this.#workingIndicators.values()].at(-1);
   }
@@ -3903,6 +4018,7 @@ export class TuiController {
     const sessionRenderBlocks = this.#renderSessionBlocks(transcript, size.columns, size.rows);
     const persistentComponents = this.#renderPersistentComponents(size);
     const rawPersistentComponents = this.#renderRawPersistentComponents(size);
+    const backgroundCells = this.#renderRawBackground(size);
     const workingIndicator = this.#activeWorkingIndicator();
     const hiddenReasoning = this.#activeHiddenReasoningLabel();
     let runtimeComponent: RuntimeUiBlock | undefined;
@@ -4204,6 +4320,7 @@ export class TuiController {
           }),
       ...(this.#model.usage === undefined ? {} : { usage: this.#model.usage }),
       ...(this.#model.notice === undefined ? {} : { notice: this.#model.notice }),
+      ...(backgroundCells === undefined ? {} : { backgroundCells }),
       ...(persistentComponents.header.length === 0 ? {} : { runtimeHeaderComponents: persistentComponents.header }),
       ...(persistentComponents.footer.length === 0 ? {} : { runtimeFooterComponents: persistentComponents.footer }),
       ...(persistentComponents.widget.length === 0 && persistentComponents["widget-above"].length === 0
@@ -4293,6 +4410,7 @@ export class TuiController {
       for (const owner of [...this.#persistentRawComponents[slot].values()]) owner.mount.close();
       this.#persistentRawComponents[slot].clear();
     }
+    for (const owner of [...this.#rawBackgrounds.values()]) this.#removeRawBackground(owner);
     for (const owner of this.#workingIndicators.values()) owner.signal.removeEventListener("abort", owner.onAbort);
     this.#workingIndicators.clear();
     for (const owner of this.#hiddenReasoningLabels.values()) owner.signal.removeEventListener("abort", owner.onAbort);

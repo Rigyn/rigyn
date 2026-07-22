@@ -615,7 +615,7 @@ export const SESSION_EXPORT_CLIENT = String.raw`
   document.getElementById("mobile-close").addEventListener("click", function () { document.body.classList.remove("sidebar-open"); });
   document.getElementById("overlay").addEventListener("click", function () { document.body.classList.remove("sidebar-open"); });
 
-  document.getElementById("session-title").textContent = text(data.title || "Rigyn session");
+  document.getElementById("session-title").textContent = text(data.title || "rigyn session");
   document.getElementById("session-meta").textContent = text(data.header && data.header.cwd) + " · " + text(data.header && data.header.id) + " · " + timestamp(data.header && data.header.timestamp);
   var usage = data.usage || {};
   [["usage-input", usage.inputTokens], ["usage-output", usage.outputTokens], ["usage-cache-read", usage.cacheReadTokens], ["usage-cache-write", usage.cacheWriteTokens]].forEach(function (item) {

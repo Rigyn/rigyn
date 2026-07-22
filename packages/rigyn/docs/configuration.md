@@ -1,8 +1,8 @@
 # Settings
 
-Rigyn has one editable settings document managed by `SettingsManager`. A self-contained install creates the global file from the complete packaged `resources/settings.example.json` whenever it is missing; `rigyn config edit` opens that same complete template when the user-scope file is missing. Existing files are preserved on reinstall and update.
+rigyn has one editable settings document managed by `SettingsManager`. A self-contained install creates the global file from the complete packaged `resources/settings.example.json` whenever it is missing; `rigyn config edit` opens that same complete template when the user-scope file is missing. Existing files are preserved on reinstall and update.
 
-Comments and trailing commas are not accepted. Every supported persistent preference is present in the scaffold. `null` means inherit Rigyn's dynamic, provider, environment, or platform default; it is not passed into the runtime. Unknown keys are retained but have no effect. Missing files and missing keys also mean defaults, and Rigyn does not generate a second “effective configuration” document.
+Comments and trailing commas are not accepted. Every supported persistent preference is present in the scaffold. `null` means inherit rigyn's dynamic, provider, environment, or platform default; it is not passed into the runtime. Unknown keys are retained but have no effect. Missing files and missing keys also mean defaults, and rigyn does not generate a second “effective configuration” document.
 
 ## Locations and precedence
 
@@ -20,6 +20,12 @@ Global settings load first. Trusted project settings override them. Nested setti
 
 Credentials are stored separately in `auth.json`. Sessions are append-only JSONL files under `sessions/`. They are intentionally not configuration and never belong in `settings.json`. Provider/model declarations and authentication commands are also not settings: use the model registry and trusted provider extensions described in [Providers](providers.md).
 
+The CLI owns `models.json` as its durable discovered-model catalog snapshot and may rewrite it after catalog refreshes. Its top level is `{ "version": 1, "savedAt": "...", "providers": [...] }`. The SDK compatibility `ModelRuntime` does not parse that file as configuration.
+
+`ModelRuntime.create()` instead reads optional editable provider declarations from `model-providers.json`. That document has a provider-keyed top level such as `{ "providers": { "company": { "baseUrl": "...", "api": "openai-completions", "models": [...] } } }`. The CLI does not read `model-providers.json`; CLI provider customization remains extension-owned. An explicit SDK `modelsPath` still selects another provider-configuration file, and `modelsPath: null` disables it.
+
+There is no automatic rename or copy from `models.json`, because that path may contain a live CLI catalog that must be preserved. An SDK-only installation that previously placed provider declarations there should move that provider-keyed document to `model-providers.json` before starting the CLI.
+
 Application and editor overrides live under the `keybindings` object in `settings.json`, so ordinary configuration stays in one file. A pre-0.5.1 `keybindings.json` remains a compatibility input; values in `settings.json` take precedence. See [Keybindings](keybindings.md) for the action map and chord format. `/reload` applies keybinding changes together with settings and extension resources.
 
 ## Agent instructions
@@ -35,7 +41,7 @@ ANCESTOR/AGENTS.md                    project or directory-specific instructions
 A self-contained install scaffolds the global `AGENTS.md` from the packaged template whenever it is missing. Edit it
 directly and run `/reload` in an active session; reinstall and update preserve the customized file byte-for-byte.
 
-Rigyn loads the global file first, then one instruction file from each ancestor directory in filesystem-root-to-working-directory order. More specific instructions therefore appear later. `/reload` rereads the active files, and `--no-context-files` disables instruction-file discovery for one invocation. Instruction files are prompt text; they do not grant extension trust or additional operating-system authority.
+rigyn loads the global file first, then one instruction file from each ancestor directory in filesystem-root-to-working-directory order. More specific instructions therefore appear later. `/reload` rereads the active files, and `--no-context-files` disables instruction-file discovery for one invocation. Instruction files are prompt text; they do not grant extension trust or additional operating-system authority.
 
 ## Locate or edit settings
 
@@ -54,14 +60,14 @@ rigyn config edit --scope project
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `lastChangelogVersion` | none | Rigyn-managed marker for startup release notes; normally do not edit. |
+| `lastChangelogVersion` | none | rigyn-managed marker for startup release notes; normally do not edit. |
 | `defaultProvider` | none | Preferred provider when no session selection exists. |
 | `defaultModel` | none | Preferred model ID. |
 | `defaultThinkingLevel` | model default | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `transport` | `auto` | OpenAI Codex transport: `auto`, `sse`, `websocket`, or `websocket-cached`. |
 | `steeringMode` | `one-at-a-time` | Drain steering messages `one-at-a-time` or `all`. |
 | `followUpMode` | `one-at-a-time` | Drain follow-up messages `one-at-a-time` or `all`. |
-| `theme` | `mono` | Bundled `mono` or a discovered custom theme name. A `LIGHT/DARK` pair may select two custom themes automatically. |
+| `theme` | `mono` | Built-in `mono` or `signal`, or a discovered custom theme name. A `LIGHT/DARK` pair may select two themes automatically. |
 | `compaction.enabled` | `true` | Enable automatic compaction. |
 | `compaction.reserveTokens` | `16384` | Reserve output room when deriving the compaction threshold. |
 | `compaction.keepRecentTokens` | `20000` | Recent context retained verbatim where possible. |
@@ -106,13 +112,13 @@ rigyn config edit --scope project
 | `markdown.codeBlockIndent` | two spaces | Indentation used for rendered code blocks. |
 | `warnings.anthropicExtraUsage` | `true` | Warn once per interactive process when an Anthropic model uses subscription credentials; set `false` to suppress. |
 | `sessionDir` | `<agentDir>/sessions` | Alternate session directory; `~` is expanded. |
-| `httpProxy` | environment/default dispatcher | Proxy URL for Rigyn-managed HTTP clients. |
+| `httpProxy` | environment/default dispatcher | Proxy URL for rigyn-managed HTTP clients. |
 | `httpIdleTimeoutMs` | `300000` | Header/body idle timeout; `0` or `"disabled"` disables it. |
 | `websocketConnectTimeoutMs` | provider default | WebSocket connect timeout; `0` or `"disabled"` disables it. |
 | `collapseChangelog` | `false` | Prefer a condensed changelog display. |
 | `keybindings` | platform defaults | Complete application/editor action map. `null` on an action keeps its built-in binding; `[]` unbinds it. |
 
-Rigyn does not send install or usage telemetry. Secrets, OAuth tokens, and provider request headers never belong in settings.
+rigyn does not send install or usage telemetry. Secrets, OAuth tokens, and provider request headers never belong in settings.
 
 The first interactive startup records the installed version without replaying old release notes. After an update, startup shows only release sections newer than the recorded version. Set `collapseChangelog` to `true` for a one-line update notice; `/changelog` always shows the complete packaged changelog.
 

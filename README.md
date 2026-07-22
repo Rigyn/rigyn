@@ -1,10 +1,12 @@
-# Rigyn
+<h1 align="center">
+  <img src="assets/brand/rigyn-lockup.svg" alt="rigyn" width="640">
+</h1>
 
-Rigyn is a local-first coding agent for the terminal. Launch it inside a project, describe an outcome, and the selected model can inspect files, run commands, and edit code through bounded tools. Sessions, branches, model choices, usage, and extension state are stored locally so work can continue in a later terminal.
+rigyn is a local-first coding agent for the terminal. Launch it inside a project, describe an outcome, and the selected model can inspect files, run commands, and edit code through bounded tools. Sessions, branches, model choices, usage, and extension state are stored locally so work can continue in a later terminal.
 
-Rigyn supports multiple model providers and their available authentication methods, including OAuth where the provider offers it. It includes an interactive TUI with one built-in monochrome theme, one-shot and JSON modes, resumable append-only JSONL sessions, context compaction, image input, skills, prompt templates, custom themes, and trusted TypeScript extension packages. Extensions run inside the active harness and can add tools, commands, providers, authentication, state, events, and UI.
+rigyn supports multiple model providers and their available authentication methods, including OAuth where the provider offers it. It includes an interactive TUI with the built-in `mono` and operational `signal` themes, one-shot and JSON modes, resumable append-only JSONL sessions, context compaction, image input, skills, prompt templates, custom themes, and trusted TypeScript extension packages. Extensions run inside the active harness and can add tools, commands, providers, authentication, state, events, and UI.
 
-Runtime extensions and `bash` execute with your operating-system user privileges. Review executable packages before enabling them; Rigyn is not a process sandbox.
+Runtime extensions and `bash` execute with your operating-system user privileges. Review executable packages before enabling them; rigyn is not a process sandbox.
 
 The `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` tools are active by default across interactive, print,
 JSON, RPC, and direct SDK sessions.
@@ -15,18 +17,18 @@ With a supported Node.js 24.15+ or 26+ runtime and npm installed, one command in
 release into a private per-user directory:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rigyn/rigyn/main/install.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rigyn/rigyn/main/install.ps1 | iex
 ```
 
-Neither command needs an npm account or downloads a Rigyn package from the npm registry. To install without Node.js
+Neither command needs an npm account or downloads a rigyn package from the npm registry. To install without Node.js
 or npm, download the standalone archive for your platform from the
-[v0.5.1 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.1), verify it against the release
+[v0.5.1 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.5.1), verify it against the release
 `SHA256SUMS`, and extract it. The archive includes its own Node.js runtime and production dependencies.
 
 ```sh
@@ -40,7 +42,7 @@ Use `bin/rigyn` on Linux or macOS and `bin\rigyn.cmd` on Windows. The
 same GitHub release, and source installation.
 
 On first run, use `/login` to connect a provider and `/model` to select one of its currently available models. The
-directory where Rigyn starts is the workspace unless `--workspace DIR` is supplied. User state lives under
+directory where rigyn starts is the workspace unless `--workspace DIR` is supplied. User state lives under
 `$HOME/.rigyn`; the standalone executable stays in the extracted archive, while the optional private installer also
 places the application there. Neither route uses npm's global package directory or redirects execution into this
 source checkout.
@@ -80,4 +82,4 @@ Releases. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), an
 
 ## License
 
-Rigyn is released under the [MIT License](LICENSE).
+rigyn is released under the [MIT License](LICENSE).

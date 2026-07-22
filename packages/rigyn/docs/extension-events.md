@@ -37,7 +37,7 @@ Every listener belongs to one activation generation. A failed activation commits
 | `tool_call` | Mutate the cloned tool input and/or block execution before final schema validation. | `{ block?, reason? }` |
 | `tool_result` | Replace validated content, details, error state, or normalized usage. | `{ content?, details?, isError?, usage? }` |
 | `input` | Continue, transform, or consume accepted interactive/RPC/extension input. | `continue`, `transform`, or `handled` result |
-| `user_bash` | Supply a bounded synthetic result or an execution implementation for `!`/`!!`. | `{ result? , operations? }` |
+| `user_bash` | Supply a bounded synthetic result or a `BashOperations` execution implementation for `!`/`!!`. | `{ result?, operations? }` |
 | `model_select`, `thinking_level_select` | Observe validated model or reasoning selection. | none |
 | `before_provider_request` | Inspect a detached provider-native JSON body and optionally replace the complete body before transport. | JSON-safe replacement body |
 | `before_provider_headers` | Mutate the complete assembled outgoing headers; assign `null` to remove a header. | none |
@@ -59,7 +59,7 @@ Provider header hooks belong to the trusted direct-extension tier. They can obse
 
 ## Callback context
 
-Ordinary listeners receive the same generation-bound context family as commands: `cwd`, `mode`, `hasUI`, project trust, read-only current `sessionManager`, model catalog/current model, UI, cancellation, idle state, context usage, compaction, and the current system prompt. Session transitions and reload are command-only operations.
+Ordinary listeners receive the same generation-bound context family as commands: `cwd`, `mode`, `hasUI`, project trust, read-only current `sessionManager`, model catalog/current model, the selected `thinkingLevel`, UI, cancellation, idle state, context usage, compaction, and the current system prompt. Session transitions and reload are command-only operations.
 
 Check `context.hasUI` before opening a dialog or custom component. Event handlers may run in print, JSON, RPC, or embedding hosts.
 

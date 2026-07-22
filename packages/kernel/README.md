@@ -1,6 +1,6 @@
 # @rigyn/kernel
 
-`@rigyn/kernel` is Rigyn's reusable agent runtime. It contains the streaming agent loop, tool execution, steering and follow-up queues, a higher-level `AgentHarness`, append-only version 3 JSONL sessions, in-memory sessions, compaction, skills, prompt templates, and a Node execution environment.
+`@rigyn/kernel` is rigyn's reusable agent runtime. It contains the streaming agent loop, tool execution, steering and follow-up queues, a higher-level `AgentHarness`, append-only version 3 JSONL sessions, in-memory sessions, compaction, skills, prompt templates, and a Node execution environment.
 
 The package deliberately does not own credentials, provider registration, a terminal UI, coding tools, permissions, MCP, or process orchestration. Model and streaming primitives come from `@rigyn/models`; applications inject a `StreamFn` or `Models` instance.
 

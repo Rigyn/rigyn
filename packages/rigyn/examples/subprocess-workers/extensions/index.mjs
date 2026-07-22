@@ -373,7 +373,7 @@ export default async function activate(rigyn) {
     async execute(_callId, input, signal, onUpdate, context) {
       const agents = await discoverAgents();
       const cliEntry = process.argv[1];
-      if (typeof cliEntry !== "string" || cliEntry === "") throw new Error("The active Rigyn CLI entry point is unavailable");
+      if (typeof cliEntry !== "string" || cliEntry === "") throw new Error("The active rigyn CLI entry point is unavailable");
       return await executeMode(rigyn, cliEntry, agents, selectedMode(input), context.cwd, signal ?? context.signal, (details) => {
         onUpdate?.({
           content: [{ type: "text", text: `Delegated tasks complete: ${details.completed}/${details.total}` }],
@@ -397,7 +397,7 @@ export default async function activate(rigyn) {
       }
       const cliEntry = process.argv[1];
       if (typeof cliEntry !== "string" || cliEntry === "") {
-        context.ui.notify("The active Rigyn CLI entry point is unavailable.", "error");
+        context.ui.notify("The active rigyn CLI entry point is unavailable.", "error");
         return;
       }
 

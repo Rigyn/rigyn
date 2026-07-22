@@ -204,15 +204,15 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.equal(lockfile.packages?.["packages/rigyn"]?.version, manifest.version, "package-lock product version must match package.json");
   assert.equal(manifest.license, "MIT", "package.json must declare the MIT license");
   assert.equal(lockfile.packages?.["packages/rigyn"]?.license, manifest.license, "package-lock product license must match package.json");
-  assert.equal(manifest.homepage, "https://github.com/Rigyn/rigyn#readme", "package.json homepage must target the public repository");
-  assert.deepEqual(manifest.bugs, { url: "https://github.com/Rigyn/rigyn/issues" }, "package.json bugs URL must target the public repository");
+  assert.equal(manifest.homepage, "https://github.com/rigyn/rigyn#readme", "package.json homepage must target the public repository");
+  assert.deepEqual(manifest.bugs, { url: "https://github.com/rigyn/rigyn/issues" }, "package.json bugs URL must target the public repository");
   assert.deepEqual(
     manifest.repository,
-    { type: "git", url: "git+https://github.com/Rigyn/rigyn.git", directory: "packages/rigyn" },
+    { type: "git", url: "git+https://github.com/rigyn/rigyn.git", directory: "packages/rigyn" },
     "package.json repository must target the public repository",
   );
-  assert.equal(manifest.private, true, "The Rigyn release archive must be registry-private");
-  assert.equal(manifest.publishConfig, undefined, "Rigyn must not declare registry publication settings");
+  assert.equal(manifest.private, true, "The rigyn release archive must be registry-private");
+  assert.equal(manifest.publishConfig, undefined, "rigyn must not declare registry publication settings");
   const versionSource = await readText(productRoot, "src/version.ts");
   assert.equal(
     versionSource.trim(),

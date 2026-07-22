@@ -6,7 +6,7 @@ import { normalizePath } from "../utils/paths.js";
 import { RIGYN_VERSION } from "../version.js";
 
 export const APP_NAME = "rigyn";
-export const APP_TITLE = "Rigyn";
+export const APP_TITLE = "rigyn";
 export const CONFIG_DIR_NAME = ".rigyn";
 export const ENV_AGENT_DIR = "RIGYN_CODING_AGENT_DIR";
 export const ENV_SESSION_DIR = "RIGYN_CODING_AGENT_SESSION_DIR";

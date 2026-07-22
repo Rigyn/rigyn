@@ -156,6 +156,7 @@ test("five-argument runner binds actions and keeps projection resolution determi
   assert.deepEqual(registered, ["queued"]);
   assert.deepEqual(runner.getActiveTools(), ["read"]);
   assert.equal(runner.createContext().getSystemPrompt(), "system");
+  assert.equal(runner.createContext().thinkingLevel, "off");
   assert.equal(runner.getFlags().get("mode")?.default, "first");
   assert.deepEqual(runner.getRegisteredCommands().map((entry) => entry.invocationName), ["probe:1", "probe:2"]);
 

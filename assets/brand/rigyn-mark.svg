@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn open kernel loom</title>
+  <desc id="desc">An open terminal-grid loom joining a runtime spine to modular attachment ports.</desc>
+  <g fill="none" stroke="#090a0a" stroke-width="12" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M48 24v32h160V24M96 24v32M160 24v32"/>
+    <path d="M128 56v32M128 120v16M128 168v44"/>
+    <path d="M24 88h32v32H24M56 104h48m0 0h16V88h16v32h16v-16h48"/>
+    <path d="M232 88h-32v32h32"/>
+    <path d="M24 136h32v32H24M56 152h48m0 0h16v16h16v-32h16v16h48"/>
+    <path d="M232 136h-32v32h32"/>
+  </g>
+  <path fill="#090a0a" d="m128 212 18 18-18 18-18-18z"/>
+</svg>

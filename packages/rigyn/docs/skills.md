@@ -1,6 +1,6 @@
 # Skills
 
-Skills are progressively disclosed instruction packages. Rigyn initially exposes each skill's name and description; the complete `SKILL.md` body is loaded only when the task calls for it or the user invokes its slash command. This keeps unrelated procedure text out of the active context.
+Skills are progressively disclosed instruction packages. rigyn initially exposes each skill's name and description; the complete `SKILL.md` body is loaded only when the task calls for it or the user invokes its slash command. This keeps unrelated procedure text out of the active context.
 
 ## Directory shape
 

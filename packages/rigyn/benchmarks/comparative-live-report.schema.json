@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Rigyn/rigyn/blob/main/benchmarks/comparative-live-report.schema.json",
-  "title": "Rigyn comparative live benchmark report",
+  "$id": "https://github.com/rigyn/rigyn/blob/main/benchmarks/comparative-live-report.schema.json",
+  "title": "rigyn comparative live benchmark report",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "suite", "purpose", "stochastic", "provider", "model", "samples", "runs", "summary"],
