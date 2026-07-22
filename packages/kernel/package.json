@@ -1,6 +1,7 @@
 {
   "name": "@rigyn/kernel",
   "version": "0.5.0",
+  "private": true,
   "description": "Reusable agent loop, durable session primitives, and execution environment for Rigyn",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,9 +22,6 @@
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Rigyn/rigyn.git",

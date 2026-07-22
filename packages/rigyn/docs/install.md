@@ -2,11 +2,10 @@
 
 ## Requirements and distribution
 
-Rigyn releases provide standalone runtime archives for Linux, macOS, and Windows on x64 and arm64. A standalone archive includes the pinned official Node.js runtime and the complete production dependency graph, so Node and npm are not installation prerequisites. Download the archive matching `process.platform`/`process.arch`, verify it against the release `SHA256SUMS`, and extract it with `tar -xzf`.
-
-On Linux and macOS, run `bin/rigyn`; on Windows, run `bin\rigyn.cmd`. The archive is relocatable and stores user configuration and sessions in the normal Rigyn user directories rather than beside the executable.
-
-The npm route remains available when a supported 64-bit Node.js 24.15+ or 26+ runtime is already installed. It uses four Rigyn package archives. Their JavaScript is platform-neutral; `@rigyn/terminal` also carries the complete prebuilt macOS and Windows helper matrix, while npm selects any other native dependency variants for the current operating system and CPU.
+The managed one-line installer requires a supported 64-bit Node.js 24.15+ or 26+ runtime and the local npm command.
+It downloads Rigyn only from GitHub Releases; no npm account or registry-hosted Rigyn package is required. The four
+Rigyn archives are platform-neutral, while `@rigyn/terminal` carries the complete prebuilt macOS and Windows helper
+matrix and npm selects third-party native dependency variants for the current operating system and CPU.
 
 Check the runtime before installation:
 
@@ -15,7 +14,20 @@ node --version
 npm --version
 ```
 
-Install the private per-user copy from the v0.5.0 GitHub release:
+On Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+```
+
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+```
+
+Each installer obtains the latest release identity, downloads all four exact archives and `SHA256SUMS`, verifies every
+archive, and only then invokes the private installer. The equivalent version-pinned manual command is:
 
 ```sh
 npm exec --yes \
@@ -27,11 +39,15 @@ npm exec --yes \
 rigyn --version
 ```
 
-This uses npm's one-shot package executor and does not create a global npm installation. The equivalent latest-registry-release command is:
+This uses npm's one-shot package executor and does not create a global npm installation or resolve Rigyn from the npm
+registry.
 
-```sh
-npm exec --yes --package=rigyn@latest -- rigyn self-install
-```
+Rigyn releases also provide standalone runtime archives for Linux, macOS, and Windows on x64 and arm64. A standalone
+archive includes the pinned official Node.js runtime and complete production dependency graph, so Node and npm are not
+installation prerequisites. Download the archive matching `process.platform`/`process.arch`, verify it against the
+release `SHA256SUMS`, and extract it with `tar -xzf`. On Linux and macOS, run `bin/rigyn`; on Windows, run
+`bin\rigyn.cmd`. The archive is relocatable and stores user configuration and sessions in the normal Rigyn user
+directories rather than beside the executable.
 
 To install from the public source checkout instead:
 
@@ -149,4 +165,10 @@ To remove the private installation and all installation-owned credentials and se
 rigyn uninstall --yes
 ```
 
-Install, self-update, and uninstall are serialized across processes. Update and uninstall refuse to mutate the installation while another Rigyn runtime is active; close the other terminal first. The default self-update refuses to replace the installation with an older registry version; `RIGYN_UPDATE_SPEC` remains an explicit operator override for a reviewed exact version or archive. An interrupted install or uninstall is recovered from its transaction record on the next lifecycle command. Uninstall never removes the source checkout or arbitrary workspaces.
+Install, self-update, and uninstall are serialized across processes. Update and uninstall refuse to mutate the
+installation while another Rigyn runtime is active; close the other terminal first. The default self-update verifies
+the latest public GitHub release and refuses to replace the installation with an older version;
+`RIGYN_UPDATE_SPEC` remains an explicit operator override for a reviewed local `rigyn-<version>.tgz` accompanied by
+the other three same-version package archives. An interrupted install or
+uninstall is recovered from its transaction record on the next lifecycle command. Uninstall never removes the source
+checkout or arbitrary workspaces.

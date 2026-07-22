@@ -100,9 +100,9 @@ The sources in `native/` provide two platform helpers:
 - macOS modifier-state detection for terminal input that cannot encode Shift+Return directly.
 - Windows virtual-terminal input activation after Node enters raw mode.
 
-Published macOS and Windows artifacts must contain the matching x64 and arm64 N-API binary under `native/<platform>/prebuilds/<platform>-<arch>/`. The four required paths are declared in `native/targets.json`.
+GitHub release artifacts for macOS and Windows must contain the matching x64 and arm64 N-API binary under `native/<platform>/prebuilds/<platform>-<arch>/`. The four required paths are declared in `native/targets.json`.
 
-On a macOS or Windows release worker, `npm run native:build` compiles the helper for the worker's current architecture and `npm run native:verify` loads it and exercises its exported function. Linux still validates both sources and the complete four-target manifest, but cannot load another operating system's binary. The release workflow collects the four matching-runner outputs into one package tree, and `npm run native:verify -- --release` validates their presence and executable headers before staging. The staged archive verifier installs `@rigyn/terminal` and loads the matching packed helper again on macOS and Windows. `prepublishOnly` enforces the complete artifact gate for direct publication.
+On a macOS or Windows release worker, `npm run native:build` compiles the helper for the worker's current architecture and `npm run native:verify` loads it and exercises its exported function. Linux still validates both sources and the complete four-target manifest, but cannot load another operating system's binary. The release workflow collects the four matching-runner outputs into one package tree, and `npm run native:verify -- --release` validates their presence and executable headers before staging. The staged archive verifier installs `@rigyn/terminal` and loads the matching packed helper again on macOS and Windows.
 
 ## Verification
 

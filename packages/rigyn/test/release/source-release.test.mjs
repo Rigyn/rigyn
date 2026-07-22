@@ -89,6 +89,8 @@ async function createFixture(context) {
 
 test("source archive policy requires the build and private-install inputs", () => {
   for (const path of [
+    "install.sh",
+    "install.ps1",
     "package.json",
     "package-lock.json",
     "scripts/generate-provider-models.mjs",

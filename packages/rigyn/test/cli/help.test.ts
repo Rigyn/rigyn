@@ -51,6 +51,7 @@ test("CLI help has concise global and command-specific surfaces", () => {
   assert.match(renderCliHelp("install"), /disabled unless --allow-scripts/u);
   assert.match(renderCliHelp("update"), /only to this update transaction/u);
   assert.match(renderCliHelp("uninstall"), /saved configuration, credentials, sessions/u);
+  assert.match(renderCliHelp("self-update"), /latest verified Rigyn GitHub release/u);
   assert.match(renderCliHelp("self-update"), /atomically replaces/u);
   assert.throws(() => renderCliHelp("unknown"), /Unknown help topic/u);
 });

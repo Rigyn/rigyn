@@ -8,15 +8,39 @@ Runtime extensions and `bash` execute with your operating-system user privileges
 
 ## Install and start
 
-Node.js 24.15 or a current Node.js 26-or-newer release is required.
+With a supported Node.js 24.15+ or 26+ runtime and npm installed, one command installs the complete verified GitHub
+release into a private per-user directory:
 
 ```sh
-npm exec --yes --package=rigyn@latest -- rigyn self-install
-cd /path/to/your/project
-rigyn
+curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
 ```
 
-On first run, use `/login` to connect a provider and `/model` to select one of its currently available models. The directory where Rigyn starts is the workspace unless `--workspace DIR` is supplied. A self-contained installation lives under `$HOME/.rigyn`; it does not use npm's global package directory or redirect execution into this source checkout.
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+```
+
+Neither command needs an npm account or downloads a Rigyn package from the npm registry. To install without Node.js
+or npm, download the standalone archive for your platform from the
+[v0.5.0 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.0), verify it against the release
+`SHA256SUMS`, and extract it. The archive includes its own Node.js runtime and production dependencies.
+
+```sh
+tar -xzf rigyn-v0.5.0-linux-x64.tar.gz
+cd /path/to/your/project
+/path/to/rigyn-v0.5.0-linux-x64/bin/rigyn
+```
+
+Use `bin/rigyn` on Linux or macOS and `bin\rigyn.cmd` on Windows. The
+[complete product guide](packages/rigyn/README.md) covers every platform, a private per-user installation from the
+same GitHub release, and source installation.
+
+On first run, use `/login` to connect a provider and `/model` to select one of its currently available models. The
+directory where Rigyn starts is the workspace unless `--workspace DIR` is supplied. User state lives under
+`$HOME/.rigyn`; the standalone executable stays in the extracted archive, while the optional private installer also
+places the application there. Neither route uses npm's global package directory or redirects execution into this
+source checkout.
 
 Useful commands include `/settings`, `/model`, `/scoped-models`, `/new`, `/resume`, `/tree`, `/compact`, `/reload`, `/export`, `/share`, and `/hotkeys`. A one-shot task can be run with:
 
@@ -24,7 +48,9 @@ Useful commands include `/settings`, `/model`, `/scoped-models`, `/new`, `/resum
 rigyn -p "Review this project and explain its architecture"
 ```
 
-Read the [complete product guide](packages/rigyn/README.md) for installation alternatives, providers, sessions, configuration, terminal controls, extensions, embedding, RPC, security boundaries, and troubleshooting. The [documentation map](packages/rigyn/docs/README.md) links every focused reference.
+Read the complete product guide for providers, sessions, configuration, terminal controls, extensions, embedding,
+RPC, security boundaries, and troubleshooting. The [documentation map](packages/rigyn/docs/README.md) links every
+focused reference.
 
 ## Packages
 
@@ -40,7 +66,9 @@ npm install
 npm run check
 ```
 
-The repository root is a private workspace container. Release tooling publishes only validated workspace packages. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the [release procedure](packages/rigyn/docs/releasing.md).
+The repository root is a private workspace container. Release tooling uploads only validated artifacts to GitHub
+Releases. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the
+[release procedure](packages/rigyn/docs/releasing.md).
 
 ## License
 

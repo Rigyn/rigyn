@@ -157,7 +157,7 @@ jobs:
         with:
           node-version: 24.15.0
       - run: npm ci --ignore-scripts
-      - name: Download staged npm archives
+      - name: Download staged package archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rigyn-release-stage-${{ github.run_id }}
@@ -183,7 +183,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24.15.0
-      - name: Download staged npm archives
+      - name: Download staged package archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rigyn-release-stage-${{ github.run_id }}
@@ -258,13 +258,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24.15.0
-          registry-url: https://registry.npmjs.org
       - name: Download staged release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -287,29 +285,6 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Rigyn $version" --notes-file .release/RELEASE_NOTES.md
           fi
           gh release upload "$GITHUB_REF_NAME" .release/*.tgz .release/*.tar.gz .release/SHA256SUMS .release/release-manifest.json .release/RELEASE_NOTES.md --clobber
-      - name: Publish exact staged package graph to npm
-        if: vars.NPM_PUBLISH_ENABLED == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module --eval '
-            const manifest = (await import("./.release/release-manifest.json", { with: { type: "json" } })).default;
-            for (const archive of manifest.archives) {
-              process.stdout.write([archive.name, archive.version, archive.file, archive.integrity].join("\t") + "\n");
-            }
-          ' | while IFS=$'\t' read -r package version archive expected; do
-            if published="$(npm view "$package@$version" dist.integrity --json 2>/dev/null)"; then
-              PUBLISHED_INTEGRITY="$published" EXPECTED_INTEGRITY="$expected" node --eval '
-                const published = JSON.parse(process.env.PUBLISHED_INTEGRITY);
-                if (published !== process.env.EXPECTED_INTEGRITY) {
-                  throw new Error("Published npm integrity differs from the staged archive");
-                }
-              '
-              echo "$package@$version already contains the staged bytes"
-            else
-              npm publish ".release/$archive" --access public --provenance
-            fi
-          done
       - name: Publish GitHub release
         shell: bash
         env:

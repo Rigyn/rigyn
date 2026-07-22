@@ -10,11 +10,13 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 - Added Kimi Code subscription OAuth with bounded device authorization, rotating refresh tokens, host overrides, and API-key coexistence.
 - Added public assistant-call retry helpers, kernel compaction and branch-summary retry policy/events, retained-tail session checkpoints, and a configurable default stream function.
-- Added a deterministic, commit-exact source release archive with checksums and a clean-install rebuild gate before package publication.
+- Added a deterministic, commit-exact source release archive with checksums and a clean-install rebuild gate before GitHub release publication.
+- Added checksum-verified one-line GitHub installers for Linux, macOS, and Windows.
 
 ### Changed
 
 - Made Rigyn's maintained fallback catalog the only bundled chat-model source, preserving its reasoning metadata while live discovery remains authoritative.
+- Moved public installation, verified self-update, and release publication to versioned GitHub Release assets.
 - Deferred live model discovery until after the interactive terminal is visible while retaining cached model hydration at startup and resource-only `/reload` behavior.
 - Restored the shared `Ctrl+O` tool-output expansion binding and made source installation build and verify the matching macOS or Windows terminal helper.
 

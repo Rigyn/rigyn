@@ -18,14 +18,29 @@ Model requests leave your machine when you choose a hosted provider. Use a local
 
 ## 1. Install Rigyn
 
-The standalone archive for your platform includes its runtime; extract it and run `bin/rigyn` (`bin\rigyn.cmd` on Windows). If you prefer the npm distribution, first install a supported 64-bit Node.js 24.15+ or 26+ runtime and npm:
+For a private per-user installation, first install a supported 64-bit Node.js 24.15+ or 26+ runtime and npm:
 
 ```sh
 node --version
 npm --version
 ```
 
-Install a private per-user copy from the v0.5.0 GitHub release:
+Then run the one-line installer for your platform.
+
+Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+```
+
+The installers fetch and verify all four package archives from the latest GitHub release. They require no npm account
+and do not resolve Rigyn from the npm registry. The equivalent version-pinned manual command is:
 
 ```sh
 npm exec --yes \
@@ -37,7 +52,10 @@ npm exec --yes \
 rigyn --version
 ```
 
-This uses npm's one-shot package executor rather than a global npm installation. To install the latest registry release instead, run `npm exec --yes --package=rigyn@latest -- rigyn self-install`.
+This uses npm's one-shot package executor with version-pinned GitHub assets rather than a global npm installation.
+
+Alternatively, the standalone GitHub archive for your platform includes its own runtime and needs neither Node.js nor
+npm; extract it and run `bin/rigyn` (`bin\rigyn.cmd` on Windows).
 
 To install from the public source checkout instead:
 
@@ -196,7 +214,9 @@ rigyn extensions doctor
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest`. Close other running Rigyn processes before update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration, credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
+`self-update` downloads and verifies the latest public GitHub release. Close other running Rigyn processes before
+update or uninstall. Uninstall removes the marker-verified self-contained application and its configuration,
+credentials, sessions, cache, and managed command. It does not delete the source checkout or your project workspaces.
 
 For common failures, see [Troubleshooting](troubleshooting.md), [Platform notes](platforms.md), and [Local diagnostics](diagnostics.md).
 

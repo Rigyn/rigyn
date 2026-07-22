@@ -1051,7 +1051,7 @@ test("self-contained installer rejects a symlink-parent path into the source che
   await assert.rejects(access(escapedTarget), (error) => errno(error) === "ENOENT");
 });
 
-test("self-update treats a leading-dash package spec as data and strips credentials", async (context) => {
+test("self-update rejects a non-local option-like package spec before npm", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "rigyn-update-arguments-"));
   context.after(async () => await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   const installRoot = join(root, "install");
@@ -1090,12 +1090,9 @@ process.exit(31);
       timeoutMs: 30_000,
       label: "argument-isolated self update",
     }),
-    /Rigyn download failed with exit 31/u,
+    /RIGYN_UPDATE_SPEC must name an existing local Rigyn product archive/u,
   );
-  const captured = JSON.parse(await readFile(capture, "utf8"));
-  assert.equal(captured.args.at(-2), "--");
-  assert.equal(captured.args.at(-1), updateSpec);
-  assert.equal(captured.environmentNames.some((name) => SENSITIVE_ENVIRONMENT_NAME.test(name)), false);
+  await assert.rejects(access(capture), (error) => errno(error) === "ENOENT");
 });
 
 test("self-uninstall succeeds when the installation is already absent", async (context) => {

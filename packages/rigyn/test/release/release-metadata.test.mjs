@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -30,10 +30,155 @@ import {
   windowsLauncher,
 } from "../../scripts/lifecycle-common.mjs";
 import { sourceBuildSteps } from "../../scripts/install-user.mjs";
-import { assertUpdateVersionPolicy } from "../../scripts/update-user.mjs";
+import {
+  assertUpdateVersionPolicy,
+  downloadLatestGitHubReleaseBundle,
+  validateGitHubReleaseManifest,
+} from "../../scripts/update-user.mjs";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+
+function githubReleaseFixture(version = "0.5.0") {
+  const files = new Map(RIGYN_PRODUCT_PACKAGE_GRAPH.map(({ name }) => {
+    const file = `${name === "rigyn" ? "rigyn" : name.replace("@rigyn/", "rigyn-")}-${version}.tgz`;
+    return [file, Buffer.from(`${name} ${version} release archive\n`)];
+  }));
+  const archives = RIGYN_PRODUCT_PACKAGE_GRAPH.map(({ name }) => {
+    const file = `${name === "rigyn" ? "rigyn" : name.replace("@rigyn/", "rigyn-")}-${version}.tgz`;
+    const contents = files.get(file);
+    return {
+      name,
+      version,
+      file,
+      sha256: createHash("sha256").update(contents).digest("hex"),
+      integrity: `sha512-${createHash("sha512").update(contents).digest("base64")}`,
+      bytes: contents.byteLength,
+    };
+  });
+  const manifest = {
+    schemaVersion: 4,
+    product: "rigyn",
+    version,
+    tag: `v${version}`,
+    packaging: "npm-and-standalone",
+    node: "^24.15.0 || >=26.0.0",
+    nodeRuntime: "24.15.0",
+    archive: { ...archives.at(-1) },
+    archives,
+    source: {},
+    standalones: [],
+    checksumFile: "SHA256SUMS",
+    releaseNotes: "RELEASE_NOTES.md",
+    targets: [],
+  };
+  const release = { tag_name: manifest.tag, draft: false, prerelease: false, assets: [] };
+  const refresh = () => {
+    files.set("release-manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
+    release.assets = [...files].map(([name, contents]) => ({ name, size: contents.byteLength }));
+  };
+  refresh();
+  return { archives, files, manifest, refresh, release };
+}
+
+function githubReleaseFetch(fixture, calls = []) {
+  return async (input, init) => {
+    const url = String(input);
+    calls.push({ init, url });
+    assert.equal(init?.headers?.authorization, undefined);
+    assert.equal(init?.headers?.["user-agent"], "rigyn-self-update");
+    if (url.endsWith("/releases/latest")) {
+      const contents = Buffer.from(JSON.stringify(fixture.release));
+      return new Response(contents, { status: 200, headers: { "content-length": String(contents.byteLength) } });
+    }
+    const name = decodeURIComponent(new URL(url).pathname.split("/").at(-1));
+    const contents = fixture.files.get(name);
+    if (contents === undefined) return new Response(null, { status: 404 });
+    return new Response(contents, { status: 200, headers: { "content-length": String(contents.byteLength) } });
+  };
+}
+
+async function runProcess(command, args, options = {}) {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const stdout = [];
+  const stderr = [];
+  child.stdout.on("data", (chunk) => stdout.push(chunk));
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  child.stdin.end(options.input ?? "");
+  const code = await new Promise((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("close", resolveExit);
+  });
+  return {
+    code,
+    stdout: Buffer.concat(stdout).toString("utf8"),
+    stderr: Buffer.concat(stderr).toString("utf8"),
+  };
+}
+
+async function runPosixBootstrap(root, options = {}) {
+  const fixture = githubReleaseFixture();
+  const fixtureRoot = join(root, "release-assets");
+  const fakeBin = join(root, "fake-bin");
+  const temporary = join(root, "temporary files");
+  const curlCapture = join(root, "curl.jsonl");
+  const npmCapture = join(root, "npm.json");
+  await Promise.all([mkdir(fixtureRoot), mkdir(fakeBin), mkdir(temporary)]);
+  const checksums = fixture.archives.map(({ file, sha256 }) => `${sha256}  ${file}\n`).join("");
+  await Promise.all([
+    writeFile(join(fixtureRoot, "SHA256SUMS"), checksums),
+    ...fixture.archives.map(async ({ file }) => {
+      const contents = options.corrupt === file ? Buffer.alloc(fixture.files.get(file).byteLength, 1) : fixture.files.get(file);
+      await writeFile(join(fixtureRoot, file), contents);
+    }),
+    writeFile(join(fakeBin, "curl"), `#!/usr/bin/env node
+const { appendFile, copyFile } = require("node:fs/promises");
+const { basename } = require("node:path");
+(async () => {
+  const args = process.argv.slice(2);
+  const url = args.at(-1);
+  await appendFile(process.env.RIGYN_TEST_CURL_CAPTURE, JSON.stringify({ args, url }) + "\\n");
+  if (url.endsWith("/latest")) {
+    process.stdout.write("https://github.com/Rigyn/rigyn/releases/tag/v0.5.0");
+  } else {
+    const outputIndex = args.indexOf("--output");
+    await copyFile(process.env.RIGYN_TEST_FIXTURE + "/" + basename(new URL(url).pathname), args[outputIndex + 1]);
+  }
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+`, { mode: 0o755 }),
+    writeFile(join(fakeBin, "npm"), `#!/usr/bin/env node
+const { readFile, writeFile } = require("node:fs/promises");
+(async () => {
+  await writeFile(process.env.RIGYN_TEST_NPM_CAPTURE, JSON.stringify({
+    args: process.argv.slice(2),
+    cache: process.env.npm_config_cache,
+    global: await readFile(process.env.npm_config_globalconfig, "utf8"),
+    user: await readFile(process.env.npm_config_userconfig, "utf8"),
+  }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+`, { mode: 0o755 }),
+  ]);
+  const script = await readFile(join(REPOSITORY_ROOT, "install.sh"), "utf8");
+  const result = await runProcess("sh", [], {
+    cwd: root,
+    input: script,
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      RIGYN_TEST_CURL_CAPTURE: curlCapture,
+      RIGYN_TEST_FIXTURE: fixtureRoot,
+      RIGYN_TEST_NPM_CAPTURE: npmCapture,
+      TMPDIR: temporary,
+    },
+  });
+  return { curlCapture, fixture, npmCapture, result, temporary };
+}
 
 async function runNode(args, options = {}) {
   const child = spawn(process.execPath, args, {
@@ -176,7 +321,7 @@ process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.
   assert.equal(result.stderr, "");
 });
 
-test("release metadata policy matches the published package contract", async () => {
+test("release metadata policy matches the GitHub artifact contract", async () => {
   const result = await checkReleaseMetadata();
   assert.equal(result.version, "0.5.0");
   assert.equal(result.subpathCount, 22);
@@ -305,7 +450,7 @@ test("release note extraction rejects an undated or empty release", () => {
   );
 });
 
-test("implicit self-update is monotonic while explicit package requests may downgrade", () => {
+test("implicit self-update is monotonic while an explicit local bundle may downgrade", () => {
   assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.2.0", false));
   assert.doesNotThrow(() => assertUpdateVersionPolicy("0.2.0", "0.3.0", false));
   assert.throws(
@@ -322,6 +467,130 @@ test("implicit self-update is monotonic while explicit package requests may down
     () => assertUpdateVersionPolicy("0.2.0", "not-semver", true),
     /Downloaded Rigyn package version is invalid/u,
   );
+});
+
+test("GitHub self-update downloads and verifies the complete release package graph", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-github-update-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const fixture = githubReleaseFixture();
+  const calls = [];
+  const result = await downloadLatestGitHubReleaseBundle(root, {
+    fetch: githubReleaseFetch(fixture, calls),
+  });
+
+  assert.equal(result.version, fixture.manifest.version);
+  assert.deepEqual(result.specs.map((path) => path.slice(root.length + 1)), fixture.archives.map(({ file }) => file));
+  for (const [index, path] of result.specs.entries()) {
+    assert.deepEqual(await readFile(path), fixture.files.get(fixture.archives[index].file));
+  }
+  assert.equal(calls.length, 2 + RIGYN_PRODUCT_PACKAGE_GRAPH.length);
+  assert.equal(calls[0].url, "https://api.github.com/repos/Rigyn/rigyn/releases/latest");
+  assert.equal(calls.every(({ init }) => init.redirect === "follow" && init.signal instanceof AbortSignal), true);
+});
+
+test("GitHub self-update rejects unsupported manifests and bounded metadata overflow", async (context) => {
+  const fixture = githubReleaseFixture();
+  assert.throws(
+    () => validateGitHubReleaseManifest({ ...fixture.manifest, unexpected: true }, fixture.release.tag_name),
+    /unsupported schema/u,
+  );
+  assert.throws(
+    () => validateGitHubReleaseManifest({
+      ...fixture.manifest,
+      archives: [...fixture.manifest.archives].reverse(),
+    }, fixture.release.tag_name),
+    /archive metadata is invalid/u,
+  );
+
+  const root = await mkdtemp(join(tmpdir(), "rigyn-github-update-bounds-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  await assert.rejects(
+    downloadLatestGitHubReleaseBundle(root, {
+      fetch: async () => new Response("{}", {
+        status: 200,
+        headers: { "content-length": String(1024 * 1024 + 1) },
+      }),
+    }),
+    /metadata exceeds the download limit/u,
+  );
+});
+
+test("GitHub self-update removes every downloaded archive after checksum failure", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-github-update-checksum-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const fixture = githubReleaseFixture();
+  const finalArchive = fixture.archives.at(-1);
+  fixture.files.set(finalArchive.file, Buffer.alloc(finalArchive.bytes, 1));
+  fixture.refresh();
+
+  await assert.rejects(
+    downloadLatestGitHubReleaseBundle(root, { fetch: githubReleaseFetch(fixture) }),
+    /SHA-256 does not match/u,
+  );
+  assert.deepEqual(await readdir(root), []);
+});
+
+test("streamed POSIX bootstrap verifies four GitHub archives before self-install", {
+  skip: process.platform === "win32",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bootstrap-posix-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const run = await runPosixBootstrap(root);
+  assert.equal(run.result.code, 0, run.result.stderr);
+  assert.match(run.result.stdout, /verified GitHub release/u);
+  const npm = JSON.parse(await readFile(run.npmCapture, "utf8"));
+  assert.deepEqual(npm.args.slice(0, 2), ["exec", "--yes"]);
+  assert.deepEqual(
+    npm.args.filter((value) => value.startsWith("--package=")).map((value) => basename(value.slice("--package=".length))),
+    run.fixture.archives.map(({ file }) => file),
+  );
+  assert.deepEqual(npm.args.slice(-3), ["--", "rigyn", "self-install"]);
+  assert.equal(npm.global, "");
+  assert.equal(npm.user, "");
+  assert.match(npm.cache, /temporary files/u);
+  const curlCalls = (await readFile(run.curlCapture, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(curlCalls.length, 2 + RIGYN_PRODUCT_PACKAGE_GRAPH.length);
+  assert.equal(curlCalls[0].url, "https://github.com/Rigyn/rigyn/releases/latest");
+  assert.deepEqual(await readdir(run.temporary), []);
+});
+
+test("streamed POSIX bootstrap rejects a checksum mismatch before npm", {
+  skip: process.platform === "win32",
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "rigyn-bootstrap-posix-checksum-"));
+  context.after(async () => await rm(root, { recursive: true, force: true }));
+  const run = await runPosixBootstrap(root, { corrupt: "rigyn-0.5.0.tgz" });
+  assert.notEqual(run.result.code, 0);
+  assert.match(run.result.stderr, /checksum mismatch for rigyn-0\.5\.0\.tgz/u);
+  await assert.rejects(access(run.npmCapture), (error) => error?.code === "ENOENT");
+  assert.deepEqual(await readdir(run.temporary), []);
+});
+
+test("PowerShell bootstrap verifies GitHub archives and splats quoted npm arguments", async () => {
+  const scriptPath = join(REPOSITORY_ROOT, "install.ps1");
+  const script = await readFile(scriptPath, "utf8");
+  assert.match(script, /api\.github\.com\/repos\/Rigyn\/rigyn\/releases\/latest/u);
+  assert.match(script, /Get-FileHash -LiteralPath \$archivePath -Algorithm SHA256/u);
+  for (const name of ["terminal", "models", "kernel"]) {
+    assert.match(script, new RegExp(`"rigyn-${name}-\\$version\\.tgz"`, "u"));
+  }
+  assert.match(script, /"rigyn-\$version\.tgz"/u);
+  assert.match(script, /\$npmArguments \+= "--package=\$archivePath"/u);
+  assert.match(script, /& \$npmCommand\.Source @npmArguments/u);
+  assert.match(script, /Get-Command npm\.cmd -CommandType Application/u);
+  assert.match(script, /Invoke-WebRequest .* -UseBasicParsing/u);
+  assert.ok(script.indexOf("Get-FileHash") < script.indexOf("& $npmCommand.Source @npmArguments"));
+  assert.doesNotMatch(script, /rigyn@latest|registry\.npmjs/u);
+  if (process.platform === "win32") {
+    const parsed = await runProcess("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "[void][ScriptBlock]::Create([IO.File]::ReadAllText($env:RIGYN_TEST_SCRIPT))",
+    ], { env: { ...process.env, RIGYN_TEST_SCRIPT: scriptPath } });
+    assert.equal(parsed.code, 0, parsed.stderr);
+  }
 });
 
 test("Windows npm invocation resolves npm-cli beside Node without a command shell", async (context) => {

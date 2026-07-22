@@ -79,7 +79,7 @@ async function finalize({ directory, standaloneDirectory }) {
       archives: artifacts,
     }, null, 2)}\n`, { mode: 0o600 }),
   ]);
-  writeFileSync(1, `Finalized ${manifest.archives.length} npm archives, one source archive, and ${standalones.length} standalone archives.\n`);
+  writeFileSync(1, `Finalized ${manifest.archives.length} package archives, one source archive, and ${standalones.length} standalone archives.\n`);
 }
 
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);

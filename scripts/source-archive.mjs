@@ -12,6 +12,8 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 
 export const REQUIRED_SOURCE_PATHS = Object.freeze([
+  "install.sh",
+  "install.ps1",
   "package.json",
   "package-lock.json",
   "scripts/source-archive.mjs",

@@ -1,6 +1,7 @@
 {
   "name": "rigyn",
   "version": "0.5.0",
+  "private": true,
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
   "license": "MIT",
@@ -21,9 +22,6 @@
     "developer-tools",
     "extensions"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

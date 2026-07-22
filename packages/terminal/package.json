@@ -1,6 +1,7 @@
 {
   "name": "@rigyn/terminal",
   "version": "0.5.0",
+  "private": true,
   "description": "Raw terminal UI engine for Rigyn applications",
   "type": "module",
   "main": "dist/index.js",
@@ -19,9 +20,6 @@
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Rigyn/rigyn.git",
@@ -41,8 +39,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "check": "npm run typecheck && npm test && npm run native:verify",
     "native:build": "node scripts/build-native.mjs",
-    "native:verify": "node scripts/verify-native.mjs",
-    "prepublishOnly": "npm run check && npm run native:verify -- --release"
+    "native:verify": "node scripts/verify-native.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

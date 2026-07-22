@@ -164,10 +164,9 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.deepEqual(
     [...manifests.keys()].sort(),
     workspaceManifests
-      .filter((workspaceManifest) => workspaceManifest.publishConfig?.access === "public")
       .map((workspaceManifest) => workspaceManifest.name)
       .sort(),
-    "Release graph must contain every public workspace package",
+    "Release graph must contain every workspace package",
   );
   assert.ok(manifest, "packages/rigyn/package.json must declare rigyn");
   assertRootLockIdentity(lockfile, rootManifest, manifest.version);
@@ -179,7 +178,8 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     assertWorkspaceLockIdentity(lockfile, { name, directory });
     assert.equal(lockfile.packages?.[directory]?.version, packageManifest.version, `package-lock ${directory} version must match package.json`);
     assert.equal(packageManifest.license, "MIT", `${name} must declare the MIT license`);
-    assert.equal(packageManifest.publishConfig?.access, "public", `${name} releases must be explicitly public`);
+    assert.equal(packageManifest.private, true, `${name} release archives must be registry-private`);
+    assert.equal(packageManifest.publishConfig, undefined, `${name} must not declare registry publication settings`);
   }
   const expectedInternalDependencies = new Map([
     ["@rigyn/terminal", []],
@@ -211,7 +211,8 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     { type: "git", url: "git+https://github.com/Rigyn/rigyn.git", directory: "packages/rigyn" },
     "package.json repository must target the public repository",
   );
-  assert.equal(manifest.publishConfig?.access, "public", "npm releases must be explicitly public");
+  assert.equal(manifest.private, true, "The Rigyn release archive must be registry-private");
+  assert.equal(manifest.publishConfig, undefined, "Rigyn must not declare registry publication settings");
   const versionSource = await readText(productRoot, "src/version.ts");
   assert.equal(
     versionSource.trim(),
@@ -233,7 +234,7 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   for (const subpath of subpathPolicy.subpaths) {
     assert.deepEqual(manifest.exports[subpath], expectedExport(subpath), `Unexpected export mapping for ${subpath}`);
   }
-  assert.equal(manifest.type, "module", "Published JavaScript must remain ESM");
+  assert.equal(manifest.type, "module", "Packaged JavaScript must remain ESM");
   assert.equal(manifest.engines?.node, "^24.15.0 || >=26.0.0", "The release runtime floor must remain explicit");
   for (const required of ["dist", "docs", "CHANGELOG.md", "LICENSE", "SECURITY.md", "README.md"]) {
     assert.ok(manifest.files?.includes(required), `package.json files must include ${required}`);
@@ -341,7 +342,7 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
   assert.deepEqual(
     releaseDocument?.jobs?.finalize?.needs,
     ["stage", "standalone-build"],
-    "release finalization must wait for npm staging and every standalone build",
+    "release finalization must wait for package staging and every standalone build",
   );
   const finalizeText = JSON.stringify(releaseDocument?.jobs?.finalize);
   for (const fragment of [
@@ -405,12 +406,20 @@ export async function checkReleaseMetadata(root = REPOSITORY_ROOT) {
     "scripts/verify-release-artifact.mjs",
     "SHA256SUMS",
     "RELEASE_NOTES.md",
-    "manifest.archives",
+    "*.tgz",
     "*.tar.gz",
     'gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft',
-    "npm publish",
-    "--provenance",
+    'gh release upload "$GITHUB_REF_NAME"',
+    'gh release edit "$GITHUB_REF_NAME" --draft=false --latest',
   ]) assert.ok(releaseWorkflow.includes(fragment), `release.yml must contain ${fragment}`);
+  for (const fragment of ["NPM_PUBLISH_ENABLED", "registry.npmjs.org", "npm publish", "npm view", "--provenance"]) {
+    assert.ok(!releaseWorkflow.includes(fragment), `release.yml must not contain ${fragment}`);
+  }
+  assert.deepEqual(
+    releaseDocument?.jobs?.publish?.permissions,
+    { contents: "write" },
+    "GitHub-only releases must request only release-content write authority",
+  );
   assert.ok(
     !releaseWorkflow.includes('releases/tags/$GITHUB_REF_NAME'),
     "release.yml must not use the published-tag endpoint to inspect draft releases",

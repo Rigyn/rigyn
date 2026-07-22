@@ -8,13 +8,31 @@ Rigyn is both an interactive application and an extensible runtime. The same ins
 
 The agent loop, canonical provider mappings, normalized events, and subscription transports are implemented in this repository. Exact-pinned official SDKs act only as transport adapters where a supported protocol uses them, including OpenAI and compatible routes, Anthropic API-key calls, AWS Bedrock, Google Gemini and Vertex, and Mistral. Provider-specific OAuth, subscription, and local transports that do not use those adapters stay within Rigyn. Other third-party dependencies provide HTTP transport, image conversion, YAML parsing, ignore matching, and the bundled ripgrep executable.
 
-The project is pre-release. Node.js 24.15 or a current Node.js 26-or-newer release is required.
+The project is pre-release. Standalone archives include the pinned runtime. Source and package-archive installations
+require Node.js 24.15 or a current Node.js 26-or-newer release.
 
 New here? Follow the [five-minute getting-started guide](docs/getting-started.md), or use the [documentation map](docs/README.md) to find a specific topic. Focused references cover the [CLI](docs/cli-reference.md), [keybindings](docs/keybindings.md), and [terminal setup](docs/terminal-setup.md).
 
 ## Install
 
-From the v0.5.0 GitHub release:
+With a supported Node.js 24.15+ or 26+ runtime and npm installed, use the one-line installer for your platform. It
+downloads and verifies the complete package graph from the latest GitHub release before creating a private per-user
+copy.
+
+Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Rigyn/rigyn/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Rigyn/rigyn/main/install.ps1 | iex
+```
+
+Neither command needs an npm account or resolves a Rigyn package from the npm registry. The equivalent version-pinned
+manual command is:
 
 ```sh
 npm exec --yes \
@@ -26,7 +44,13 @@ npm exec --yes \
 rigyn
 ```
 
-This uses npm's one-shot package executor; it does not create a global npm installation. `npm exec --yes --package=rigyn@latest -- rigyn self-install` installs the latest registry release instead of the version-pinned GitHub archive.
+This uses npm's one-shot package executor with version-pinned GitHub assets; it does not create a global npm
+installation or download a Rigyn package from the npm registry.
+
+To install without Node.js or npm, download the standalone archive matching your platform from the
+[v0.5.0 GitHub release](https://github.com/Rigyn/rigyn/releases/tag/v0.5.0), verify it against `SHA256SUMS`, and
+extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/rigyn`
+on Linux or macOS and `bin\rigyn.cmd` on Windows.
 
 From the public source checkout today:
 
@@ -50,7 +74,9 @@ rigyn self-update
 rigyn uninstall --yes
 ```
 
-`self-update` installs `rigyn@latest` from npm and refuses an implicit downgrade when the registry is older than the installed copy. The installer replaces only its marker-owned application files.
+`self-update` resolves the latest public GitHub release, verifies the complete package graph against that release's
+manifest and SHA-256 metadata, and refuses an implicit downgrade. The installer replaces only its marker-owned
+application files.
 
 Uninstall is marker-verified and removes the installed application, configuration, OAuth/API-key profiles, sessions, cache, and its managed command. It never deletes the source checkout or unrelated files.
 
