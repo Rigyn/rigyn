@@ -5,13 +5,13 @@
   "type": "module",
   "description": "A local-first, multi-provider terminal coding agent runtime",
   "license": "MIT",
-  "homepage": "https://github.com/Rigyn/rigyn#readme",
+  "homepage": "https://github.com/rigyn/rigyn#readme",
   "bugs": {
-    "url": "https://github.com/Rigyn/rigyn/issues"
+    "url": "https://github.com/rigyn/rigyn/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rigyn/rigyn.git",
+    "url": "git+https://github.com/rigyn/rigyn.git",
     "directory": "packages/rigyn"
   },
   "keywords": [

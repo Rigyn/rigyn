@@ -223,7 +223,7 @@ async function main() {
   );
   assert.equal(
     await readFile(resolve(directory, manifest.releaseNotes), "utf8"),
-    `# Rigyn ${manifest.version}\n\n${releasePolicy.releaseBody}\n`,
+    `# rigyn ${manifest.version}\n\n${releasePolicy.releaseBody}\n`,
     "Release notes must be the current changelog section",
   );
 
@@ -322,7 +322,7 @@ async function main() {
     const standaloneHelp = await runBoundedCommand(standaloneRuntime, [standaloneCli, "--help"], {
       cwd: standaloneRoot, env: environment, timeoutMs: 30_000, label: "standalone extracted CLI help check",
     });
-    assert.match(standaloneHelp.stdout, /^Rigyn\b/mu);
+    assert.match(standaloneHelp.stdout, /^rigyn\b/mu);
     assert.equal(standaloneHelp.stderr, "");
     const standaloneRpc = await runBoundedCommand(standaloneRuntime, [standaloneCli,
       "--mode", "rpc", "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {

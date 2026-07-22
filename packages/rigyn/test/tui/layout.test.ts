@@ -1008,6 +1008,48 @@ test("runtime overlays compose by terminal cells without replacing the editor", 
   assert.deepEqual(frame.cursor, { row: 2, column: 29 });
 });
 
+test("background cells fill only unoccupied transcript, editor, and overlay cells", () => {
+  const columns = 24;
+  const rows = 12;
+  const backgroundCells = Array.from({ length: columns * rows }, (_, index) => ({
+    row: Math.floor(index / columns),
+    column: index % columns,
+    text: "·",
+  }));
+  const theme = createTheme("mono", { color: true, unicode: true });
+  const frame = renderFrame({
+    context: { status: "idle" },
+    transcript: [{ id: "a", kind: "assistant", text: "foreground" }],
+    transcriptOffset: 0,
+    editorText: "draft",
+    editorCursor: 5,
+    inputLabel: "you",
+    inputMode: "normal",
+    backgroundCells,
+    runtimeOverlays: [{
+      width: 8,
+      focused: false,
+      options: { row: 0, col: 0 },
+      block: { lines: [{ spans: [{ text: "PANEL" }], fill: true }] },
+    }],
+    rawRuntimeOverlays: [{
+      width: 4,
+      focused: false,
+      options: { row: 1, col: 0 },
+      block: { lines: ["RAW"] },
+    }],
+  }, { columns, rows }, theme);
+  const lines = frame.text.split("\n").map(stripAnsi);
+
+  assert.equal(lines[0]?.slice(0, 9), "PANEL   ·", "a filled structural overlay owns its complete width");
+  assert.equal(lines[1]?.slice(0, 5), "RAW ·", "a raw overlay remains opaque within its declared width");
+  assert.match(lines.join("\n"), /foreground/u);
+  assert.match(lines.join("\n"), / draft/u);
+  assert.ok(lines.some((line) => /^·+$/u.test(line)), "empty rows expose the background plane");
+  assert.ok(lines.every((line) => cellWidth(line) === columns));
+  assert.ok(frame.text.includes(`${theme.codes.muted}·\u001b[0m`), "the host theme styles background glyphs");
+});
+
 test("stacked runtime overlays compose in order and preserve terminal cell widths", () => {
   const frame = renderFrame({
     context: { status: "idle" },
@@ -1536,6 +1578,37 @@ test("live image placements are suppressed while overlays or transcript paging c
     }],
   }, { columns: 40, rows: 12 }, theme, { resolveImage: resolvePng });
   assert.equal(overlaid.images, undefined);
+});
+
+test("background cells never occupy terminal-image reservations", () => {
+  const columns = 40;
+  const rows = 12;
+  const data = png().toString("base64");
+  const frame = renderFrame({
+    context: { status: "idle" },
+    transcript: [{
+      id: "image-background",
+      kind: "assistant",
+      text: "preview",
+      images: [{ key: "image-background:0", block: { type: "image", mediaType: "image/png", data } }],
+    }],
+    transcriptOffset: 0,
+    editorText: "",
+    editorCursor: 0,
+    inputLabel: "you",
+    inputMode: "normal",
+    backgroundCells: Array.from({ length: columns * rows }, (_, index) => ({
+      row: Math.floor(index / columns),
+      column: index % columns,
+      text: "·",
+    })),
+  }, { columns, rows }, createTheme("mono", { color: false, unicode: true }), { resolveImage: resolvePng });
+  const image = frame.images?.[0];
+  assert.ok(image !== undefined);
+  const lines = frame.text.split("\n").map(stripAnsi);
+  for (let row = image.row; row < image.row + image.rows; row += 1) {
+    assert.doesNotMatch(lines[row]?.slice(image.column, image.column + image.columns) ?? "", /·/u);
+  }
 });
 
 test("assistant Markdown presents list markers, table headers, separators, and fence language labels", () => {

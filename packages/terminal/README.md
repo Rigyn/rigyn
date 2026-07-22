@@ -1,6 +1,6 @@
 # @rigyn/terminal
 
-`@rigyn/terminal` is the raw-terminal interface used by Rigyn. It combines a cell-accurate differential renderer with keyboard decoding, multiline editing, overlays, ANSI-safe layout, terminal images, autocomplete, and reusable components.
+`@rigyn/terminal` is the raw-terminal interface used by rigyn. It combines a cell-accurate differential renderer with keyboard decoding, multiline editing, overlays, ANSI-safe layout, terminal images, autocomplete, and reusable components.
 
 The package writes directly to the active terminal. It does not require a screen framework or own application state outside the interval between `TUI.start()` and `TUI.stop()`.
 

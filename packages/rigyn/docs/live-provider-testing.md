@@ -1,6 +1,6 @@
 # Live provider contract tests
 
-Mocked protocol tests are the default because they are deterministic and free. The opt-in live suite checks the same adapters against credentials already resolved by Rigyn:
+Mocked protocol tests are the default because they are deterministic and free. The opt-in live suite checks the same adapters against credentials already resolved by rigyn:
 
 ```bash
 npm run test:live --workspace rigyn

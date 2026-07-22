@@ -22,7 +22,7 @@ function writeFixture(basePath: string, relativePath: string): void {
 
 const fdPath = findFd();
 
-test("Rigyn autocomplete delegates to the terminal package", () => {
+test("rigyn autocomplete delegates to the terminal package", () => {
   assert.equal(CombinedAutocompleteProvider, PackageAutocompleteProvider);
 });
 

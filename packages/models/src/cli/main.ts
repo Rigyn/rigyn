@@ -35,7 +35,7 @@ Options:
 Credentials are written to ~/.rigyn-models/oauth.json by default. Set
 RIGYN_MODELS_AUTH_FILE to an absolute path to use a different standalone store.
 RIGYN_AI_AUTH_FILE remains a lower-precedence compatibility fallback.
-This file is separate from the Rigyn coding-agent credential broker.
+This file is separate from the rigyn coding-agent credential broker.
 It cannot be set to the broker's auth.json path, including a custom
 RIGYN_CODING_AGENT_DIR.
 

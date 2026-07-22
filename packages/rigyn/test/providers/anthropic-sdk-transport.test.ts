@@ -12,7 +12,7 @@ function sse(...values: unknown[]): string {
   return values.map((value) => `data: ${JSON.stringify(value)}\n\n`).join("");
 }
 
-test("Anthropic SDK message creation preserves Rigyn's wire fields and raw response", async () => {
+test("Anthropic SDK message creation preserves rigyn's wire fields and raw response", async () => {
   const params = {
     model: "claude-test",
     max_tokens: 1024,

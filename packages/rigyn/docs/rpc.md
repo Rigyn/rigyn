@@ -1,6 +1,6 @@
 # RPC protocol and typed client
 
-Run `rigyn --mode rpc` to embed one Rigyn session in another process. Standard input accepts commands and extension-UI responses. Standard output emits command responses, raw agent events, and extension-UI requests. Every record is one UTF-8 JSON object followed by LF.
+Run `rigyn --mode rpc` to embed one rigyn session in another process. Standard input accepts commands and extension-UI responses. Standard output emits command responses, raw agent events, and extension-UI requests. Every record is one UTF-8 JSON object followed by LF.
 
 ## Transport
 

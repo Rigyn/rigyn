@@ -11,6 +11,7 @@ import {
   type ModelRuntime,
   type ProviderModel,
   type ResourceLoader,
+  type ToolExecutionBackend,
   type ToolDefinition,
 } from "rigyn/sdk";
 import type { Agent, AgentEvent, AgentState } from "@rigyn/kernel";
@@ -29,6 +30,7 @@ const customTool: ToolDefinition = {
 declare const modelRuntime: ModelRegistry;
 declare const model: ProviderModel;
 declare const resourceLoader: ResourceLoader;
+declare const toolBackend: ToolExecutionBackend;
 const sessionManager = SessionManager.inMemory(process.cwd());
 const settingsManager = SettingsManager.inMemory();
 
@@ -42,6 +44,7 @@ const options = {
   tools: ["read", "consumer_probe"],
   excludeTools: ["write"],
   customTools: [customTool],
+  toolBackend,
   resourceLoader,
   sessionManager,
   settingsManager,

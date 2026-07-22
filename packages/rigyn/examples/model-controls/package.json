@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Model and thinking-level control example for Rigyn",
+  "description": "Model and thinking-level control example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Rigyn failure or regression
+description: Report a reproducible rigyn failure or regression
 title: "bug: "
 labels:
   - bug
@@ -28,7 +28,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Rigyn version
+      label: rigyn version
       description: Paste the output of rigyn --version.
     validations:
       required: true

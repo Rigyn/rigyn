@@ -34,7 +34,7 @@ import {
   isMutableCredentialStore,
   type CredentialStore as HostCredentialStore,
 } from "../auth/types.js";
-import { getAuthPath, getModelsPath } from "../config/paths.js";
+import { getAgentDir, getAuthPath } from "../config/paths.js";
 import {
   extensionModelRegistry,
   type ExtensionProviderConfig,
@@ -69,10 +69,13 @@ import {
 export interface CreateModelRuntimeOptions {
   /** Preconstructed model collection. When supplied, the remaining storage options are ignored. */
   models?: MutableModels;
-  /** Rigyn credential storage. Defaults to an in-memory store unless authPath is supplied. */
+  /** rigyn credential storage. Defaults to an in-memory store unless authPath is supplied. */
   credentials?: PublicCredentialStore | HostCredentialStore;
   authPath?: string;
-  /** Optional provider/model configuration file. Null disables file loading. */
+  /**
+   * Optional provider/model configuration file. Defaults to
+   * `<agentDir>/model-providers.json`; null disables file loading.
+   */
   modelsPath?: string | null;
   modelsStore?: ProviderModelsStore;
   modelsStorePath?: string;
@@ -310,7 +313,9 @@ export class ModelRuntime implements Models {
     const runtimeCredentials = options.models === undefined
       ? new RuntimeCredentialStore(providerCredentials(credentials))
       : undefined;
-    const modelsPath = options.modelsPath === null ? undefined : options.modelsPath ?? getModelsPath();
+    const modelsPath = options.modelsPath === null
+      ? undefined
+      : options.modelsPath ?? join(getAgentDir(), "model-providers.json");
     const modelsStore = options.modelsStore
       ?? (modelsPath === undefined
         ? undefined

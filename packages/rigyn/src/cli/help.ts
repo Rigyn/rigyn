@@ -1,6 +1,6 @@
 import { RIGYN_VERSION } from "../version.js";
 
-const header = `Rigyn ${RIGYN_VERSION} — coding agent with read, bash, edit, write, grep, find, and ls tools`;
+const header = `rigyn ${RIGYN_VERSION} — coding agent with read, bash, edit, write, grep, find, and ls tools`;
 
 const GLOBAL = `${header}
 
@@ -137,7 +137,7 @@ linking it to the source checkout or using npm's global package directory.
 Usage:
   rigyn self-update
 
-Downloads the latest verified Rigyn GitHub release and atomically replaces the
+Downloads the latest verified rigyn GitHub release and atomically replaces the
 self-contained application while preserving user configuration and state.
 An implicit update never replaces a newer installation with an older release.
 `,

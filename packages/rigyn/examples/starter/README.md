@@ -1,8 +1,8 @@
 # Starter extension
 
-This is the smallest complete Rigyn package in the example corpus. It registers the `/example-hello` command and the `example_text_length` model tool.
+This is the smallest complete rigyn package in the example corpus. It registers the `/example-hello` command and the `example_text_length` model tool.
 
-From the Rigyn source checkout:
+From the rigyn source checkout:
 
 ```text
 rigyn install ./packages/rigyn/examples/starter

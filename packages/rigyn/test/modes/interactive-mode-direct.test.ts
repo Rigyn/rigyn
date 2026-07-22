@@ -103,13 +103,13 @@ test("interactive mode initializes once, binds extensions, accepts native input,
     await mode.init();
     assert.equal(starts, 1);
     assert.equal(terminal.selectedThemeName(), "ocean");
-    assert.deepEqual(terminal.themeNames(), ["mono", "ocean"]);
+    assert.deepEqual(terminal.themeNames(), ["mono", "ocean", "signal"]);
     terminal.setTheme("mono");
     await waitFor(() => themeChanges.length === 1, "embedded theme change was not forwarded to extensions");
     assert.deepEqual(themeChanges[0], {
       previous: "ocean",
       current: "mono",
-      available: ["mono", "ocean"],
+      available: ["mono", "ocean", "signal"],
       reason: "selection",
     });
     assert.equal(settings.getLastChangelogVersion(), RIGYN_VERSION);

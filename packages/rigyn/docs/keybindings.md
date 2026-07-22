@@ -1,6 +1,6 @@
 # Keybindings
 
-Rigyn resolves keyboard input by named action rather than by hard-coding keys in individual screens. Run `/hotkeys` to see the active high-level bindings in the current terminal. Terminal emulators and multiplexers may consume a chord before Rigyn receives it, so diagnose a missing binding outside the multiplexer first.
+rigyn resolves keyboard input by named action rather than by hard-coding keys in individual screens. Run `/hotkeys` to see the active high-level bindings in the current terminal. Terminal emulators and multiplexers may consume a chord before rigyn receives it, so diagnose a missing binding outside the multiplexer first.
 
 ## Everyday bindings
 

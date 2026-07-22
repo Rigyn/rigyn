@@ -4,6 +4,22 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+### Added
+
+- Added the `signal` operational TUI theme alongside the default monochrome `mono` theme, with distinct reasoning, tool, result, warning, diff, selection, message, syntax, and status roles.
+- Added a generation-owned, content-safe terminal background plane for trusted direct extensions; foreground text, overlays, editors, and images always take precedence.
+- Added the Open Kernel Loom identity, lowercase `rigyn` lockup, compact Unicode and ASCII terminal marks, avatar, and repository social-preview assets.
+- Added `thinkingLevel` to direct extension callback context, public Bash operations typing, and optional host-owned `toolBackend` injection through `createAgentSession()`.
+
+### Changed
+
+- Separated SDK provider declarations into `model-providers.json` so the CLI-owned `models.json` catalog snapshot is never interpreted as editable provider configuration.
+- Expanded the published theme schema and documentation to cover the complete semantic-token contract while retaining the role-based compatibility format.
+
+### Fixed
+
+- Preserved complete bounded stdout and stderr plus process metadata when a risk-coverage group fails, so an early regression is not hidden by later test output.
+
 ## [0.5.1] - 2026-07-22
 
 ### Added
@@ -41,7 +57,7 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ### Changed
 
-- Made Rigyn's maintained fallback catalog the only bundled chat-model source, preserving its reasoning metadata while live discovery remains authoritative.
+- Made rigyn's maintained fallback catalog the only bundled chat-model source, preserving its reasoning metadata while live discovery remains authoritative.
 - Moved public installation, verified self-update, and release publication to versioned GitHub Release assets.
 - Deferred live model discovery until after the interactive terminal is visible while retaining cached model hydration at startup and resource-only `/reload` behavior.
 - Restored the shared `Ctrl+O` tool-output expansion binding and made source installation build and verify the matching macOS or Windows terminal helper.
@@ -118,7 +134,7 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 ### Changed
 
 - Interactive startup now records the installed version locally, stays quiet on first use, and shows only newly installed release sections after an update; compact notices remain optional and `/changelog` remains complete.
-- Removed inert analytics and install-telemetry preferences that did not correspond to any network behavior. Rigyn does not send install or usage telemetry.
+- Removed inert analytics and install-telemetry preferences that did not correspond to any network behavior. rigyn does not send install or usage telemetry.
 - Steering and follow-up methods now return promises across the direct, public-runtime, and embedding surfaces. Persisted application/editor keybindings now share one live manager with the terminal and trusted direct extension UI, including after `/reload`.
 - `AgentSession.modelRuntime` now exposes the public asynchronous `ModelRuntime` used by the session, including model availability, authentication lifecycle, reload, and streaming, while the internal registry remains available only through its compatibility boundary.
 - Trusted direct TUI objects now use the public runtime identity while delegating redraws, input draining, dimensions, enhanced-keyboard and color state, overlays, cursor and shrink preferences, and named theme persistence to the active host generation.
@@ -148,7 +164,7 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 ### Changed
 
 - Managed package installation now activation-tests the staged candidate before commit, publishes one immutable resource generation, expands the stable host-module map, and retains transactional rollback and lifecycle disposal across startup, reload, and removal.
-- Provider routing now applies explicit per-model protocol and request metadata without model-name guessing; official SDKs remain transport adapters behind Rigyn's canonical requests, normalized streams, retry policy, credential broker, and redaction boundaries.
+- Provider routing now applies explicit per-model protocol and request metadata without model-name guessing; official SDKs remain transport adapters behind rigyn's canonical requests, normalized streams, retry policy, credential broker, and redaction boundaries.
 - The terminal interface now presents complete retained tool output, width-bounded reasoning summaries, automatic theme changes, richer editor navigation and kill-ring behavior, stable overlays, terminal images, responsive narrow layouts, and extension-owned structural presentation without raw terminal authority by default.
 - Configuration templates and effective output now document every public setting, including retry, theme pairing, provider transport, model compatibility, child-run policy, execution backends, and operator controls, without storing credentials.
 
@@ -241,7 +257,7 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 
 - Direct command discovery now includes extension commands, prompt templates, and skill commands in host order, and same-owner live tool or command re-registration replaces the active definition.
 - Trusted direct provider hooks now receive the complete assembled request headers and normalized response headers, while bounded core diagnostics and exported session data remain redacted.
-- Managed extension packages treat a compatible `rigyn` peer as supplied by the active host, preserve optional peer metadata for other packages, and reject an incompatible host range before invoking npm. This prevents a nested Rigyn installation from exhausting the bounded dependency-tree staging limit.
+- Managed extension packages treat a compatible `rigyn` peer as supplied by the active host, preserve optional peer metadata for other packages, and reject an incompatible host range before invoking npm. This prevents a nested rigyn installation from exhausting the bounded dependency-tree staging limit.
 - OpenAI Responses reasoning summaries retain their provider output-item boundaries even when each item restarts at summary index zero, so separate progress summaries render as separate terminal rows instead of growing horizontally.
 
 ## [0.1.2] - 2026-07-14
@@ -267,7 +283,7 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 
 ### Changed
 
-- First-party OpenAI Responses and Anthropic API-key requests use exact-pinned official SDK transports while Rigyn retains canonical mapping, streaming bounds, retry policy, OAuth transports, and normalized events.
+- First-party OpenAI Responses and Anthropic API-key requests use exact-pinned official SDK transports while rigyn retains canonical mapping, streaming bounds, retry policy, OAuth transports, and normalized events.
 
 ## [0.1.0] - 2026-07-13
 
@@ -287,10 +303,10 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 
 ### Changed
 
-- Adopted Rigyn as the sole public product, package, command, configuration, state, project-resource, extension-package, RPC, and schema identity.
+- Adopted rigyn as the sole public product, package, command, configuration, state, project-resource, extension-package, RPC, and schema identity.
 - Released the project under the MIT License and included the license in source, package, installation, and release verification paths.
 - Clean-checkout tests now rebuild generated distribution files before exercising examples that import public package entry points.
-- Canonical bundled schema identifiers use stable Rigyn URNs rather than an unowned web domain.
+- Canonical bundled schema identifiers use stable rigyn URNs rather than an unowned web domain.
 - Runtime snapshots, resource discovery, and delegated-process results now use bounded contracts across TUI, print, JSON, RPC, and embedding hosts; interactive extension UI is shared by TUI and negotiated RPC owners, while graceful shutdown is acknowledged by TUI, RPC, and embedding owners.
 - Release staging, dependency policy, packed-file verification, platform guidance, RPC documentation, troubleshooting, and compaction documentation now form one deterministic release gate.
 - Provider credential resolution, package reloads, extension-requested shutdown, login prompts, and lifecycle subprocesses now propagate cancellation through their active network, process, and UI work.
@@ -317,5 +333,5 @@ Legacy `RIGYN_AI_AUTH_FILE` and `~/.rigyn-ai/oauth.json` settings continue to mi
 
 ### Breaking
 
-- Pre-release installations, stored credentials, sessions, project resources, and third-party package declarations using an earlier namespace do not migrate automatically; install Rigyn fresh and reconnect the required accounts and resources.
+- Pre-release installations, stored credentials, sessions, project resources, and third-party package declarations using an earlier namespace do not migrate automatically; install rigyn fresh and reconnect the required accounts and resources.
 - Removed the extractable `RuntimeExtensionApi.auth.resolve()` credential API. Provider extensions must declare their bounded request policy and call `api.auth.fetch(provider, input, init?, signal?)`; see [`docs/extensions.md`](docs/extensions.md) and [`docs/extension-auth-threat-model.md`](docs/extension-auth-threat-model.md).

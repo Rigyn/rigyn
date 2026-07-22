@@ -159,7 +159,7 @@ function parseThemes(value: unknown): LegacyExtensionManifest["themes"] {
     const input = object(entry, label);
     allowed(input, ["name", "path", "description"], label);
     const name = string(input.name, `${label}.name`, 63);
-    if (!IDENTIFIER.test(name) || name === "dark" || name === "light" || name === "mono") {
+    if (!IDENTIFIER.test(name) || name === "dark" || name === "light" || name === "mono" || name === "signal") {
       throw new Error(`${label}.name is invalid or reserved`);
     }
     const description = optionalString(input.description, `${label}.description`, 1024);

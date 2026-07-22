@@ -42,7 +42,7 @@ async function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<{ c
   return await new Promise((resolveExit, reject) => {
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("Rigyn signal-cleanup subprocess timed out"));
+      reject(new Error("rigyn signal-cleanup subprocess timed out"));
     }, timeoutMs);
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -258,7 +258,7 @@ test("interactive chat preserves conventional SIGINT, SIGHUP, and SIGTERM exit c
       "--approve",
       "--workspace", fixture.workspace,
     ], pidPath);
-    await waitForOutput(() => fixture.output(child), "Ready");
+    await waitForOutput(() => fixture.output(child), "ready");
     await waitForFile(pidPath);
     assert.equal(process.kill(Number(await readFile(pidPath, "utf8")), selected.signal), true);
     assert.deepEqual(await waitForExit(child), { code: selected.code, signal: null }, fixture.output(child));
@@ -280,7 +280,7 @@ test("interactive chat SIGTERM kills an active tool tree, disposes extensions, a
     "--approve",
     "--workspace", fixture.workspace,
   ], pidPath);
-  await waitForOutput(() => fixture.output(child), "Ready");
+  await waitForOutput(() => fixture.output(child), "ready");
   child.stdin!.write("start the shell fixture\r");
   try {
     await waitForFile(fixture.ready);

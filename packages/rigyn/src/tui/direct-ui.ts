@@ -500,6 +500,13 @@ export function createInteractiveDirectUiContext(
       }, options === undefined ? undefined : signal);
     },
     setHiddenThinkingLabel(label) { controller.setKeyedHiddenReasoningLabel(key("reasoning"), label, label === undefined ? undefined : signal); },
+    setBackground(factory) {
+      const selectedKey = key("background");
+      if (factory === undefined) controller.setRawBackgroundComponent(selectedKey);
+      else if (controller.mode === "full") {
+        controller.setRawBackgroundComponent(selectedKey, factory(tui, controller.currentThemeObject()), signal);
+      }
+    },
     setWidget(name, content, options) {
       const slot = options?.placement === "belowEditor" ? "widget-below" : "widget-above";
       if (content === undefined) controller.setRawPersistentComponent(slot, key(name));

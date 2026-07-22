@@ -39,4 +39,4 @@ RPC is one UTF-8 JSON object per LF-delimited line. Correlate concurrent respons
 
 ## Session import fails
 
-Verify that JSONL begins with a `type: "session"` header and that every completed non-empty line is valid JSON. Malformed newline-terminated JSON and a workspace mismatch are rejected; version 1 and 2 records are migrated when opened. The current reader is not a complete schema validator for every entry field, so import only a trusted Rigyn export. `/import` copies the selected file into the active session directory before opening it; keep a backup and inspect private content first.
+Verify that JSONL begins with a `type: "session"` header and that every completed non-empty line is valid JSON. Malformed newline-terminated JSON and a workspace mismatch are rejected; version 1 and 2 records are migrated when opened. The current reader is not a complete schema validator for every entry field, so import only a trusted rigyn export. `/import` copies the selected file into the active session directory before opening it; keep a backup and inspect private content first.

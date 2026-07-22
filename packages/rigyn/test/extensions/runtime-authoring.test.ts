@@ -74,6 +74,7 @@ async function fixture(
   host.setDirectContextHandler(() => ({
     sessionManager: extensionSessionManager(sessionManager),
     modelRegistry: new ModelRegistry(createModels()),
+    thinkingLevel: "off",
     isIdle: () => true,
     hasPendingMessages: () => false,
     abort() {},

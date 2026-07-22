@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Executable coverage map for every public package entry declared by the Rigyn workspace manifests.",
+  "description": "Executable coverage map for every public package entry declared by the rigyn workspace manifests.",
   "evidenceLimits": [
     {
       "scope": "rigyn/auth native secret backends",

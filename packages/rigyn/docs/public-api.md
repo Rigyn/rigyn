@@ -1,6 +1,6 @@
 # Public Node.js API policy
 
-Rigyn publishes ESM for Node.js 24.15+ and 26+. The supported import boundary is the package `exports` map; paths inside `dist/` are implementation details even when they are physically present in an archive.
+rigyn publishes ESM for Node.js 24.15+ and 26+. The supported import boundary is the package `exports` map; paths inside `dist/` are implementation details even when they are physically present in an archive.
 
 The supported public entry points are:
 
@@ -43,9 +43,9 @@ All five classes are covered by the compatibility rules below; “advanced” an
 
 `rigyn/images` contains two deliberately separate surfaces: the clipboard/preprocessing helpers used by chat prompts and the image-generation provider/catalog/registry API. Image generation does not share or mutate the chat provider registry. See [Image generation](image-generation.md) for the credential, failure, retry, and lifecycle contracts.
 
-The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/Rigyn/rigyn/blob/main/packages/rigyn/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
+The machine-readable source of this list is [`release/public-subpaths.json`](https://github.com/rigyn/rigyn/blob/main/packages/rigyn/release/public-subpaths.json), and the release check requires it to exactly match `package.json`.
 
-The package export map above describes ordinary Node.js consumers. Managed extension runtime entries may value-import all 20 code-bearing library entry points: `rigyn`, `rigyn/auth`, `rigyn/config`, `rigyn/context`, `rigyn/core`, `rigyn/embedding`, `rigyn/extensions`, `rigyn/images`, `rigyn/interfaces`, `rigyn/modes`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/service`, `rigyn/sdk`, `rigyn/storage`, `rigyn/testing`, `rigyn/tools`, and `rigyn/tui`. The executable `rigyn/rpc-entry` and metadata-only `rigyn/package.json` entries are intentionally excluded from extension imports. Rigyn resolves library specifiers to the running host, which keeps one canonical host instance when an installed extension lives outside Rigyn's dependency tree. Managed runtimes cannot value-import an unlisted subpath or a deeper internal `rigyn/*` path; type-only authoring imports remain governed by TypeScript and the package export map.
+The package export map above describes ordinary Node.js consumers. Managed extension runtime entries may value-import all 20 code-bearing library entry points: `rigyn`, `rigyn/auth`, `rigyn/config`, `rigyn/context`, `rigyn/core`, `rigyn/embedding`, `rigyn/extensions`, `rigyn/images`, `rigyn/interfaces`, `rigyn/modes`, `rigyn/net`, `rigyn/process`, `rigyn/prompts`, `rigyn/providers`, `rigyn/service`, `rigyn/sdk`, `rigyn/storage`, `rigyn/testing`, `rigyn/tools`, and `rigyn/tui`. The executable `rigyn/rpc-entry` and metadata-only `rigyn/package.json` entries are intentionally excluded from extension imports. rigyn resolves library specifiers to the running host, which keeps one canonical host instance when an installed extension lives outside rigyn's dependency tree. Managed runtimes cannot value-import an unlisted subpath or a deeper internal `rigyn/*` path; type-only authoring imports remain governed by TypeScript and the package export map.
 
 Each JavaScript entry point is ESM-only and Node-only and has a matching TypeScript declaration entry. No entry point is browser-safe. Browser clients should use the local RPC process or a reviewed loopback extension bridge. A browser-safe protocol/types package is a conditional non-goal until a concrete client requires it; do not bundle credential or filesystem authority into browser code.
 

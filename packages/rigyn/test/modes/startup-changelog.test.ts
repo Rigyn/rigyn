@@ -106,7 +106,7 @@ test("collapsed startup uses one concise notice while the parsed full history re
   });
   assert.deepEqual(result, {
     recordVersion: "2.1.0",
-    notice: "Rigyn updated to 2.1.0. Run /changelog for full release notes.",
+    notice: "rigyn updated to 2.1.0. Run /changelog for full release notes.",
   });
   assert.equal(parseChangelog(CHANGELOG).length, 3);
 });

@@ -116,7 +116,7 @@ async function runSmoke(runtime, cli, launcher, cwd, environment, version) {
   const helpResult = await runBoundedCommand(runtime, [cli, "--help"], {
     cwd, env: environment, timeoutMs: 30_000, label: "standalone CLI help check",
   });
-  assert.match(helpResult.stdout, /^Rigyn\b/mu);
+  assert.match(helpResult.stdout, /^rigyn\b/mu);
   assert.equal(helpResult.stderr, "");
   const rpcResult = await runBoundedCommand(runtime, [cli,
     "--mode", "rpc", "--no-session", "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes"], {

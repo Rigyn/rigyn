@@ -1,6 +1,6 @@
 # Extension packages
 
-Rigyn extensions are ordinary trusted Node.js packages. A package declares direct factory entry points and optional resources in `package.json`; each factory receives the public `ExtensionAPI` from `rigyn/extensions`.
+rigyn extensions are ordinary trusted Node.js packages. A package declares direct factory entry points and optional resources in `package.json`; each factory receives the public `ExtensionAPI` from `rigyn/extensions`.
 
 Start with [`examples/starter`](../examples/starter/README.md). Copy it into a new workspace directory instead of editing the bundled example.
 
@@ -34,9 +34,9 @@ A complete declaration is:
 }
 ```
 
-The `rigyn` object consumes the `extensions`, `skills`, `prompts`, and `themes` string arrays. Paths are package-relative, normalized, and constrained to the package root. Missing paths, symlink escapes, and unsupported resource formats are rejected or reported by resource resolution. Declare only the documented keys; unrecognized `rigyn` keys are not extension configuration. Rigyn itself ships only the built-in `mono` theme; package declarations add reviewed custom themes.
+The `rigyn` object consumes the `extensions`, `skills`, `prompts`, and `themes` string arrays. Paths are package-relative, normalized, and constrained to the package root. Missing paths, symlink escapes, and unsupported resource formats are rejected or reported by resource resolution. Declare only the documented keys; unrecognized `rigyn` keys are not extension configuration. rigyn ships the built-in `mono` and `signal` themes; package declarations add reviewed custom themes without replacing them.
 
-`peerDependencies.rigyn` is the enforced host-compatibility range. Rigyn validates it before package activation and does not install a nested host runtime. `engines.rigyn` remains optional report metadata for older packages, but it is not an activation gate. Test the packed artifact against every supported Rigyn release before publishing.
+`peerDependencies.rigyn` is the enforced host-compatibility range. rigyn validates it before package activation and does not install a nested host runtime. `engines.rigyn` remains optional report metadata for older packages, but it is not an activation gate. Test the packed artifact against every supported rigyn release before publishing.
 
 When a declaration is omitted, the matching conventional directory is discovered if present. Explicit declarations are preferable for published packages because the packed file set is then obvious. Hierarchical `.gitignore`, `.ignore`, and `.fdignore` rules apply during package inventory.
 
@@ -69,11 +69,11 @@ rigyn install "npm:file:///absolute/path/my-extension-1.2.3.tgz"
 rigyn install "git:https://github.com/example/my-extension.git#0123456789abcdef0123456789abcdef01234567"
 ```
 
-Git package URLs are credential-free. HTTPS credential helpers are disabled, so private HTTPS repositories are intentionally unavailable; use a real SSH host URL with an agent or a default key instead. SSH keeps the normal key and `known_hosts` locations but ignores user/system SSH configuration, aliases, `ProxyJump`, `ProxyCommand`, and local commands. Git LFS filters and submodules are disabled. A short moving ref resolves a same-named branch before a tag, then Rigyn verifies that checkout still matches the advertised commit before activation.
+Git package URLs are credential-free. HTTPS credential helpers are disabled, so private HTTPS repositories are intentionally unavailable; use a real SSH host URL with an agent or a default key instead. SSH keeps the normal key and `known_hosts` locations but ignores user/system SSH configuration, aliases, `ProxyJump`, `ProxyCommand`, and local commands. Git LFS filters and submodules are disabled. A short moving ref resolves a same-named branch before a tag, then rigyn verifies that checkout still matches the advertised commit before activation.
 
 Use `-l` for the trusted project scope. Lifecycle scripts are disabled by default; `--allow-scripts` is accepted only by install and update commands and should be used only after reviewing the complete dependency tree.
 
-After changing package code, run `/reload`. Rigyn sends `session_shutdown` to the current generation, activates a candidate, and replaces the current generation only after preparation succeeds. If candidate activation fails, the candidate is disposed and the previous generation receives `session_start` again.
+After changing package code, run `/reload`. rigyn sends `session_shutdown` to the current generation, activates a candidate, and replaces the current generation only after preparation succeeds. If candidate activation fails, the candidate is disposed and the previous generation receives `session_start` again.
 
 Useful commands:
 
@@ -133,13 +133,13 @@ A schema 1 lock from the shipped extension-package system remains read-only: nor
 
 Schema 2 is a one-way lifecycle upgrade. An older host that only understands schema 1 cannot consume or safely downgrade a schema 2 lock. Use version control to restore both the declaration, lock, and matching installed state if a host downgrade is required; never edit the schema number.
 
-Production dependency replay is split into a portable anchor and a local platform attestation. The lock digest covers every required installed byte and rejects omitted-development roots or extraneous content. Required non-host peers are installed and attested; optional peers remain optional. A `rigyn` peer is checked against the running host version and removed from the install inventory so extensions cannot install a second host runtime. Optional, OS-gated, CPU-gated, and libc-gated packages may legitimately be absent on one platform and present on another, so their installed bytes are digested immediately after controlled `npm ci`. The exact digest is written to package provenance and to one append-only, mode-`0600` record keyed by canonical workspace, lock digest, package ID, and a stable OS/architecture/libc-family/Node-ABI fingerprint under Rigyn's manager-private state beside the operation-lease root. Linux fingerprints distinguish glibc from musl; other operating systems use a deterministic non-Linux libc marker. A different digest for the same lock and platform fails closed; a deliberate declaration update creates a new lock identity. Startup requires the installed bytes, provenance, and external record to agree, so deleting optional bytes and rewriting the excluded in-package provenance cannot select an older attested digest. This protects against workspace drift or a writer limited to the project tree, not an attacker who can also modify Rigyn's private agent state.
+Production dependency replay is split into a portable anchor and a local platform attestation. The lock digest covers every required installed byte and rejects omitted-development roots or extraneous content. Required non-host peers are installed and attested; optional peers remain optional. A `rigyn` peer is checked against the running host version and removed from the install inventory so extensions cannot install a second host runtime. Optional, OS-gated, CPU-gated, and libc-gated packages may legitimately be absent on one platform and present on another, so their installed bytes are digested immediately after controlled `npm ci`. The exact digest is written to package provenance and to one append-only, mode-`0600` record keyed by canonical workspace, lock digest, package ID, and a stable OS/architecture/libc-family/Node-ABI fingerprint under rigyn's manager-private state beside the operation-lease root. Linux fingerprints distinguish glibc from musl; other operating systems use a deterministic non-Linux libc marker. A different digest for the same lock and platform fails closed; a deliberate declaration update creates a new lock identity. Startup requires the installed bytes, provenance, and external record to agree, so deleting optional bytes and rewriting the excluded in-package provenance cannot select an older attested digest. This protects against workspace drift or a writer limited to the project tree, not an attacker who can also modify rigyn's private agent state.
 
-All npm resolution and replay commands run without the ambient process environment. Rigyn supplies only executable/system path variables plus a private HOME, empty npm user/global configuration, cache, and temporary directory inside the quota-monitored staging root. Ambient `.npmrc`, registry tokens, lifecycle scripts, and update/audit/fund helpers are unavailable. Git materialization likewise uses isolated configuration, empty hooks/templates and filters, non-interactive credentials, an explicit protocol allowlist, and no submodules. Materialization is monitored while commands run and is terminated if it exceeds 4,096 filesystem entries, 64 MiB, or the depth bound; partial staging state is removed.
+All npm resolution and replay commands run without the ambient process environment. rigyn supplies only executable/system path variables plus a private HOME, empty npm user/global configuration, cache, and temporary directory inside the quota-monitored staging root. Ambient `.npmrc`, registry tokens, lifecycle scripts, and update/audit/fund helpers are unavailable. Git materialization likewise uses isolated configuration, empty hooks/templates and filters, non-interactive credentials, an explicit protocol allowlist, and no submodules. Materialization is monitored while commands run and is terminated if it exceeds 4,096 filesystem entries, 64 MiB, or the depth bound; partial staging state is removed.
 
 ## Transaction and trust model
 
-Install and update use a private staging directory. Rigyn validates bounds, package structure, declared resources, production dependencies, and the exact runtime entries; activation is tested before code or settings are committed. A failure rolls back the staged package and preserves the installed version byte-for-byte. A multi-package update stages and activation-tests the complete selected set before committing any member, and reverses earlier swaps if a later filesystem commit fails.
+Install and update use a private staging directory. rigyn validates bounds, package structure, declared resources, production dependencies, and the exact runtime entries; activation is tested before code or settings are committed. A failure rolls back the staged package and preserves the installed version byte-for-byte. A multi-package update stages and activation-tests the complete selected set before committing any member, and reverses earlier swaps if a later filesystem commit fails.
 
 Runtime code is trusted in-process code. It can use Node.js and any declared production dependency. Project-scoped code is not imported until project trust succeeds. Review the source, package metadata, dependency graph, install scripts, network destinations, and process boundaries before trusting a package.
 
@@ -149,7 +149,7 @@ An activation generation owns all registrations. Failed activation, timeout, suc
 
 Put runtime dependencies in `dependencies`; keep tests and build tools in `devDependencies`. Do not ship package-local `node_modules`.
 
-A loaded extension may import the package root and stable host subpaths published by the installed Rigyn version, including:
+A loaded extension may import the package root and stable host subpaths published by the installed rigyn version, including:
 
 ```text
 rigyn/extensions
@@ -158,7 +158,7 @@ rigyn/storage
 rigyn/tui
 ```
 
-Use `rigyn` as a peer and development dependency when TypeScript declarations or standalone tests need it. The host aliases imports to its own installed copy, so an extension must not bundle a second Rigyn runtime.
+Use `rigyn` as a peer and development dependency when TypeScript declarations or standalone tests need it. The host aliases imports to its own installed copy, so an extension must not bundle a second rigyn runtime.
 
 ## Author verification
 

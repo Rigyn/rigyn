@@ -51,6 +51,7 @@ export interface CreateAgentSessionFromServicesOptions {
   excludeTools?: CreateAgentSessionOptions["excludeTools"];
   noTools?: CreateAgentSessionOptions["noTools"];
   customTools?: HarnessTool[];
+  toolBackend?: CreateAgentSessionOptions["toolBackend"];
 }
 
 export async function createAgentSessionServices(
@@ -61,7 +62,7 @@ export async function createAgentSessionServices(
   const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
   const modelRuntime = options.modelRuntime ?? await ModelRuntime.create({
     authPath: resolve(agentDir, "auth.json"),
-    modelsPath: resolve(agentDir, "models.json"),
+    modelsPath: resolve(agentDir, "model-providers.json"),
   });
   const resourceLoader = new DefaultResourceLoader({
     ...(options.resourceLoaderOptions ?? {}),
@@ -108,5 +109,6 @@ export async function createAgentSessionFromServices(
     ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
     ...(options.noTools === undefined ? {} : { noTools: options.noTools }),
     ...(options.customTools === undefined ? {} : { customTools: options.customTools }),
+    ...(options.toolBackend === undefined ? {} : { toolBackend: options.toolBackend }),
   });
 }

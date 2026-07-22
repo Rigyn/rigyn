@@ -67,7 +67,7 @@ async function installedMarker(installRoot: string): Promise<InstalledMarker | u
     throw error;
   }
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_MARKER_BYTES) {
-    throw new Error(`Installed Rigyn marker is unsafe: ${path}`);
+    throw new Error(`Installed rigyn marker is unsafe: ${path}`);
   }
   const value = JSON.parse(await readFile(path, "utf8")) as Partial<InstalledMarker>;
   if (value.product !== "rigyn" || value.schemaVersion !== 2) return undefined;
@@ -91,7 +91,7 @@ async function installedMarker(installRoot: string): Promise<InstalledMarker | u
     || !/^[a-f0-9]{64}$/u.test(value.launcherSha256 ?? "")
     || typeof value.commandLink !== "string" || value.commandLink === ""
     || !/^[a-f0-9]{64}$/u.test(value.commandSha256 ?? "")) {
-    throw new Error(`Installed Rigyn marker is invalid: ${path}`);
+    throw new Error(`Installed rigyn marker is invalid: ${path}`);
   }
   return value as InstalledMarker;
 }
@@ -108,7 +108,7 @@ export async function acquireRuntimeLease(): Promise<RuntimeLease | undefined> {
   if (marker === undefined) return undefined;
   const lockPath = `${installRoot}.lifecycle.lock`;
   if (await lifecycleInProgress(lockPath, installRoot)) {
-    throw new Error("A Rigyn install, update, or uninstall operation is in progress");
+    throw new Error("A rigyn install, update, or uninstall operation is in progress");
   }
 
   const directory = join(installRoot, LEASE_DIRECTORY);
@@ -137,7 +137,7 @@ export async function acquireRuntimeLease(): Promise<RuntimeLease | undefined> {
 
   if (await lifecycleInProgress(lockPath, installRoot)) {
     await rm(path, { force: true });
-    throw new Error("A Rigyn install, update, or uninstall operation is in progress");
+    throw new Error("A rigyn install, update, or uninstall operation is in progress");
   }
 
   const previousPid = process.env.RIGYN_LIFECYCLE_CALLER_PID;

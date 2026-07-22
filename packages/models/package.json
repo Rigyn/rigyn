@@ -2,7 +2,7 @@
   "name": "@rigyn/models",
   "version": "0.5.1",
   "private": true,
-  "description": "Provider-neutral model, streaming, authentication, and image primitives for Rigyn",
+  "description": "Provider-neutral model, streaming, authentication, and image primitives for rigyn",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,7 +27,7 @@
   "files": ["dist", "README.md", "LICENSE"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rigyn/rigyn.git",
+    "url": "git+https://github.com/rigyn/rigyn.git",
     "directory": "packages/models"
   },
   "scripts": {

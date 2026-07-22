@@ -15,7 +15,7 @@ function enterHarnessProcess(): void {
     throw new Error(`${RECURSION_DEPTH_ENV} must be a non-negative integer`);
   }
   if (depth >= MAX_RECURSION_DEPTH) {
-    throw new Error(`Refusing recursive Rigyn launch at depth ${depth + 1}; check the requested CLI subcommand or child-agent workflow`);
+    throw new Error(`Refusing recursive rigyn launch at depth ${depth + 1}; check the requested CLI subcommand or child-agent workflow`);
   }
   process.env[RECURSION_DEPTH_ENV] = String(depth + 1);
 }

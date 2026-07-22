@@ -26,6 +26,15 @@ test("legacy contribution paths reject Windows drive-qualified forms on every ho
   }
 });
 
+test("legacy theme contributions cannot shadow built-in themes", () => {
+  for (const name of ["mono", "signal"]) {
+    assert.throws(
+      () => parseLegacyExtensionManifest(manifest({ themes: [{ name, path: "themes/custom.json" }] })),
+      /invalid or reserved/u,
+    );
+  }
+});
+
 test("legacy integrity paths reject Windows drive-qualified forms on every host", () => {
   assert.throws(() => parseLegacyExtensionManifest({
     ...manifest({}),

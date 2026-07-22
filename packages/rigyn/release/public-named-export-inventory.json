@@ -257,6 +257,7 @@
         "AssistantImages",
         "AssistantMessageEvent",
         "AutocompleteProviderFactory",
+        "BackgroundFactory",
         "BashExecutionMessage",
         "BashOperations",
         "BashSpawnContext",
@@ -1392,6 +1393,7 @@
         "AppendEntryHandler",
         "AssistantMessageEvent",
         "AutocompleteProviderFactory",
+        "BackgroundFactory",
         "BashExecutionMessage",
         "BashToolCallEvent",
         "BashToolResultEvent",
@@ -2174,7 +2176,8 @@
         "ResourceExtensionsResult",
         "ResourceLoader",
         "ThinkingLevel",
-        "ToolDefinition"
+        "ToolDefinition",
+        "ToolExecutionBackend"
       ]
     },
     "storage": {
@@ -2637,6 +2640,8 @@
         "AutocompleteProvider",
         "AutocompleteSuggestions",
         "AutomaticThemePair",
+        "BackgroundCell",
+        "BackgroundComponent",
         "BuiltinThemeName",
         "CellDimensions",
         "Component",

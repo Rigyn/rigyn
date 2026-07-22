@@ -44,7 +44,7 @@ export interface AzureOpenAISdkEventStreamConfig {
 
 /**
  * Uses the official client only for the first-party Responses request while
- * retaining Rigyn's authorization, network transport, event contract, and
+ * retaining rigyn's authorization, network transport, event contract, and
  * bounded-stream invariants.
  */
 export function createOpenAISdkEventStream(

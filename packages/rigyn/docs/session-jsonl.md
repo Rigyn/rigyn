@@ -1,6 +1,6 @@
 # Session JSONL format
 
-Rigyn stores durable sessions as append-only version 3 JSON Lines files. The first complete line is the session header; every later complete line is one entry. The active branch is derived from parent links rather than from line order alone.
+rigyn stores durable sessions as append-only version 3 JSON Lines files. The first complete line is the session header; every later complete line is one entry. The active branch is derived from parent links rather than from line order alone.
 
 ```jsonl
 {"type":"session","version":3,"id":"demo","timestamp":"2026-07-21T12:00:00.000Z","cwd":"/work/project"}

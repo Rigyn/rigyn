@@ -897,7 +897,7 @@ process.exit(command === "install" || command === "ci" ? 0 : 2);
   assert.equal((await packages.check()).status, "needs-reconcile");
 });
 
-test("peer metadata names declared peers and the host peer must match this Rigyn", async (context) => {
+test("peer metadata names declared peers and the host peer must match this rigyn", async (context) => {
   const value = await fixture(context);
   await writePackage(value, "1.0.0");
   await writeDeclaration(value);
@@ -910,7 +910,7 @@ test("peer metadata names declared peers and the host peer must match this Rigyn
   manifest.peerDependencies = { rigyn: ">=999.0.0" };
   manifest.peerDependenciesMeta = {};
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
-  await assert.rejects(manager(value).update({ all: true }), /requires Rigyn/u);
+  await assert.rejects(manager(value).update({ all: true }), /requires rigyn/u);
 });
 
 test("offline remote updates fail before npm or Git commands run", async (context) => {

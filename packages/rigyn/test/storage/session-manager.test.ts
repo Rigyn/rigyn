@@ -285,7 +285,7 @@ test("a nonempty invalid file is rejected byte-for-byte without repair", async (
   const original = Buffer.from('{"type":"message","id":"x"}\n');
   await writeFile(path, original);
 
-  assert.throws(() => SessionManager.open(path), /not a valid Rigyn session/u);
+  assert.throws(() => SessionManager.open(path), /not a valid rigyn session/u);
   assert.deepEqual(await readFile(path), original);
 });
 

@@ -142,14 +142,14 @@ async function assertCopyableSource(path) {
 export function sourceBuildSteps(platform = process.platform) {
   const nativePlatform = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : undefined;
   return [
-    ["@rigyn/terminal", "build", "Rigyn terminal source build"],
+    ["@rigyn/terminal", "build", "rigyn terminal source build"],
     ...(nativePlatform === undefined ? [] : [
       ["@rigyn/terminal", "native:build", `${nativePlatform} native terminal helper build`],
       ["@rigyn/terminal", "native:verify", `${nativePlatform} native terminal helper verification`],
     ]),
-    ["@rigyn/models", "build:offline", "Rigyn model catalog source build"],
-    ["@rigyn/kernel", "build", "Rigyn kernel source build"],
-    ["rigyn", "build", "Rigyn application source build"],
+    ["@rigyn/models", "build:offline", "rigyn model catalog source build"],
+    ["@rigyn/kernel", "build", "rigyn kernel source build"],
+    ["rigyn", "build", "rigyn application source build"],
   ];
 }
 
@@ -563,7 +563,7 @@ async function install() {
       await rm(buildStaging, { recursive: true, force: true });
       await mkdir(buildStaging, { recursive: true, mode: 0o700 });
       if (!sourceCheckout && !(await exists(join(projectRoot, "dist", "bin", "rigyn.js")))) {
-        throw new Error("Package contains neither build sources nor a built Rigyn executable");
+        throw new Error("Package contains neither build sources nor a built rigyn executable");
       }
       const packageRoots = sourceCheckout ? await prepareSourcePackages() : await installedPackageRoots();
       const { tarballs, productVersion, nodeTypesVersion } = await packPackages(packageRoots);
@@ -640,7 +640,7 @@ async function install() {
       await rm(previousApp, { recursive: true, force: true });
       await rm(transactionPath, { force: true });
       transactionStarted = false;
-      writeFileSync(1, `Installed a self-contained Rigyn copy at ${installRoot}\n`);
+      writeFileSync(1, `Installed a self-contained rigyn copy at ${installRoot}\n`);
       writeFileSync(1, `Installed command at ${paths.command}\n`);
       const commandDirectory = process.platform === "win32" ? join(installRoot, "bin") : join(homedir(), ".local", "bin");
       if ((process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":").includes(commandDirectory)) {
@@ -663,7 +663,7 @@ async function install() {
           }
         }
         if (failures.length > 1) {
-          throw new AggregateError(failures, "Rigyn installation failed and rollback was incomplete");
+          throw new AggregateError(failures, "rigyn installation failed and rollback was incomplete");
         }
         rollbackComplete = true;
       }

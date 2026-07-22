@@ -165,6 +165,8 @@ export {
   type SettingsListTheme,
 } from "@rigyn/terminal";
 export {
+  type BackgroundCell,
+  type BackgroundComponent,
   Container,
   CURSOR_MARKER,
   isFocusable,

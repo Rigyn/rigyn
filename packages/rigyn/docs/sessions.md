@@ -1,6 +1,6 @@
 # Sessions and context
 
-Rigyn stores each durable conversation as one append-only JSONL file. The file is the source of truth: there is no session database, background index, or separate memory service.
+rigyn stores each durable conversation as one append-only JSONL file. The file is the source of truth: there is no session database, background index, or separate memory service.
 
 ## Session lifecycle
 
@@ -52,7 +52,7 @@ Version 1 and 2 files are migrated to version 3 when opened. Migration rewrites 
 
 ## Crash behavior
 
-Entries are appended as complete JSON records followed by a newline. Only an unterminated final fragment from an interrupted write is ignored. Before the next append, that fragment is removed; a valid final JSON record that only lacks its newline is preserved and separated from the new entry. Malformed newline-terminated JSON is reported with its line number and the file is left unchanged, so corruption earlier in the history is never mistaken for crash recovery. Rigyn does not replay an unfinished external side effect merely because the terminal closed.
+Entries are appended as complete JSON records followed by a newline. Only an unterminated final fragment from an interrupted write is ignored. Before the next append, that fragment is removed; a valid final JSON record that only lacks its newline is preserved and separated from the new entry. Malformed newline-terminated JSON is reported with its line number and the file is left unchanged, so corruption earlier in the history is never mistaken for crash recovery. rigyn does not replay an unfinished external side effect merely because the terminal closed.
 
 Only one process should actively append to a particular session file. Separate processes should use separate sessions or coordinate through a higher-level extension. Session files are private local data and may contain prompts, model output, tool arguments/results, file paths, and provider-visible content.
 
@@ -87,4 +87,4 @@ Extensions receive the active session manager through their generation-bound con
 
 The live session file is already machine-readable JSONL. `exportToJsonl()` copies that file without changing identities or content. Self-contained HTML presentation exports contain transcript material and must be treated as sensitive.
 
-Rigyn does not promise that an ordinary export is anonymized. Inspect any exported file before sharing it, especially tool output, paths, prompts, and extension-authored content. See [Session export](session-export.md) for the exact behavior.
+rigyn does not promise that an ordinary export is anonymized. Inspect any exported file before sharing it, especially tool output, paths, prompts, and extension-authored content. See [Session export](session-export.md) for the exact behavior.

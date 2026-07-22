@@ -40,12 +40,12 @@ test("interactive settings expose current values and apply persistent and live c
     setOperatorPreferences() { terminalCalls.push("preferences"); },
   } as unknown as Pick<TuiController, "setTheme" | "setDoubleEscapeAction" | "setOperatorPreferences">;
 
-  const items = interactiveSettingItems(settings, session, ["mono", "ocean"]);
+  const items = interactiveSettingItems(settings, session, ["mono", "ocean", "signal"]);
   assert.equal(new Set(items.map((item) => item.id)).size, items.length);
   for (const item of items) assert.equal(item.values.includes(item.value), true, item.id);
   assert.ok(items.length >= 20);
   assert.equal(items.some((item) => item.id === "install-telemetry"), false);
-  assert.deepEqual(items.find((item) => item.id === "theme")?.values, ["mono", "ocean"]);
+  assert.deepEqual(items.find((item) => item.id === "theme")?.values, ["mono", "ocean", "signal"]);
 
   applyInteractiveSetting({ id: "auto-compact" }, "off", settings, session, terminal);
   applyInteractiveSetting({ id: "transport" }, "websocket-cached", settings, session, terminal);

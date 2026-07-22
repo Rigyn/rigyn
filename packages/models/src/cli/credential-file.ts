@@ -267,7 +267,7 @@ export function resolveOAuthCredentialFile(
     : selectedAgentDirectory;
   const comparable = (value: string): string => process.platform === "win32" ? value.toLowerCase() : value;
   if (comparable(resolved) === comparable(resolve(agentDirectory, "auth.json"))) {
-    throw new OAuthCredentialFileError("The standalone OAuth store must not replace the Rigyn agent credential store");
+    throw new OAuthCredentialFileError("The standalone OAuth store must not replace the rigyn agent credential store");
   }
   return resolved;
 }

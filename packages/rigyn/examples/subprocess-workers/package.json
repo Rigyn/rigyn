@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Bounded subprocess worker example for Rigyn",
+  "description": "Bounded subprocess worker example for rigyn",
   "rigyn": {
     "extensions": ["extensions/index.mjs"]
   }

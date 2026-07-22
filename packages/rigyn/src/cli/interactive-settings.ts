@@ -56,7 +56,7 @@ export function interactiveSettingItems(
     { id: "follow-up-mode", label: "Follow-up queue", description: "How queued follow-up messages are delivered", value: session.followUpMode, values: ["one-at-a-time", "all"] },
     { id: "transport", label: "Provider transport", description: "Preferred streaming transport for compatible providers", value: settings.getTransport(), values: ["auto", "sse", "websocket", "websocket-cached"] },
     { id: "thinking-level", label: "Reasoning level", description: "Default reasoning effort for the active model", value: session.thinkingLevel, values: thinkingLevels.length === 0 ? ["off"] : thinkingLevels },
-    { id: "theme", label: "Theme", description: "Built-in monochrome or a trusted extension theme", value: selectedTheme, values: availableThemes.length === 0 ? [selectedTheme] : availableThemes },
+    { id: "theme", label: "Theme", description: "Built-in mono/signal or a trusted extension theme", value: selectedTheme, values: availableThemes.length === 0 ? [selectedTheme] : availableThemes },
     booleanItem("hide-thinking", "Hide reasoning blocks", "Collapse model reasoning content in the transcript", settings.getHideThinkingBlock()),
     booleanItem("cache-miss-notices", "Cache miss notices", "Show provider prompt-cache miss diagnostics", settings.getShowCacheMissNotices()),
     booleanItem("collapse-changelog", "Compact update notice", "Use a one-line startup notice after updates; /changelog stays complete", settings.getCollapseChangelog()),

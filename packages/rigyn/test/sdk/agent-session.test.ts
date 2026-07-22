@@ -29,6 +29,7 @@ import { createModels, type ProviderModel } from "../../src/providers/models.js"
 import { createAgentSession } from "../../src/sdk/index.js";
 import { SessionManager } from "../../src/storage/session-manager.js";
 import { createScriptedProvider, type ScriptedProviderStep } from "../../src/testing/scripted-provider.js";
+import type { ToolExecutionBackend } from "../../src/tools/backend.js";
 import type { HarnessTool } from "../../src/tools/types.js";
 
 const roots = new Set<string>();
@@ -426,6 +427,69 @@ test("createAgentSession composes injected managers, exact tool policy, and cust
   assert.throws(() => initialHost.onError(() => {}), /closed/u);
   await created.session.close();
   assert.throws(() => currentHost.onError(() => {}), /closed/u);
+});
+
+test("createAgentSession routes claimed tools through the supplied execution backend", async () => {
+  const { cwd, agentDir } = await workspace();
+  let localExecutions = 0;
+  const requests: Array<{ name: string; workspace: string }> = [];
+  const customTool: HarnessTool = {
+    definition: {
+      name: "backend_probe",
+      description: "Exercise the SDK tool backend",
+      inputSchema: { type: "object", additionalProperties: false },
+    },
+    validate() {},
+    resources() { return []; },
+    async execute() {
+      localExecutions += 1;
+      return { content: "local", isError: false };
+    },
+  };
+  const backend: ToolExecutionBackend = {
+    id: "sdk-test",
+    handles(name) { return name === "backend_probe"; },
+    resources(request) {
+      requests.push({ name: request.invocation.name, workspace: request.workspace });
+      return [{ kind: "workspace", key: "workspace", mode: "read" }];
+    },
+    async execute(request) {
+      requests.push({ name: request.invocation.name, workspace: request.workspace });
+      return { content: "backend", isError: false };
+    },
+  };
+  const { model, runtime } = await modelRuntime([
+    {
+      kind: "turn",
+      content: [{ type: "tool_call", name: "backend_probe", arguments: {} }],
+      terminal: { type: "finish", reason: "tool_calls" },
+    },
+    {
+      kind: "turn",
+      content: [{ type: "text", text: "complete" }],
+      terminal: { type: "finish", reason: "stop" },
+    },
+  ]);
+  const created = await createAgentSession({
+    cwd,
+    agentDir,
+    modelRuntime: runtime,
+    model,
+    sessionManager: SessionManager.inMemory(cwd),
+    settingsManager: SettingsManager.inMemory(),
+    customTools: [customTool],
+    tools: ["backend_probe"],
+    toolBackend: backend,
+  });
+
+  const result = await created.session.prompt("use the backend probe");
+  assert.equal(result.results.at(-1)?.finalText, "complete");
+  assert.equal(localExecutions, 0);
+  assert.deepEqual(requests, [
+    { name: "backend_probe", workspace: cwd },
+    { name: "backend_probe", workspace: cwd },
+  ]);
+  await created.session.close();
 });
 
 test("session.agent applies mutable state and low-level stream configuration to a real run", async () => {

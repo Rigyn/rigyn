@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Custom message rendering and in-process event bus example for Rigyn",
+  "description": "Custom message rendering and in-process event bus example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

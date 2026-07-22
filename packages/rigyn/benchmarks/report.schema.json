@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rigyn.local/schemas/benchmark-report-v2.json",
-  "title": "Rigyn benchmark report",
+  "title": "rigyn benchmark report",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "suite", "purpose", "deterministic", "tasks", "probes", "summary"],

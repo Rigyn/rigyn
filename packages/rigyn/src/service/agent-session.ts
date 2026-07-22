@@ -4296,7 +4296,7 @@ export class AgentSession {
         });
         return true;
       },
-      getThinkingLevel: () => this.thinkingLevel,
+      getThinkingLevel: () => this.thinkingLevel as ThinkingLevel,
       setThinkingLevel: (level) => { this.setThinkingLevel(level); },
       registerProvider: (providerOrName, config?: RuntimeDirectProviderConfig) => {
         if (this.#activeDirectProviderHost !== extensions) {
@@ -4517,6 +4517,7 @@ export class AgentSession {
         sessionManager: extensionSessionManager(this.#session),
         modelRegistry,
         ...(directModel === undefined ? {} : { model: directModel }),
+        thinkingLevel: this.thinkingLevel as ThinkingLevel,
         isIdle: () => this.isIdle,
         hasPendingMessages: () => this.hasPendingMessages,
         abort: this.#extensionBindings.abortHandler ?? (() => { void this.abort("Cancelled by extension"); }),

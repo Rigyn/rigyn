@@ -108,6 +108,7 @@ export class RpcExtensionUiBridge {
       setWorkingVisible() {},
       setWorkingIndicator() {},
       setHiddenThinkingLabel() {},
+      setBackground() {},
       setWidget(key, content, options) {
         if (content !== undefined && !Array.isArray(content)) return;
         emit({

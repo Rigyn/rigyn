@@ -165,7 +165,7 @@ export interface ConfiguredModel {
   reasoningEfforts?: ModelReasoningEffort[];
   /** Non-secret request headers applied only when this exact model is selected. */
   headers?: Record<string, string>;
-  /** Maps canonical Rigyn reasoning levels to provider values; null disables a level. */
+  /** Maps canonical rigyn reasoning levels to provider values; null disables a level. */
   reasoningEffortMap?: Partial<Record<ModelReasoningEffort, string | null>>;
   /** Explicit Chat Completions wire behavior for this exact model. */
   requestCompatibility?: ModelRequestCompatibility;

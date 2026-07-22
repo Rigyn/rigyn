@@ -115,7 +115,7 @@ test("trusted modules use the direct factory registration signatures", async (co
     rigyn.registerCommand("direct-command", {
       description: "Direct command",
       handler(args, ctx) {
-        globalThis.__rigynDirectCommand = [args, ctx.cwd, ctx.sessionManager.getSessionId(), ctx.getSystemPrompt()];
+        globalThis.__rigynDirectCommand = [args, ctx.cwd, ctx.sessionManager.getSessionId(), ctx.thinkingLevel, ctx.getSystemPrompt()];
       }
     });
     rigyn.registerShortcut("ctrl+alt+d", {
@@ -130,8 +130,8 @@ test("trusted modules use the direct factory registration signatures", async (co
       event.headers["x-remove"] = null;
       globalThis.__rigynDirectHeaderEvent = event.type;
     });
-    rigyn.on("user_bash", (event) => {
-      globalThis.__rigynDirectBashEvent = [event.type, event.excludeFromContext];
+    rigyn.on("user_bash", (event, context) => {
+      globalThis.__rigynDirectBashEvent = [event.type, event.excludeFromContext, context.thinkingLevel];
       if (event.command === "handled") {
         return { result: { output: "direct output", exitCode: 7, cancelled: false, truncated: false } };
       }
@@ -148,6 +148,7 @@ test("trusted modules use the direct factory registration signatures", async (co
   host.setDirectContextHandler(() => ({
     sessionManager: extensionSessionManager(sessionManager),
     modelRegistry: new ModelRegistry(createModels()),
+    thinkingLevel: "high",
     isIdle: () => true,
     hasPendingMessages: () => false,
     abort() {},
@@ -292,6 +293,7 @@ test("trusted modules use the direct factory registration signatures", async (co
     "value",
     root,
     "direct-session",
+    "high",
     "direct system prompt",
   ]);
   assert.equal((globalThis as Record<string, unknown>).__rigynDirectShortcut, root);
@@ -305,7 +307,7 @@ test("trusted modules use the direct factory registration signatures", async (co
     cwd: root,
     result: { text: "direct output", exitCode: 7 },
   });
-  assert.deepEqual((globalThis as Record<string, unknown>).__rigynDirectBashEvent, ["user_bash", true]);
+  assert.deepEqual((globalThis as Record<string, unknown>).__rigynDirectBashEvent, ["user_bash", true, "high"]);
 });
 
 test("direct tool renderers retain shell, component state, result details, and live invalidation", async () => {

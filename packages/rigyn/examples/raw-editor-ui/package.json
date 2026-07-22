@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Trusted editor replacement example for Rigyn",
+  "description": "Trusted editor replacement example for rigyn",
   "rigyn": {
     "extensions": ["extensions/index.mjs"]
   }

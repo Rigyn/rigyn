@@ -120,7 +120,7 @@ test("built package import defers the native image backend", async () => {
     import { registerHooks } from "node:module";
     registerHooks({
       resolve(specifier, context, nextResolve) {
-        if (specifier === "sharp") throw new Error("Rigyn eagerly loaded Sharp");
+        if (specifier === "sharp") throw new Error("rigyn eagerly loaded Sharp");
         return nextResolve(specifier, context);
       },
     });

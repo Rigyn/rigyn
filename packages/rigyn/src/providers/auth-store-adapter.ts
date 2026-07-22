@@ -65,7 +65,7 @@ function toHostCredential(provider: string, credential: ProviderCredential): Aut
   };
 }
 
-/** Bridges Rigyn's durable auth store to the direct provider collection without exposing secrets. */
+/** Bridges rigyn's durable auth store to the direct provider collection without exposing secrets. */
 export class ProviderCredentialStoreAdapter implements ProviderCredentialStore {
   readonly #store: CredentialStore;
 

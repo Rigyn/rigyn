@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { ensureExternalTool, getExternalToolPath } from "../../src/tools/external-tools.js";
 
-test("external tool discovery prefers the isolated Rigyn bin directory", async (t) => {
+test("external tool discovery prefers the isolated rigyn bin directory", async (t) => {
   const agentDirectory = await mkdtemp(join(tmpdir(), "rigyn-external-tool-"));
   t.after(async () => await rm(agentDirectory, { recursive: true, force: true }));
   const bin = join(agentDirectory, "bin");

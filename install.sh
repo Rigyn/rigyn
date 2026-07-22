@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 rigyn_fail() {
-  printf 'Rigyn install: %s\n' "$*" >&2
+  printf 'rigyn install: %s\n' "$*" >&2
   exit 1
 }
 
@@ -16,7 +16,7 @@ const [major, minor] = process.versions.node.split(".").map(Number);
 if (!((major === 24 && minor >= 15) || major >= 26)) process.exit(1);
 ' || rigyn_fail "Node.js 24.15+ or 26+ is required"
 
-rigyn_release_root=https://github.com/Rigyn/rigyn/releases
+rigyn_release_root=https://github.com/rigyn/rigyn/releases
 if ! rigyn_latest_url=$(curl \
   --proto '=https' \
   --proto-redir '=https' \
@@ -120,7 +120,7 @@ async function sha256(path) {
     if (await sha256(archive) !== expected.get(name)) throw new Error(`checksum mismatch for ${name}`);
   }
 })().catch((error) => {
-  process.stderr.write(`Rigyn install: ${error.message}\n`);
+  process.stderr.write(`rigyn install: ${error.message}\n`);
   process.exitCode = 1;
 });
 ' "$rigyn_checksums" \
@@ -145,4 +145,4 @@ npm exec --yes \
   --package="$rigyn_tmp/$4" \
   -- rigyn self-install </dev/null
 
-printf 'Rigyn %s was installed from its verified GitHub release.\n' "$rigyn_version"
+printf 'rigyn %s was installed from its verified GitHub release.\n' "$rigyn_version"

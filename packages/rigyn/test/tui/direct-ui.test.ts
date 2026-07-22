@@ -79,6 +79,106 @@ test("direct UI components share the host renderer, retain extension ownership, 
   controller.close();
 });
 
+test("direct backgrounds resize, clear stale cells, and restore the previous generation", async () => {
+  const { output, controller } = fixture();
+  controller.setEditorText("draft");
+  const firstGeneration = new AbortController();
+  const secondGeneration = new AbortController();
+  const first = createInteractiveDirectUiContext(controller, "background-first", process.cwd(), firstGeneration.signal);
+  const second = createInteractiveDirectUiContext(controller, "background-second", process.cwd(), secondGeneration.signal);
+  const dimensions: Array<[number, number]> = [];
+  let invalidations = 0;
+  let firstDisposed = 0;
+  let secondDisposed = 0;
+
+  output.chunks.length = 0;
+  first.setBackground(() => ({
+    render(width, height) {
+      dimensions.push([width, height]);
+      return [
+        { row: 1, column: 1, text: "X" },
+        { row: 1, column: width - 1, text: "░" },
+      ];
+    },
+    invalidate() { invalidations += 1; },
+    dispose() { firstDisposed += 1; },
+  }));
+  await tick();
+  assert.match(stripAnsi(output.text), /░/u);
+  assert.doesNotMatch(stripAnsi(output.text), /X/u, "editor content wins over a colliding background cell");
+  assert.deepEqual(dimensions.at(-1), [80, 24]);
+
+  output.chunks.length = 0;
+  output.resize(18, 8);
+  await tick();
+  assert.deepEqual(dimensions.at(-1), [18, 8]);
+  assert.equal(invalidations, 1);
+  assert.match(stripAnsi(output.text), /░/u);
+
+  output.chunks.length = 0;
+  second.setBackground(() => ({
+    render: () => [{ row: 1, column: 17, text: "B" }],
+    invalidate() {},
+    dispose() { secondDisposed += 1; },
+  }));
+  await tick();
+  assert.match(stripAnsi(output.text), /B/u);
+  secondGeneration.abort(new Error("extension reload"));
+  await tick();
+  assert.equal(secondDisposed, 1);
+  assert.match(stripAnsi(output.text), /░/u, "removing the newest owner restores the previous background");
+
+  output.chunks.length = 0;
+  first.setBackground(undefined);
+  await tick();
+  assert.equal(firstDisposed, 1);
+  assert.doesNotMatch(stripAnsi(output.text), /░/u);
+  assert.match(output.text, /\u001b\[2K/u, "clearing repaints the row that held the background glyph");
+  assert.doesNotMatch(output.text, /\u001b\[(?:2J|3J)/u, "inline scrollback is not cleared with the background");
+
+  firstGeneration.abort(new Error("extension reload"));
+  assert.equal(firstDisposed, 1, "a cleared background is disposed exactly once");
+  controller.close();
+});
+
+test("invalid background controls fail closed and non-full hosts do not invoke factories", async () => {
+  const { output, controller } = fixture();
+  const generation = new AbortController();
+  const ui = createInteractiveDirectUiContext(controller, "background-invalid", process.cwd(), generation.signal);
+  let disposed = 0;
+  output.chunks.length = 0;
+  ui.setBackground(() => ({
+    render: () => [{ row: 0, column: 0, text: "\u001b[31mX" }],
+    invalidate() {},
+    dispose() { disposed += 1; },
+  }));
+  await tick();
+  assert.equal(disposed, 1);
+  assert.match(stripAnsi(output.text), /Raw background failed: [\s\S]*printable, single-column grapheme/u);
+  assert.doesNotMatch(output.text, /\u001b\[31mX/u);
+  generation.abort(new Error("extension reload"));
+  controller.close();
+
+  const classicInput = new FakeInput();
+  const classicOutput = new FakeOutput();
+  const classic = new TuiController({
+    input: classicInput,
+    output: classicOutput,
+    mode: "classic",
+    handleSignals: false,
+  });
+  const classicGeneration = new AbortController();
+  const classicUi = createInteractiveDirectUiContext(classic, "background-classic", process.cwd(), classicGeneration.signal);
+  let invoked = false;
+  classicUi.setBackground(() => {
+    invoked = true;
+    return { render: () => [], invalidate() {} };
+  });
+  assert.equal(invoked, false);
+  classicGeneration.abort(new Error("extension reload"));
+  classic.close();
+});
+
 test("direct custom components receive raw input and clean up exactly once on completion or abort", async () => {
   const { input, output, controller } = fixture();
   const generation = new AbortController();

@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Input transformation and tool permission guard example for Rigyn",
+  "description": "Input transformation and tool permission guard example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

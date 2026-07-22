@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rigyn.local/schemas/extension-authoring-report-v1.json",
-  "title": "Rigyn offline extension-authoring verifier report",
+  "title": "rigyn offline extension-authoring verifier report",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "suite", "purpose", "deterministic", "modelCalls", "maxAttempts", "tasks", "summary"],

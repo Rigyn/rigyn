@@ -2,7 +2,7 @@
 
 The machine-readable [`extension-capabilities.json`](extension-capabilities.json) maps the supported direct factory surface to hosts, documentation, focused examples, and executable tests. Repository tests validate every referenced path.
 
-Rigyn has one trusted in-process extension model. Packages declare direct entries in `package.json`; successful factories register commands, tools, events, providers, UI, and resources in the active process. Failed candidates commit nothing. Reload replaces a complete generation and runs its disposers after making the old API stale.
+rigyn has one trusted in-process extension model. Packages declare direct entries in `package.json`; successful factories register commands, tools, events, providers, UI, and resources in the active process. Failed candidates commit nothing. Reload replaces a complete generation and runs its disposers after making the old API stale.
 
 The twenty-two examples are intentionally focused:
 

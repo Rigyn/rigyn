@@ -1,6 +1,6 @@
 # External execution backends
 
-Rigyn can route selected model tools through a fixed external process while retaining its normal schema validation, scheduling, output bounds, artifact policy, and redaction. This is a routing contract. Isolation exists only when the configured executable establishes a real container, VM, OS sandbox, or remote boundary.
+rigyn can route selected model tools through a fixed external process while retaining its normal schema validation, scheduling, output bounds, artifact policy, and redaction. This is a routing contract. Isolation exists only when the configured executable establishes a real container, VM, OS sandbox, or remote boundary.
 
 For every invocation the harness starts the configured argv without a shell and without inheriting its environment, writes one JSON object to stdin, waits within the configured timeout/output bound, and accepts one JSON object from stdout.
 
@@ -34,7 +34,7 @@ WORKDIR /app
 COPY dist ./dist
 ```
 
-Create a dedicated existing launch directory such as `/var/empty/rigyn-backend`. A low-level host can pass these absolute values to `ExternalToolBackend.create()` and then supply the result as `toolBackend` when it constructs `AgentSession`. The convenience `createAgentSession()` factory does not currently accept a backend option. A CLI package can expose an equivalent policy by replacing the built-in tools from a reviewed extension:
+Create a dedicated existing launch directory such as `/var/empty/rigyn-backend`. A host can pass these absolute values to `ExternalToolBackend.create()` and then supply the result as `toolBackend` to either `createAgentSession()` or the lower-level `AgentSession` constructor:
 
 ```js
 const backend = await ExternalToolBackend.create({
@@ -55,6 +55,11 @@ const backend = await ExternalToolBackend.create({
     "timeoutMs": 600000,
     "outputLimitBytes": 2097152
 })
+
+const { session } = await createAgentSession({
+  cwd: "/home/alice/project",
+  toolBackend: backend,
+})
 ```
 
 The configured host workspace must be the same directory mounted by the adapter, while the backend's `workspace` must remain `/workspace`. Do not mount the container engine socket, credential directories, or broader host paths into the worker image.
@@ -63,7 +68,7 @@ The configured host workspace must be the same directory mounted by the adapter,
 
 The packaged [`remote-ssh.mjs`](../examples/execution-backends/remote-ssh.mjs) adapter pins the SSH executable, destination, identity, known-hosts database, remote Node executable, worker module, and workspace. It ignores user SSH configuration, disables interactive authentication and forwarding, and requires strict host-key verification. Remote paths accept only conservative absolute POSIX syntax because OpenSSH constructs the remote command through the login shell.
 
-Install the complete matching Rigyn `dist/` tree on the remote machine and ensure the configured workspace exists. The SSH account needs only the filesystem and process authority intended for tool execution; it should not have provider credentials or privilege escalation. A complete host configuration is:
+Install the complete matching rigyn `dist/` tree on the remote machine and ensure the configured workspace exists. The SSH account needs only the filesystem and process authority intended for tool execution; it should not have provider credentials or privilege escalation. A complete host configuration is:
 
 ```js
 const backend = await ExternalToolBackend.create({

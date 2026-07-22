@@ -1446,7 +1446,7 @@ async function readPackageManifest(
   const hostRange = peerDependencies?.rigyn;
   if (hostRange !== undefined) {
     if (validRange(hostRange) === null || !satisfies(RIGYN_VERSION, hostRange, { includePrerelease: true })) {
-      throw new Error(`Project package requires Rigyn ${hostRange}; current version is ${RIGYN_VERSION}`);
+      throw new Error(`Project package requires rigyn ${hostRange}; current version is ${RIGYN_VERSION}`);
     }
     delete peerDependencies!.rigyn;
     if (Object.keys(peerDependencies!).length === 0) peerDependenciesMeta = undefined;

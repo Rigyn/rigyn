@@ -60,7 +60,7 @@ Each sample receives an independent temporary copy of the same task files and th
 
 Harness and task IDs become directory names beneath that temporary root. They must start with a letter or digit and may contain only letters, digits, dots, underscores, and hyphens; path separators and parent-directory components are rejected before any files are created.
 
-Use `rigyn-jsonl` for Rigyn's `--json` event stream. A peer wrapper may emit one final JSON line using `json-summary`, with this shape:
+Use `rigyn-jsonl` for rigyn's `--json` event stream. A peer wrapper may emit one final JSON line using `json-summary`, with this shape:
 
 ```json
 {"completed":true,"steps":3,"toolErrors":0,"usage":{"inputTokens":100,"outputTokens":20,"totalTokens":120,"cacheReadTokens":50,"cacheWriteTokens":0,"reasoningTokens":0,"costUsd":"0.01"}}

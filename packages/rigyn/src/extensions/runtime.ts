@@ -11,10 +11,11 @@ import * as bundledTypebox from "typebox";
 import * as bundledTypeboxCompile from "typebox/compile";
 import * as bundledTypeboxValue from "typebox/value";
 import type { TSchema } from "typebox";
-import type { CustomMessage as DirectCustomMessage } from "@rigyn/kernel";
+import type { CustomMessage as DirectCustomMessage, ThinkingLevel } from "@rigyn/kernel";
 import type { Api, Model, Provider as ExtensionProvider } from "@rigyn/models";
 import type {
   AutocompleteProvider,
+  BackgroundComponent,
   Component,
   EditorComponent,
   EditorTheme,
@@ -77,6 +78,7 @@ import type { ProviderModel } from "../providers/models.js";
 import { MAX_TOOL_TRANSFORMATION_AUDIT_ENTRIES } from "../tools/coordinator.js";
 import { sha256 } from "../tools/hash.js";
 import { assertSchema, assertSupportedSchema } from "../tools/schema.js";
+import type { BashOperations } from "../tools/builtins/shell.js";
 import { assertCanonicalDirectoryCreationPath } from "../config/canonical-path.js";
 import type {
   HarnessTool,
@@ -532,18 +534,7 @@ export type RuntimeBeforeUserShellReduction =
   | { action: "execute"; command: string; cwd: string; operations?: RuntimeUserBashOperations }
   | { action: "handled"; command: string; cwd: string; result: RuntimeUserShellResult };
 
-export interface RuntimeUserBashOperations {
-  exec(
-    command: string,
-    cwd: string,
-    options: {
-      onData(data: Buffer): void;
-      signal?: AbortSignal;
-      timeout?: number;
-      env?: NodeJS.ProcessEnv;
-    },
-  ): Promise<{ exitCode: number | null }>;
-}
+export type RuntimeUserBashOperations = BashOperations;
 
 export interface RuntimeUserBashEvent {
   command: string;
@@ -1195,6 +1186,7 @@ export type RuntimeDirectTerminalInputHandler = (
 ) => { consume?: boolean; data?: string } | undefined;
 export type RuntimeDirectAutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type RuntimeDirectEditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
+export type RuntimeDirectBackgroundFactory = (tui: TUI, theme: Theme) => BackgroundComponent;
 export type RuntimeDirectPersistentComponentFactory = (
   tui: TUI,
   theme: Theme,
@@ -1218,6 +1210,7 @@ export interface RuntimeDirectUiContext {
   setWorkingVisible(visible: boolean): void;
   setWorkingIndicator(options?: RuntimeDirectWorkingIndicatorOptions): void;
   setHiddenThinkingLabel(label?: string): void;
+  setBackground(factory: RuntimeDirectBackgroundFactory | undefined): void;
   setWidget(key: string, content: string[] | RuntimeDirectPersistentComponentFactory | undefined, options?: RuntimeDirectWidgetOptions): void;
   setFooter(factory: RuntimeDirectFooterFactory | undefined): void;
   setHeader(factory: RuntimeDirectPersistentComponentFactory | undefined): void;
@@ -1268,6 +1261,8 @@ export interface RuntimeExtensionListenerContext {
   readonly modelRegistry: RuntimeExtensionModelRegistry;
   /** Currently selected model, when one is selected. */
   readonly model: Model<Api> | undefined;
+  /** Thinking level selected for the current session callback. */
+  readonly thinkingLevel: ThinkingLevel;
   isIdle(): boolean;
   hasPendingMessages(): boolean;
   abort(): void;
@@ -1295,6 +1290,7 @@ export interface RuntimeDirectContextSnapshot {
   sessionManager: ReadonlyExtensionSessionManager;
   modelRegistry: InternalModelRegistry;
   model?: ProviderModel;
+  thinkingLevel: ThinkingLevel;
   isIdle(): boolean;
   hasPendingMessages(): boolean;
   abort(): void;
@@ -1350,8 +1346,8 @@ export interface RuntimeDirectActionsHandler {
   /** Unified extension-command, prompt-template, and skill-command catalog. */
   getCommands?(): readonly SlashCommandInfo[];
   setModel(model: Model<Api>): Promise<boolean>;
-  getThinkingLevel(): string;
-  setThinkingLevel(level: string): void;
+  getThinkingLevel(): ThinkingLevel;
+  setThinkingLevel(level: ThinkingLevel): void;
   registerProvider(provider: ExtensionProvider): void;
   registerProvider(name: string, config: RuntimeDirectProviderConfig): void;
   unregisterProvider(name: string): void;
@@ -1860,6 +1856,7 @@ function unavailableDirectContext(): RuntimeDirectContextSnapshot {
   return {
     sessionManager: unavailableDirectObject<ReadonlyExtensionSessionManager>("Session manager"),
     modelRegistry: unavailableDirectObject<InternalModelRegistry>("Model registry"),
+    thinkingLevel: "off",
     isIdle: () => true,
     hasPendingMessages: () => false,
     abort() {},
@@ -4576,6 +4573,7 @@ export class RuntimeExtensionHost {
           ...(label === undefined ? {} : { value: label }),
         });
       },
+      setBackground() {},
       setWidget(keyValue, content) {
         if (content === undefined || Array.isArray(content)) {
           legacy.setWidget(keyValue, content?.join("\n"));
@@ -4759,6 +4757,7 @@ export class RuntimeExtensionHost {
       sessionManager: direct.sessionManager,
       modelRegistry,
       model: direct.model === undefined ? undefined : modelRegistry.present(direct.model),
+      thinkingLevel: direct.thinkingLevel,
       isIdle: direct.isIdle,
       hasPendingMessages: direct.hasPendingMessages,
       abort: direct.abort,

@@ -1,6 +1,6 @@
 # @rigyn/models
 
-`@rigyn/models` is Rigyn's standalone provider layer. It supplies canonical model and message types, streaming transports, authentication and OAuth contracts, strict maintained-model projections, cost and token accounting, image-generation primitives, and provider-neutral diagnostics.
+`@rigyn/models` is rigyn's standalone provider layer. It supplies canonical model and message types, streaming transports, authentication and OAuth contracts, strict maintained-model projections, cost and token accounting, image-generation primitives, and provider-neutral diagnostics.
 
 The package has no dependency on the coding agent or terminal UI. Provider SDKs and wire protocols stop at this boundary; consumers receive one normalized event stream regardless of the selected transport.
 

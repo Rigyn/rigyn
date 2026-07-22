@@ -1,6 +1,6 @@
 # Extensions
 
-Rigyn loads trusted extensions as direct in-process factories. The factory receives one stable `ExtensionAPI`; commands, tools, event handlers, providers, renderers, flags, and shortcuts registered during activation become visible only after activation succeeds.
+rigyn loads trusted extensions as direct in-process factories. The factory receives one stable `ExtensionAPI`; commands, tools, event handlers, providers, renderers, flags, and shortcuts registered during activation become visible only after activation succeeds.
 
 For package layout, installation, integrity, and publishing, read [Extension packages](packages.md). The smallest runnable package is [`examples/starter`](../examples/starter/README.md).
 
@@ -160,7 +160,7 @@ Raw editor replacement must preserve submission, cancellation, paste, keybinding
 
 `rigyn.exec(executable, argv, options)` executes an argv array without a shell. Always use a fixed executable, pass untrusted values as distinct arguments, set an explicit timeout, propagate the callback signal, validate output, and bound displayed or model-visible bytes.
 
-Trusted direct extensions can compose subprocess agents through the installed Rigyn CLI. The package owns specialization, concurrency, recursion prevention, cancellation, structured output validation, process-tree cleanup, and failure isolation. See [`subprocess-workers`](../examples/subprocess-workers/README.md).
+Trusted direct extensions can compose subprocess agents through the installed rigyn CLI. The package owns specialization, concurrency, recursion prevention, cancellation, structured output validation, process-tree cleanup, and failure isolation. See [`subprocess-workers`](../examples/subprocess-workers/README.md).
 
 ## Skills, prompts, and custom themes
 
@@ -188,7 +188,7 @@ export default function activate(rigyn: ExtensionAPI): void {
 }
 ```
 
-Runtime code may import stable exported host modules such as `rigyn/tui`, `rigyn/providers`, and `rigyn/storage`. Do not import `src/`, `dist/`, private files, or a second bundled copy of Rigyn.
+Runtime code may import stable exported host modules such as `rigyn/tui`, `rigyn/providers`, and `rigyn/storage`. Do not import `src/`, `dist/`, private files, or a second bundled copy of rigyn.
 
 ## Verification checklist
 

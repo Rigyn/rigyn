@@ -1,60 +1,245 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rigyn:schema:theme:v1",
-  "title": "Rigyn theme",
+  "title": "rigyn theme",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "name", "styles"],
+  "required": ["name"],
   "properties": {
     "$schema": { "type": "string", "maxLength": 4096 },
     "schemaVersion": { "const": 1 },
     "name": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9._-]{0,62}$",
-      "not": { "enum": ["dark", "light", "mono"] }
+      "not": { "enum": ["dark", "light", "mono", "signal"] }
     },
     "base": { "enum": ["dark", "light"] },
-    "vars": {
-      "type": "object",
-      "additionalProperties": {
+    "vars": { "type": "object" },
+    "styles": { "$ref": "#/$defs/styles" },
+    "colors": { "$ref": "#/$defs/colors" },
+    "export": { "$ref": "#/$defs/export" }
+  },
+  "oneOf": [
+    {
+      "title": "Role-based compatibility theme",
+      "required": ["schemaVersion", "styles"],
+      "properties": {
+        "vars": { "$ref": "#/$defs/styleVars" }
+      },
+      "not": {
         "anyOf": [
-          { "type": "integer", "minimum": 0, "maximum": 255 },
-          { "type": "string", "pattern": "^(#[0-9A-Fa-f]{6}|\\$[A-Za-z][A-Za-z0-9_.-]{0,62})$" },
-          { "const": "" }
+          { "required": ["colors"] },
+          { "required": ["export"] }
         ]
+      }
+    },
+    {
+      "title": "Semantic-token theme",
+      "required": ["colors"],
+      "properties": {
+        "vars": { "$ref": "#/$defs/tokenVars" }
+      },
+      "not": { "required": ["styles"] }
+    }
+  ],
+  "$defs": {
+    "paletteColor": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+      ]
+    },
+    "foreground": {
+      "anyOf": [
+        { "$ref": "#/$defs/paletteColor" },
+        { "type": "string", "pattern": "^\\$[A-Za-z][A-Za-z0-9_.-]{0,62}$" },
+        { "const": "" }
+      ]
+    },
+    "background": {
+      "anyOf": [
+        { "$ref": "#/$defs/paletteColor" },
+        { "type": "string", "pattern": "^\\$[A-Za-z][A-Za-z0-9_.-]{0,62}$" }
+      ]
+    },
+    "styleVars": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,62}$" },
+      "additionalProperties": { "$ref": "#/$defs/foreground" }
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "foreground": { "$ref": "#/$defs/foreground" },
+        "background": { "$ref": "#/$defs/background" },
+        "bold": { "type": "boolean" },
+        "italic": { "type": "boolean" }
       }
     },
     "styles": {
       "type": "object",
       "minProperties": 1,
       "additionalProperties": false,
-      "patternProperties": {
-        "^(title|muted|accent|info|link|code|border|editor|editorActive|working|user|assistant|success|warning|error|selection|userMessage|toolPending|toolRunning|toolSuccess|toolError)$": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "foreground": { "$ref": "#/$defs/foreground" },
-            "background": { "$ref": "#/$defs/background" },
-            "bold": { "type": "boolean" },
-            "italic": { "type": "boolean" }
-          }
-        }
+      "properties": {
+        "title": { "$ref": "#/$defs/style" },
+        "muted": { "$ref": "#/$defs/style" },
+        "accent": { "$ref": "#/$defs/style" },
+        "info": { "$ref": "#/$defs/style" },
+        "link": { "$ref": "#/$defs/style" },
+        "code": { "$ref": "#/$defs/style" },
+        "border": { "$ref": "#/$defs/style" },
+        "editor": { "$ref": "#/$defs/style" },
+        "editorActive": { "$ref": "#/$defs/style" },
+        "working": { "$ref": "#/$defs/style" },
+        "user": { "$ref": "#/$defs/style" },
+        "assistant": { "$ref": "#/$defs/style" },
+        "success": { "$ref": "#/$defs/style" },
+        "warning": { "$ref": "#/$defs/style" },
+        "error": { "$ref": "#/$defs/style" },
+        "selection": { "$ref": "#/$defs/style" },
+        "userMessage": { "$ref": "#/$defs/style" },
+        "toolPending": { "$ref": "#/$defs/style" },
+        "toolRunning": { "$ref": "#/$defs/style" },
+        "toolSuccess": { "$ref": "#/$defs/style" },
+        "toolError": { "$ref": "#/$defs/style" }
       }
-    }
-  },
-  "$defs": {
-    "foreground": {
+    },
+    "tokenValue": {
       "anyOf": [
-        { "type": "integer", "minimum": 0, "maximum": 255 },
-        { "type": "string", "pattern": "^(#[0-9A-Fa-f]{6}|\\$[A-Za-z][A-Za-z0-9_.-]{0,62})$" },
-        { "const": "" }
+        { "$ref": "#/$defs/paletteColor" },
+        { "const": "" },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^#\\u0000][^\\u0000]{0,1023}$"
+        }
       ]
     },
-    "background": {
-      "anyOf": [
-        { "type": "integer", "minimum": 0, "maximum": 255 },
-        { "type": "string", "pattern": "^(#[0-9A-Fa-f]{6}|\\$[A-Za-z][A-Za-z0-9_.-]{0,62})$" }
-      ]
+    "tokenVars": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/tokenValue" }
+    },
+    "colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accent",
+        "border",
+        "borderAccent",
+        "borderMuted",
+        "success",
+        "error",
+        "warning",
+        "muted",
+        "dim",
+        "text",
+        "thinkingText",
+        "selectedBg",
+        "userMessageBg",
+        "userMessageText",
+        "customMessageBg",
+        "customMessageText",
+        "customMessageLabel",
+        "toolPendingBg",
+        "toolSuccessBg",
+        "toolErrorBg",
+        "toolTitle",
+        "toolOutput",
+        "mdHeading",
+        "mdLink",
+        "mdLinkUrl",
+        "mdCode",
+        "mdCodeBlock",
+        "mdCodeBlockBorder",
+        "mdQuote",
+        "mdQuoteBorder",
+        "mdHr",
+        "mdListBullet",
+        "toolDiffAdded",
+        "toolDiffRemoved",
+        "toolDiffContext",
+        "syntaxComment",
+        "syntaxKeyword",
+        "syntaxFunction",
+        "syntaxVariable",
+        "syntaxString",
+        "syntaxNumber",
+        "syntaxType",
+        "syntaxOperator",
+        "syntaxPunctuation",
+        "thinkingOff",
+        "thinkingMinimal",
+        "thinkingLow",
+        "thinkingMedium",
+        "thinkingHigh",
+        "thinkingXhigh",
+        "bashMode"
+      ],
+      "properties": {
+        "accent": { "$ref": "#/$defs/tokenValue" },
+        "border": { "$ref": "#/$defs/tokenValue" },
+        "borderAccent": { "$ref": "#/$defs/tokenValue" },
+        "borderMuted": { "$ref": "#/$defs/tokenValue" },
+        "success": { "$ref": "#/$defs/tokenValue" },
+        "error": { "$ref": "#/$defs/tokenValue" },
+        "warning": { "$ref": "#/$defs/tokenValue" },
+        "muted": { "$ref": "#/$defs/tokenValue" },
+        "dim": { "$ref": "#/$defs/tokenValue" },
+        "text": { "$ref": "#/$defs/tokenValue" },
+        "thinkingText": { "$ref": "#/$defs/tokenValue" },
+        "selectedBg": { "$ref": "#/$defs/tokenValue" },
+        "userMessageBg": { "$ref": "#/$defs/tokenValue" },
+        "userMessageText": { "$ref": "#/$defs/tokenValue" },
+        "customMessageBg": { "$ref": "#/$defs/tokenValue" },
+        "customMessageText": { "$ref": "#/$defs/tokenValue" },
+        "customMessageLabel": { "$ref": "#/$defs/tokenValue" },
+        "toolPendingBg": { "$ref": "#/$defs/tokenValue" },
+        "toolSuccessBg": { "$ref": "#/$defs/tokenValue" },
+        "toolErrorBg": { "$ref": "#/$defs/tokenValue" },
+        "toolTitle": { "$ref": "#/$defs/tokenValue" },
+        "toolOutput": { "$ref": "#/$defs/tokenValue" },
+        "mdHeading": { "$ref": "#/$defs/tokenValue" },
+        "mdLink": { "$ref": "#/$defs/tokenValue" },
+        "mdLinkUrl": { "$ref": "#/$defs/tokenValue" },
+        "mdCode": { "$ref": "#/$defs/tokenValue" },
+        "mdCodeBlock": { "$ref": "#/$defs/tokenValue" },
+        "mdCodeBlockBorder": { "$ref": "#/$defs/tokenValue" },
+        "mdQuote": { "$ref": "#/$defs/tokenValue" },
+        "mdQuoteBorder": { "$ref": "#/$defs/tokenValue" },
+        "mdHr": { "$ref": "#/$defs/tokenValue" },
+        "mdListBullet": { "$ref": "#/$defs/tokenValue" },
+        "toolDiffAdded": { "$ref": "#/$defs/tokenValue" },
+        "toolDiffRemoved": { "$ref": "#/$defs/tokenValue" },
+        "toolDiffContext": { "$ref": "#/$defs/tokenValue" },
+        "syntaxComment": { "$ref": "#/$defs/tokenValue" },
+        "syntaxKeyword": { "$ref": "#/$defs/tokenValue" },
+        "syntaxFunction": { "$ref": "#/$defs/tokenValue" },
+        "syntaxVariable": { "$ref": "#/$defs/tokenValue" },
+        "syntaxString": { "$ref": "#/$defs/tokenValue" },
+        "syntaxNumber": { "$ref": "#/$defs/tokenValue" },
+        "syntaxType": { "$ref": "#/$defs/tokenValue" },
+        "syntaxOperator": { "$ref": "#/$defs/tokenValue" },
+        "syntaxPunctuation": { "$ref": "#/$defs/tokenValue" },
+        "thinkingOff": { "$ref": "#/$defs/tokenValue" },
+        "thinkingMinimal": { "$ref": "#/$defs/tokenValue" },
+        "thinkingLow": { "$ref": "#/$defs/tokenValue" },
+        "thinkingMedium": { "$ref": "#/$defs/tokenValue" },
+        "thinkingHigh": { "$ref": "#/$defs/tokenValue" },
+        "thinkingXhigh": { "$ref": "#/$defs/tokenValue" },
+        "thinkingMax": { "$ref": "#/$defs/tokenValue" },
+        "bashMode": { "$ref": "#/$defs/tokenValue" }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pageBg": { "$ref": "#/$defs/tokenValue" },
+        "cardBg": { "$ref": "#/$defs/tokenValue" },
+        "infoBg": { "$ref": "#/$defs/tokenValue" }
+      }
     }
   }
 }

@@ -452,7 +452,7 @@ export async function withLifecycleLock(installRoot, operation) {
         continue;
       }
       if (Date.now() - startedAt >= LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for another Rigyn lifecycle operation at ${root}`);
+        throw new Error(`Timed out waiting for another rigyn lifecycle operation at ${root}`);
       }
       await new Promise((resolveWait) => setTimeout(resolveWait, LOCK_WAIT_MS));
     }
@@ -617,7 +617,7 @@ export async function assertNoOtherActiveRuntimes(leaseRoot, marker) {
     live.push(String(lease.pid));
   }
   if (live.length > 0) {
-    throw new Error(`Close the other running Rigyn process${live.length === 1 ? "" : "es"} before continuing (${live.join(", ")})`);
+    throw new Error(`Close the other running rigyn process${live.length === 1 ? "" : "es"} before continuing (${live.join(", ")})`);
   }
 }
 

@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Managed OAuth and refreshed model catalog example for Rigyn",
+  "description": "Managed OAuth and refreshed model catalog example for rigyn",
   "rigyn": { "extensions": ["extensions/index.mjs"] }
 }

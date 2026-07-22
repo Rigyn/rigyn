@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { validateSchema } from "../../src/tools/schema.js";
 import {
   createTheme,
   parseAutomaticThemePair,
@@ -26,8 +27,20 @@ function tokenColors(overrides: Partial<Record<ThemeToken, string | number>> = {
 test("the published theme schema reserves bundled and compatibility names", async () => {
   const schema = JSON.parse(await readFile(new URL("../../resources/schemas/theme-v1.json", import.meta.url), "utf8")) as {
     properties: { name: { not: { enum: string[] } } };
+    $defs: { colors: { properties: Record<string, unknown>; required: string[] } };
   };
-  assert.deepEqual(schema.properties.name.not.enum, ["dark", "light", "mono"]);
+  assert.deepEqual(schema.properties.name.not.enum, ["dark", "light", "mono", "signal"]);
+  assert.deepEqual(Object.keys(schema.$defs.colors.properties), [...THEME_TOKENS]);
+  assert.deepEqual(schema.$defs.colors.required, THEME_TOKENS.filter((token) => token !== "thinkingMax"));
+  const published = schema as unknown as Parameters<typeof validateSchema>[0];
+  assert.deepEqual(validateSchema(published, { name: "schema-tokens", colors: tokenColors() }), []);
+  assert.deepEqual(validateSchema(published, {
+    schemaVersion: 1,
+    name: "schema-roles",
+    vars: { primary: "#123456" },
+    styles: { accent: { foreground: "$primary" } },
+  }), []);
+  assert.notEqual(validateSchema(published, { name: "incomplete", colors: { accent: 81 } }).length, 0);
 });
 
 test("themes honor color and Unicode capability decisions", () => {
@@ -42,6 +55,27 @@ test("themes honor color and Unicode capability decisions", () => {
   assert.match(style(colored, "selection", "selected"), /38;5;16;48;5;255m/u);
   assert.doesNotMatch(style(colored, "toolSuccess", "passed"), /48;/u);
   assert.doesNotMatch(style(colored, "toolError", "failed"), /48;/u);
+});
+
+test("signal makes operational states distinct while retaining non-color glyphs", () => {
+  const signal = createTheme("signal", { color: true, unicode: true });
+  const mono = createTheme("mono", { color: true, unicode: true });
+  assert.equal(signal.name, "signal");
+  assert.equal(signal.getColorMode(), "256color");
+  assert.notEqual(signal.codes.working, mono.codes.working);
+  assert.notEqual(signal.codes.working, signal.codes.success);
+  assert.notEqual(signal.codes.success, signal.codes.error);
+  assert.notEqual(signal.codes.toolPending, signal.codes.toolSuccess);
+  assert.notEqual(signal.codes.toolSuccess, signal.codes.toolError);
+  assert.notEqual(signal.getFgAnsi("toolDiffAdded"), signal.getFgAnsi("toolDiffRemoved"));
+  assert.notEqual(signal.getThinkingBorderColor("minimal")("reasoning"), signal.getThinkingBorderColor("max")("reasoning"));
+  assert.equal(signal.glyphs.success, "✓");
+  assert.equal(signal.glyphs.failure, "✗");
+
+  const plain = createTheme("signal", { color: false, unicode: false });
+  assert.equal(style(plain, "error", "failed"), "failed");
+  assert.equal(plain.glyphs.success, "+");
+  assert.equal(plain.glyphs.failure, "x");
 });
 
 test("live themes expose token colors and composable text styles to direct renderers", () => {
@@ -226,7 +260,7 @@ test("token-shaped themes preserve resolved semantic tokens and honor light base
 test("token-shaped themes validate their complete token, base, variable, and export contracts", () => {
   const missing = tokenColors();
   delete (missing as Partial<Record<ThemeToken, string | number>>).syntaxOperator;
-  for (const name of ["dark", "light", "mono"]) {
+  for (const name of ["dark", "light", "mono", "signal"]) {
     assert.throws(() => parseThemeDefinition({ name, colors: tokenColors() }), /unique lowercase identifier/u);
   }
   assert.throws(() => parseThemeDefinition({ name: "missing", colors: missing }), /missing required tokens: syntaxOperator/u);

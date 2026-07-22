@@ -40,6 +40,7 @@ import {
 } from "../service/agent-session.js";
 import { attachAgentSessionOwner } from "../service/agent-session-owner.js";
 import { SessionManager } from "../storage/session-manager.js";
+import type { ToolExecutionBackend } from "../tools/backend.js";
 import type { HarnessTool } from "../tools/types.js";
 
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
@@ -71,6 +72,8 @@ export interface CreateAgentSessionOptions {
   excludeTools?: string[];
   /** Custom tools registered alongside built-ins and extension tools. */
   customTools?: HarnessTool[];
+  /** Optional host-owned execution boundary for the tools it explicitly claims. */
+  toolBackend?: ToolExecutionBackend;
   /** Resource loader. Default: DefaultResourceLoader with normal discovery. */
   resourceLoader?: ResourceLoader;
   /** Session manager. Default: a new persistent session for cwd. */
@@ -344,6 +347,7 @@ export async function createAgentSession(
       agentDirectory: agentDir,
       settingsManager,
       tools: extraTools,
+      ...(options.toolBackend === undefined ? {} : { toolBackend: options.toolBackend }),
       ...(hasExplicitToolSelection
         ? {
             initialToolSelection: initialActiveTools(
@@ -394,6 +398,7 @@ export { ModelRegistry } from "../providers/public-model-registry.js";
 export { ModelRuntime } from "../providers/model-compat.js";
 export type { ProviderModel } from "../providers/models.js";
 export type { HarnessTool as ToolDefinition } from "../tools/types.js";
+export type { ToolExecutionBackend } from "../tools/backend.js";
 export {
   AgentSessionRuntime,
   createAgentSessionRuntime,

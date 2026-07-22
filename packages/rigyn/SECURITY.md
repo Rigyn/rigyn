@@ -10,10 +10,10 @@ Maintainers should acknowledge a complete report within seven days, establish se
 
 ## Supported versions
 
-Rigyn is a pre-1.0 project. Security fixes target the latest published minor line. Older pre-release lines may require upgrading rather than receiving a backport. The release notes identify security-relevant migrations or mitigations.
+rigyn is a pre-1.0 project. Security fixes target the latest published minor line. Older pre-release lines may require upgrading rather than receiving a backport. The release notes identify security-relevant migrations or mitigations.
 
 ## Security boundary
 
 Runtime extensions and managed packages are trusted local code. They have the invoking user's operating-system access and the complete extension API once enabled. Project-local executable resources stay blocked until the workspace is trusted, but trust is not a process sandbox and package metadata does not define secondary capability tiers. Prefer brokered provider requests when direct credentials are unnecessary. Credential-store handles remain private, and no credential may be included in logs, reports, extension messages, session exports, or vulnerability reproductions. Terminal-input listeners, editor replacement, and custom TUI components expose keyboard and terminal authority, so loading a package that uses them must be treated as granting interactive-terminal control.
 
-For installation and environment-specific diagnostics, see the [installation guide](https://github.com/Rigyn/rigyn/blob/main/packages/rigyn/docs/install.md).
+For installation and environment-specific diagnostics, see the [installation guide](https://github.com/rigyn/rigyn/blob/main/packages/rigyn/docs/install.md).

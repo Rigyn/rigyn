@@ -498,7 +498,7 @@ function messageActivity(entry: SessionMessageEntry): number | undefined {
 }
 
 function invalidSessionFile(path: string): Error {
-  return new Error(`Session file is not a valid Rigyn session: ${path}`);
+  return new Error(`Session file is not a valid rigyn session: ${path}`);
 }
 
 async function readSessionInfo(path: string): Promise<SessionInfo> {
@@ -719,7 +719,7 @@ export class SessionManager {
     this.appendRecovery = loaded.recovery;
     if (this.fileEntries.length === 0) {
       if (statSync(this.sessionFile).size > 0) {
-        throw new Error(`Session file is not a valid Rigyn session: ${this.sessionFile}`);
+        throw new Error(`Session file is not a valid rigyn session: ${this.sessionFile}`);
       }
       const explicit = this.sessionFile;
       this.newSession();

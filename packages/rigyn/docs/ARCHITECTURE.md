@@ -1,6 +1,6 @@
 # Architecture
 
-Rigyn is a single-process application with three front ends—interactive TUI, print/JSON CLI, and newline-delimited JSON RPC—over one provider-neutral `AgentSession` and append-only session manager.
+rigyn is a single-process application with three front ends—interactive TUI, print/JSON CLI, and newline-delimited JSON RPC—over one provider-neutral `AgentSession` and append-only session manager.
 
 ## Request path
 
@@ -100,7 +100,7 @@ The package manager accepts local, npm, and Git sources. It bounds downloads and
 
 ## TUI
 
-The terminal renderer owns an inline transcript, editor, overlay stack, pickers, status line, widgets, notifications, and structural tool/session blocks. Components render semantic roles through the built-in monochrome palette or the selected discovered custom theme.
+The terminal renderer owns an inline transcript, editor, overlay stack, pickers, status line, widgets, notifications, and structural tool/session blocks. Components render semantic roles through the built-in `mono` or operational `signal` palette, or a selected discovered custom theme.
 
 Input decoding handles bracketed paste, wide Unicode, mouse-free navigation, queued messages, image paste, external editor handoff, and resize. Slow work is asynchronous; the editor remains responsive while model catalogs and streams update.
 
@@ -114,4 +114,4 @@ The package is a Node.js 24.15+/26+ local-runtime library. None of its entry poi
 
 The test suite combines focused unit tests with JSONL recovery and migration fixtures, provider wire fixtures, extension reload and package transactions, TUI component tests, PTY terminal scenarios, public API compilation, built-distribution execution, and isolated packed-artifact installation. Release checks run against built JavaScript rather than only TypeScript source.
 
-The deterministic [benchmark suite](https://github.com/Rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md) complements correctness tests with offline outcome checks and startup/reload/resume regression guards. A separate opt-in same-task runner compares two CLIs with one model and verifier without making unsupported superiority claims. CI also enforces independent line, branch, and function floors for the five highest-risk modules rather than one misleading repository-wide percentage.
+The deterministic [benchmark suite](https://github.com/rigyn/rigyn/blob/main/packages/rigyn/benchmarks/README.md) complements correctness tests with offline outcome checks and startup/reload/resume regression guards. A separate opt-in same-task runner compares two CLIs with one model and verifier without making unsupported superiority claims. CI also enforces independent line, branch, and function floors for the five highest-risk modules rather than one misleading repository-wide percentage.

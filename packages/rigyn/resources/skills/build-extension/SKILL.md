@@ -1,11 +1,11 @@
 ---
 name: build-extension
-description: Design, implement, repair, test, or package a Rigyn extension with tools, commands, providers, session behavior, terminal UI, processes, skills, prompts, themes, or a local dashboard.
-compatibility: Rigyn 0.4–0.5; Node.js 24.15+ or 26+ for runtime extensions.
+description: Design, implement, repair, test, or package a rigyn extension with tools, commands, providers, session behavior, terminal UI, processes, skills, prompts, themes, or a local dashboard.
+compatibility: rigyn 0.4–0.5; Node.js 24.15+ or 26+ for runtime extensions.
 allowed-tools: read bash edit write grep find ls
 ---
 
-# Build a Rigyn extension
+# Build a rigyn extension
 
 Deliver a working installed extension, not a scaffold or a second agent harness.
 
@@ -21,7 +21,7 @@ Resolve every relative link from this file.
 
 The installed docs, declarations, and examples are authoritative for this host version. Ignore remembered APIs from other tools.
 
-Bundled examples and installed package files are read-only references. Create the requested product in a fresh directory in the user's active workspace. Never edit the Rigyn master source, installed package, or bundled examples unless the user explicitly asks to maintain those exact files.
+Bundled examples and installed package files are read-only references. Create the requested product in a fresh directory in the user's active workspace. Never edit the rigyn master source, installed package, or bundled examples unless the user explicitly asks to maintain those exact files.
 
 ## Choose a focused base
 
@@ -103,13 +103,13 @@ export default function activate(rigyn) {
 }
 ```
 
-Use `rigyn/extensions` for types and only documented public host subpaths at runtime. Put runtime libraries in `dependencies`, build/test tools in `devDependencies`, and Rigyn itself in peer/development dependencies when declarations are needed. Never import `src/`, `dist/`, or another bundled Rigyn runtime.
+Use `rigyn/extensions` for types and only documented public host subpaths at runtime. Put runtime libraries in `dependencies`, build/test tools in `devDependencies`, and rigyn itself in peer/development dependencies when declarations are needed. Never import `src/`, `dist/`, or another bundled rigyn runtime.
 
 ## Lifecycle requirements
 
 - Activation must be deterministic and fast. Start long-lived work lazily unless it must exist immediately.
 - Register every extension-owned timer, watcher, socket, server, subprocess, and temporary resource with `rigyn.onDispose`.
-- Disposers run after the API is stale. They must release only captured extension-owned resources and must not call Rigyn APIs.
+- Disposers run after the API is stale. They must release only captured extension-owned resources and must not call rigyn APIs.
 - Propagate callback cancellation into tools, process execution, network calls, and queued work.
 - A cancelled operation must settle itself without poisoning a later queued operation.
 - Bound concurrency, duration, request bytes, output bytes, queues, retained snapshots, and collections.
@@ -152,7 +152,7 @@ Use `rigyn/extensions` for types and only documented public host subpaths at run
 
 ## Verification
 
-1. Test the factory through the real direct loader when the installed Rigyn package is resolvable.
+1. Test the factory through the real direct loader when the installed rigyn package is resolvable.
 2. Cover malformed input plus the highest-risk cancellation, cleanup, provider, session, process, or UI boundary.
 3. Prove failed activation commits nothing and a reload failure leaves the live generation usable.
 4. Prove repeated activation/reload does not duplicate registrations or retain resources.

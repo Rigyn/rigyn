@@ -116,7 +116,7 @@ test("comparison configuration keeps task and harness identifiers inside the tem
   assert.equal(parseComparativeLiveConfig(configuration("first.v2", "task_1-fix")).tasks[0]?.id, "task_1-fix");
 });
 
-test("Rigyn JSONL metrics preserve final usage without double counting", () => {
+test("rigyn JSONL metrics preserve final usage without double counting", () => {
   const line = (event: object) => JSON.stringify({ threadId: "thread", event });
   const metrics = parseRigynJsonlMetrics([
     line({ type: "assistant_started", step: 1 }),

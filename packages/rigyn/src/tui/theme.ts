@@ -1,4 +1,4 @@
-import type { ThemeName } from "./types.js";
+import type { BuiltinThemeName, ThemeName } from "./types.js";
 import type { SourceInfo } from "../core/source-info.js";
 
 export type ThemeRole =
@@ -268,10 +268,13 @@ export interface AutomaticThemePair {
 }
 
 export const THEME_SCHEMA_URI = "urn:rigyn:schema:theme:v1";
+export const BUILTIN_THEME_NAMES = ["mono", "signal"] as const satisfies readonly BuiltinThemeName[];
 
 const reset = "\u001b[0m";
 const themeName = /^[a-z][a-z0-9._-]{0,62}$/u;
 const hexColor = /^#[0-9a-f]{6}$/iu;
+const compatibilityThemeNames = new Set(["dark", "light"]);
+const builtinThemeNames = new Set<string>(BUILTIN_THEME_NAMES);
 const REQUIRED_THEME_TOKENS = THEME_TOKENS.filter((token) => token !== "thinkingMax") as readonly Exclude<ThemeToken, "thinkingMax">[];
 export const THEME_ROLES: readonly ThemeRole[] = [
   "title",
@@ -297,6 +300,14 @@ export const THEME_ROLES: readonly ThemeRole[] = [
   "toolError",
 ];
 
+export function isBuiltinThemeName(value: string): value is BuiltinThemeName {
+  return builtinThemeNames.has(value);
+}
+
+function reservedThemeName(value: string): boolean {
+  return compatibilityThemeNames.has(value) || isBuiltinThemeName(value);
+}
+
 /**
  * A paired setting uses `LIGHT/DARK`. Theme names themselves cannot contain a
  * slash, so the form is unambiguous and remains a single backwards-compatible
@@ -318,7 +329,7 @@ function bundledThemeName(value: string): string {
   return value === "dark" || value === "light" ? "mono" : value;
 }
 
-/** Maps the retired color-theme names to Rigyn's single bundled theme. */
+/** Maps retired color-theme names to the monochrome compatibility theme. */
 export function normalizeThemeSetting(value: string): string {
   const pair = parseAutomaticThemePair(value);
   if (pair === undefined) return bundledThemeName(value);
@@ -452,13 +463,13 @@ function color(value: unknown, label: string, empty: boolean): "" | number | `#$
   throw new Error(`${label} must be a 0-255 palette index${empty ? ", an empty default color," : ""} or #RRGGBB`);
 }
 
-function tokenTheme(value: Record<string, unknown>): ThemeDefinition {
+function tokenTheme(value: Record<string, unknown>, allowBuiltinName = false): ThemeDefinition {
   allowed(value, ["$schema", "schemaVersion", "name", "base", "vars", "colors", "export"], "theme");
   if (value.$schema !== undefined && (typeof value.$schema !== "string" || value.$schema.length > 4_096)) {
     throw new Error("theme $schema must be a bounded string");
   }
   if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error("theme schemaVersion must be 1");
-  if (typeof value.name !== "string" || !themeName.test(value.name) || value.name === "dark" || value.name === "light" || value.name === "mono") {
+  if (typeof value.name !== "string" || !themeName.test(value.name) || (!allowBuiltinName && reservedThemeName(value.name))) {
     throw new Error("theme name must be a unique lowercase identifier");
   }
   const base = value.base ?? "dark";
@@ -564,6 +575,69 @@ function tokenTheme(value: Record<string, unknown>): ThemeDefinition {
   };
 }
 
+const signalColors = {
+  accent: 81,
+  border: 241,
+  borderAccent: 81,
+  borderMuted: 241,
+  success: 114,
+  error: 203,
+  warning: 221,
+  muted: 245,
+  dim: 242,
+  text: 252,
+  thinkingText: 117,
+  selectedBg: 24,
+  userMessageBg: 236,
+  userMessageText: 255,
+  customMessageBg: 235,
+  customMessageText: 252,
+  customMessageLabel: 177,
+  toolPendingBg: 235,
+  toolSuccessBg: 22,
+  toolErrorBg: 52,
+  toolTitle: 81,
+  toolOutput: 252,
+  mdHeading: 117,
+  mdLink: 81,
+  mdLinkUrl: 245,
+  mdCode: 215,
+  mdCodeBlock: 252,
+  mdCodeBlockBorder: 241,
+  mdQuote: 250,
+  mdQuoteBorder: 75,
+  mdHr: 241,
+  mdListBullet: 81,
+  toolDiffAdded: 114,
+  toolDiffRemoved: 203,
+  toolDiffContext: 245,
+  syntaxComment: 245,
+  syntaxKeyword: 81,
+  syntaxFunction: 117,
+  syntaxVariable: 252,
+  syntaxString: 114,
+  syntaxNumber: 221,
+  syntaxType: 177,
+  syntaxOperator: 215,
+  syntaxPunctuation: 245,
+  thinkingOff: 242,
+  thinkingMinimal: 117,
+  thinkingLow: 81,
+  thinkingMedium: 75,
+  thinkingHigh: 221,
+  thinkingXhigh: 213,
+  thinkingMax: 203,
+  bashMode: 177,
+} as const satisfies Record<ThemeToken, ThemeColorValue>;
+
+const signalTheme = tokenTheme({
+  schemaVersion: 1,
+  name: "signal",
+  base: "dark",
+  colors: signalColors,
+  export: { pageBg: 233, cardBg: 236, infoBg: 235 },
+}, true);
+
 export function parseThemeDefinition(value: unknown): ThemeDefinition {
   const input = record(value, "theme");
   if (input.colors !== undefined) return tokenTheme(input);
@@ -572,7 +646,7 @@ export function parseThemeDefinition(value: unknown): ThemeDefinition {
     throw new Error("theme $schema must be a bounded string");
   }
   if (input.schemaVersion !== 1) throw new Error("theme schemaVersion must be 1");
-  if (typeof input.name !== "string" || !themeName.test(input.name) || input.name === "dark" || input.name === "light" || input.name === "mono") {
+  if (typeof input.name !== "string" || !themeName.test(input.name) || reservedThemeName(input.name)) {
     throw new Error("theme name must be a unique lowercase identifier");
   }
   const base = input.base ?? "dark";
@@ -753,15 +827,16 @@ export function createTheme(
   definition?: ThemeDefinition,
 ): Theme {
   const resolvedName = definition === undefined ? bundledThemeName(name) : name;
+  const selectedDefinition = definition ?? (resolvedName === "signal" ? signalTheme : undefined);
   const ansi = options.color;
-  if (definition === undefined && name !== "dark" && name !== "light" && name !== "mono") throw new Error(`Unknown theme: ${name}`);
+  if (definition === undefined && !compatibilityThemeNames.has(name) && !isBuiltinThemeName(name)) throw new Error(`Unknown theme: ${name}`);
   if (definition !== undefined && definition.name !== name) throw new Error(`Theme definition does not match ${name}`);
   const codes = ansi
-    ? definition === undefined ? monochromePalette : customCodes(definition)
+    ? selectedDefinition === undefined ? monochromePalette : customCodes(selectedDefinition)
     : Object.fromEntries(THEME_ROLES.map((role) => [role, ""])) as Record<ThemeRole, string>;
-  const tokens = tokenCodes(ansi, codes, definition);
-  const colorMode: ThemeColorMode = definition?.tokens !== undefined
-    && Object.values(definition.tokens).some((value) => typeof value === "string" && value.startsWith("#"))
+  const tokens = tokenCodes(ansi, codes, selectedDefinition);
+  const colorMode: ThemeColorMode = selectedDefinition?.tokens !== undefined
+    && Object.values(selectedDefinition.tokens).some((value) => typeof value === "string" && value.startsWith("#"))
     ? "truecolor"
     : "256color";
   const foreground = (color: ThemeColor): string => {

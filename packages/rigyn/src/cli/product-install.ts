@@ -30,5 +30,5 @@ export async function runProductInstallAction(
     child.once("error", reject);
     child.once("close", (value) => resolve(value ?? 1));
   });
-  if (code !== 0) throw new Error(`Rigyn ${action} failed with exit ${code}`);
+  if (code !== 0) throw new Error(`rigyn ${action} failed with exit ${code}`);
 }

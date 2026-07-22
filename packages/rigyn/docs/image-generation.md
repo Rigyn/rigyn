@@ -32,9 +32,9 @@ for (const item of result.output) {
 
 `generateImages()` always resolves. Authentication, validation, transport, provider, hook, and response failures are represented by `stopReason: "error"` or `"aborted"`, an empty output array, and a bounded `errorMessage`. This makes a one-shot call safe to use in a tool or extension without an unhandled provider rejection.
 
-Image inputs and outputs are base64 data with an explicit `image/*` MIME type. Inputs are validated with the same 8 MiB per-image boundary used by the rest of Rigyn. Remote image URLs are not accepted as generation inputs, and remote or malformed provider image outputs are ignored. Text is normalized before JSON encoding so an unpaired UTF-16 surrogate cannot make a provider request invalid.
+Image inputs and outputs are base64 data with an explicit `image/*` MIME type. Inputs are validated with the same 8 MiB per-image boundary used by the rest of rigyn. Remote image URLs are not accepted as generation inputs, and remote or malformed provider image outputs are ignored. Text is normalized before JSON encoding so an unpaired UTF-16 surrogate cannot make a provider request invalid.
 
-When a provider reports usage, Rigyn returns mutually exclusive input, cache-read, cache-write, and output counters. Cost components are included only when the selected catalog row has usable non-negative per-million-token prices; unknown pricing stays unknown.
+When a provider reports usage, rigyn returns mutually exclusive input, cache-read, cache-write, and output counters. Cost components are included only when the selected catalog row has usable non-negative per-million-token prices; unknown pricing stays unknown.
 
 ## Provider collection and credentials
 
@@ -107,7 +107,7 @@ The explicit API registry dispatches one-shot calls by `model.api` and rejects a
 
 `ImagesOptions` supports cancellation, per-call credentials and environment values, header overrides or suppression, a timeout, bounded retries, a maximum server-requested retry delay, a response-size limit, and async payload/response hooks.
 
-- SDK retries are disabled. Rigyn owns the retry loop so attempts, cancellation, and delay caps are deterministic.
+- SDK retries are disabled. rigyn owns the retry loop so attempts, cancellation, and delay caps are deterministic.
 - `maxRetries` accepts 0 through 10 and defaults to 0.
 - `maxRetryDelayMs` defaults to 60 seconds; 0 disables only this server-delay cap.
 - `timeoutMs` is bounded at ten minutes.
@@ -115,4 +115,4 @@ The explicit API registry dispatches one-shot calls by `model.api` and rejects a
 - The payload hook receives a request-local payload. The selected payload is then detached and Unicode-sanitized through a JSON boundary; a replacement must remain a JSON object within the request-size limit.
 - The response hook receives status and response headers for each observable HTTP attempt. Authentication remains owned by the SDK and credential broker; a custom `Authorization` header is discarded.
 
-OpenRouter is loaded through the exact-pinned OpenAI client only when the first image request is made. Rigyn supplies the endpoint, fetch implementation, credential, zero-SDK-retry policy, bounds, and result normalization; the SDK is a transport dependency rather than the image subsystem's architecture.
+OpenRouter is loaded through the exact-pinned OpenAI client only when the first image request is made. rigyn supplies the endpoint, fetch implementation, credential, zero-SDK-retry policy, bounds, and result normalization; the SDK is a transport dependency rather than the image subsystem's architecture.

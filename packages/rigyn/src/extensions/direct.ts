@@ -16,6 +16,7 @@ import type {
 import type {
   AutocompleteItem,
   AutocompleteProvider,
+  BackgroundComponent,
   Component,
   EditorComponent,
   EditorTheme,
@@ -33,6 +34,7 @@ import type { SlashCommandInfo } from "../core/slash-commands.js";
 import type { CompactionResult } from "../context/public-compaction.js";
 import type { ReadonlyFooterDataProvider } from "../tui/footer-data.js";
 import type { Theme } from "../tui/theme.js";
+import type { BashOperations } from "../tools/builtins/shell.js";
 import type {
   ExtensionModelRegistry,
   ExtensionProviderConfig,
@@ -109,6 +111,7 @@ export interface WorkingIndicatorOptions {
 
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
+export type BackgroundFactory = (tui: TUI, theme: Theme) => BackgroundComponent;
 
 export interface ExtensionUIContext {
   select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
@@ -121,6 +124,7 @@ export interface ExtensionUIContext {
   setWorkingVisible(visible: boolean): void;
   setWorkingIndicator(options?: WorkingIndicatorOptions): void;
   setHiddenThinkingLabel(label?: string): void;
+  setBackground(factory: BackgroundFactory | undefined): void;
   setWidget(key: string, content: string[] | undefined, options?: ExtensionWidgetOptions): void;
   setWidget(
     key: string,
@@ -193,6 +197,8 @@ export interface ExtensionContext {
   sessionManager: ReadonlyExtensionSessionManager;
   modelRegistry: ExtensionModelRegistry;
   model: Model<Api> | undefined;
+  /** Thinking level selected for the current session callback. */
+  readonly thinkingLevel: ThinkingLevel;
   isIdle(): boolean;
   isProjectTrusted(): boolean;
   signal: AbortSignal | undefined;
@@ -574,7 +580,7 @@ export type ExtensionEvent =
 export interface ContextEventResult { messages?: AgentMessage[] }
 export type BeforeProviderRequestEventResult = unknown;
 export interface ToolCallEventResult { block?: boolean; reason?: string }
-export interface UserBashEventResult { operations?: unknown; result?: { output: string; exitCode?: number; cancelled: boolean; truncated: boolean; fullOutputPath?: string } }
+export interface UserBashEventResult { operations?: BashOperations; result?: { output: string; exitCode?: number; cancelled: boolean; truncated: boolean; fullOutputPath?: string } }
 export interface ToolResultEventResult {
   content?: (TextContent | ImageContent)[];
   details?: unknown;
