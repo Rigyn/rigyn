@@ -44,10 +44,10 @@ and do not resolve rigyn from the npm registry. The equivalent version-pinned ma
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-terminal-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-models-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-kernel-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-0.6.0.tgz \
   -- rigyn self-install
 rigyn --version
 ```

@@ -28,7 +28,7 @@ async function fixture(t: TestContext): Promise<{ root: string; log: string }> {
     description: "Author tooling fixture",
     type: "module",
     files: ["extensions"],
-    peerDependencies: { rigyn: ">=0.4.0 <0.6.0" },
+    peerDependencies: { rigyn: ">=0.4.0 <0.7.0" },
     rigyn: { extensions: ["extensions/index.mjs"] },
   }));
   await writeFile(join(root, "extensions", "index.mjs"), `
@@ -53,7 +53,7 @@ test("extension author tooling validates and inspects the exact npm pack file se
   const { root } = await fixture(t);
   const validation = await validateExtensionPackage(root);
   assert.equal(validation.package.id, "author-tool-fixture");
-  assert.equal(validation.package.hostVersionRange, ">=0.4.0 <0.6.0");
+  assert.equal(validation.package.hostVersionRange, ">=0.4.0 <0.7.0");
   assert.equal(validation.compatibility, "compatible");
   assert.deepEqual(validation.integrity, { status: "not-declared", declaredFiles: 0 });
 

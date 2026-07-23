@@ -36,10 +36,10 @@ manual command is:
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-terminal-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-models-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-kernel-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-0.6.0.tgz \
   -- rigyn self-install
 rigyn
 ```
@@ -48,7 +48,7 @@ This uses npm's one-shot package executor with version-pinned GitHub assets; it 
 installation or download a rigyn package from the npm registry.
 
 To install without Node.js or npm, download the standalone archive matching your platform from the
-[v0.5.1 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.5.1), verify it against `SHA256SUMS`, and
+[v0.6.0 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.6.0), verify it against `SHA256SUMS`, and
 extract it. The archive includes its own Node.js runtime and complete production dependency graph. Run `bin/rigyn`
 on Linux or macOS and `bin\rigyn.cmd` on Windows.
 

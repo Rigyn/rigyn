@@ -127,7 +127,7 @@ test("user_bash replaces or handles shortcuts without breaking hidden transcript
   child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
   const submit = (value: string) => child.stdin.write(`${value}\r`);
-  await waitFor(() => output.includes("rigyn 0.5.1 · ready"), () => output.slice(-16 * 1024));
+  await waitFor(() => output.includes("rigyn 0.6.0 · ready"), () => output.slice(-16 * 1024));
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
 
   submit(`!printf visible-original > ${shellQuote(visibleMarker)}`);

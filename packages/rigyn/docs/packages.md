@@ -24,7 +24,7 @@ A complete declaration is:
   "name": "@example/my-extension",
   "version": "1.0.0",
   "type": "module",
-  "peerDependencies": { "rigyn": ">=0.4.0 <0.6.0" },
+  "peerDependencies": { "rigyn": ">=0.4.0 <0.7.0" },
   "rigyn": {
     "extensions": ["extensions/index.mjs"],
     "skills": ["skills"],

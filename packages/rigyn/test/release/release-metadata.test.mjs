@@ -411,7 +411,7 @@ process.stdout.write(JSON.stringify({ execPath: process.execPath, args: process.
 
 test("release metadata policy matches the GitHub artifact contract", async () => {
   const result = await checkReleaseMetadata();
-  assert.equal(result.version, "0.5.1");
+  assert.equal(result.version, "0.6.0");
   assert.equal(result.subpathCount, 22);
   assert.equal(result.targetCount, 6);
   assert.equal(result.nativeTargetCount, 4);
