@@ -31,10 +31,10 @@ archive, and only then invokes the private installer. The equivalent version-pin
 
 ```sh
 npm exec --yes \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-terminal-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-models-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-kernel-0.5.1.tgz \
-  --package=https://github.com/rigyn/rigyn/releases/download/v0.5.1/rigyn-0.5.1.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-terminal-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-models-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-kernel-0.6.0.tgz \
+  --package=https://github.com/rigyn/rigyn/releases/download/v0.6.0/rigyn-0.6.0.tgz \
   -- rigyn self-install
 rigyn --version
 ```
@@ -66,10 +66,10 @@ To verify the complete release before installation, download the wanted artifact
 
 ```sh
 npm exec --yes \
-  --package=./rigyn-terminal-0.5.1.tgz \
-  --package=./rigyn-models-0.5.1.tgz \
-  --package=./rigyn-kernel-0.5.1.tgz \
-  --package=./rigyn-0.5.1.tgz \
+  --package=./rigyn-terminal-0.6.0.tgz \
+  --package=./rigyn-models-0.6.0.tgz \
+  --package=./rigyn-kernel-0.6.0.tgz \
+  --package=./rigyn-0.6.0.tgz \
   -- rigyn self-install
 ```
 

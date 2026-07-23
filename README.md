@@ -28,13 +28,13 @@ irm https://raw.githubusercontent.com/rigyn/rigyn/main/install.ps1 | iex
 
 Neither command needs an npm account or downloads a rigyn package from the npm registry. To install without Node.js
 or npm, download the standalone archive for your platform from the
-[v0.5.1 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.5.1), verify it against the release
+[v0.6.0 GitHub release](https://github.com/rigyn/rigyn/releases/tag/v0.6.0), verify it against the release
 `SHA256SUMS`, and extract it. The archive includes its own Node.js runtime and production dependencies.
 
 ```sh
-tar -xzf rigyn-v0.5.1-linux-x64.tar.gz
+tar -xzf rigyn-v0.6.0-linux-x64.tar.gz
 cd /path/to/your/project
-/path/to/rigyn-v0.5.1-linux-x64/bin/rigyn
+/path/to/rigyn-v0.6.0-linux-x64/bin/rigyn
 ```
 
 Use `bin/rigyn` on Linux or macOS and `bin\rigyn.cmd` on Windows. The

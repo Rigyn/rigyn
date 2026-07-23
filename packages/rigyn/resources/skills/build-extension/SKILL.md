@@ -1,7 +1,7 @@
 ---
 name: build-extension
 description: Design, implement, repair, test, or package a rigyn extension with tools, commands, providers, session behavior, terminal UI, processes, skills, prompts, themes, or a local dashboard.
-compatibility: rigyn 0.4–0.5; Node.js 24.15+ or 26+ for runtime extensions.
+compatibility: rigyn 0.4–0.6; Node.js 24.15+ or 26+ for runtime extensions.
 allowed-tools: read bash edit write grep find ls
 ---
 
@@ -82,7 +82,7 @@ Declare only real resources:
   "version": "1.0.0",
   "type": "module",
   "peerDependencies": {
-    "rigyn": ">=0.4.0 <0.6.0"
+    "rigyn": ">=0.4.0 <0.7.0"
   },
   "rigyn": {
     "extensions": ["extensions/index.mjs"]

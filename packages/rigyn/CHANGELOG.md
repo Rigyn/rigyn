@@ -4,6 +4,8 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ## Unreleased
 
+## [0.6.0] - 2026-07-22
+
 ### Added
 
 - Added the `signal` operational TUI theme alongside the default monochrome `mono` theme, with distinct reasoning, tool, result, warning, diff, selection, message, syntax, and status roles.
@@ -18,6 +20,8 @@ Release-impacting changes are recorded here. The version policy and release proc
 
 ### Fixed
 
+- Made active custom-theme hot reload reliable across watcher-startup races and same-size file writes while ignoring unchanged filesystem events.
+- Preserved visible transcript history when resuming sessions containing large runs of non-display entries under scheduler load.
 - Preserved complete bounded stdout and stderr plus process metadata when a risk-coverage group fails, so an early regression is not hidden by later test output.
 
 ## [0.5.1] - 2026-07-22
