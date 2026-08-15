@@ -1,0 +1,16 @@
+{
+  "name": "@rigyn/example-starter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal rigyn command and tool extension",
+  "scripts": {
+    "test": "node --test checks/runtime.test.mjs"
+  },
+  "peerDependencies": {
+    "rigyn": ">=0.1.0 <0.2.0"
+  },
+  "rigyn": {
+    "extensions": ["extensions/index.mjs"]
+  }
+}

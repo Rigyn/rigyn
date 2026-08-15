@@ -1,0 +1,63 @@
+{
+  "$schema": "https://raw.githubusercontent.com/rigyn/rigyn/v0.1.0/packages/rigyn/resources/schemas/config-v1.json",
+  "transport": "auto",
+  "steeringMode": "one-at-a-time",
+  "followUpMode": "one-at-a-time",
+  "theme": "signal",
+  "compaction": {
+    "enabled": true,
+    "triggerPercent": 85
+  },
+  "branchSummary": {
+    "reserveTokens": 18000,
+    "skipPrompt": false
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "provider": {
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  },
+  "observability": {
+    "level": "debug"
+  },
+  "showCacheMissNotices": false,
+  "quietStartup": false,
+  "defaultProjectTrust": "ask",
+  "collapseChangelog": false,
+  "packages": [],
+  "extensions": [],
+  "skills": [],
+  "prompts": [],
+  "themes": [],
+  "enableSkillCommands": true,
+  "tools": {
+    "excluded": []
+  },
+  "terminal": {
+    "showImages": true,
+    "imageWidthCells": 60,
+    "showTerminalProgress": false
+  },
+  "images": {
+    "autoResize": true,
+    "blockImages": false
+  },
+  "doubleEscapeAction": "tree",
+  "treeFilterMode": "default",
+  "editorPaddingX": 0,
+  "outputPad": 1,
+  "autocompleteMaxVisible": 5,
+  "markdown": {
+    "codeBlockIndent": "  "
+  },
+  "warnings": {
+    "anthropicExtraUsage": true
+  },
+  "httpIdleTimeoutMs": 300000,
+  "websocketConnectTimeoutMs": 30000,
+  "keybindings": {}
+}

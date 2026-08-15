@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn provider, authentication, and request boundary</title>
+  <desc id="desc">Live, cached, or maintained model data enters the provider registry under its documented visibility rules. A selected model and canonical context form one bounded provider request. The credential broker selects a profile and the pinned platform store. Trusted hooks may replace the request body or headers. A bounded transport sends the request, and protocol events return through normalization and state-compatibility checks.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .muted { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .boundary { fill: none; stroke: #090a0a; stroke-width: 3; stroke-dasharray: 12 10; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .connector { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .section { fill: #090a0a; font: 600 24px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 21px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 16px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="956"/>
+  <text class="heading" x="56" y="68">provider / auth / request boundary</text>
+  <path d="M56 88h148v18h-148m52-18v18m48-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="boundary" x="370" y="126" width="1174" height="568"/>
+  <text class="section" x="394" y="160">trusted host process</text>
+
+  <path class="edge" d="M316 260h74"/>
+  <path class="edge" d="M650 260h60"/>
+  <path class="edge" d="M970 260h60"/>
+  <path class="edge" d="M1290 260h70"/>
+  <path class="edge" d="M520 472v-120"/>
+  <path class="edge" d="M840 352v120"/>
+  <path class="edge" d="M1190 352v120"/>
+  <rect class="connector" x="510" y="342" width="20" height="20"/>
+  <rect class="connector" x="830" y="462" width="20" height="20"/>
+  <rect class="connector" x="1180" y="462" width="20" height="20"/>
+
+  <g>
+    <rect class="card" x="56" y="196" width="260" height="128"/>
+    <text class="label" x="80" y="236">Agent context</text>
+    <text class="detail" x="80" y="266">messages · tools</text>
+    <text class="detail" x="80" y="292">model · thinking</text>
+  </g>
+  <path class="edge" d="M316 470h28V300h46"/>
+  <g>
+    <rect class="card" x="56" y="400" width="260" height="166"/>
+    <text class="label" x="80" y="440">Model catalog</text>
+    <text class="detail" x="80" y="470">live: connected picker</text>
+    <text class="detail" x="80" y="496">cached: fast startup</text>
+    <text class="detail" x="80" y="522">maintained: offline</text>
+    <text class="detail" x="80" y="548">bounded + attributed</text>
+  </g>
+  <g>
+    <rect class="muted" x="390" y="196" width="260" height="128"/>
+    <text class="label" x="414" y="236">Provider registry</text>
+    <text class="detail" x="414" y="266">selected model route</text>
+    <text class="detail" x="414" y="292">protocol + compatibility</text>
+  </g>
+  <g>
+    <rect class="card" x="710" y="196" width="260" height="128"/>
+    <text class="label" x="734" y="236">Canonical request</text>
+    <text class="detail" x="734" y="266">bounded context</text>
+    <text class="detail" x="734" y="292">options + provider state</text>
+  </g>
+  <g>
+    <rect class="muted" x="1030" y="196" width="260" height="128"/>
+    <text class="label" x="1054" y="236">Trusted hooks</text>
+    <text class="detail" x="1054" y="266">replace JSON body</text>
+    <text class="detail" x="1054" y="292">mutate complete headers</text>
+  </g>
+  <g>
+    <rect class="card" x="1360" y="196" width="184" height="128"/>
+    <text class="label" x="1384" y="236">Transport</text>
+    <text class="detail" x="1384" y="266">HTTP / WS</text>
+    <text class="detail" x="1384" y="292">bounds + retry</text>
+  </g>
+
+  <g>
+    <rect class="card" x="390" y="472" width="260" height="132"/>
+    <text class="label" x="414" y="512">Credential broker</text>
+    <text class="detail" x="414" y="542">profile · env · OAuth</text>
+    <text class="detail" x="414" y="568">keychain · DPAPI · file</text>
+  </g>
+  <g>
+    <rect class="card" x="710" y="472" width="260" height="132"/>
+    <text class="label" x="734" y="512">Protocol adapter</text>
+    <text class="detail" x="734" y="542">payload + stream parsing</text>
+    <text class="detail" x="734" y="568">tool + usage mapping</text>
+  </g>
+  <g>
+    <rect class="card" x="1030" y="472" width="320" height="132"/>
+    <text class="label" x="1054" y="512">Response observation</text>
+    <text class="detail" x="1054" y="542">trusted hook: full headers</text>
+    <text class="detail" x="1054" y="568">public diagnostics: redacted</text>
+  </g>
+
+  <text class="section" x="56" y="724">return path</text>
+  <path class="edge" d="M1452 324v428h-220"/>
+  <path class="edge" d="M1232 816h-72"/>
+  <path class="edge" d="M840 816h-72"/>
+  <path class="edge" d="M448 816h-72"/>
+  <rect class="connector" x="1442" y="742" width="20" height="20"/>
+  <g>
+    <rect class="card" x="1232" y="752" width="260" height="128"/>
+    <text class="label" x="1256" y="792">Provider stream</text>
+    <text class="detail" x="1256" y="822">native events</text>
+    <text class="detail" x="1256" y="848">terminal + opaque state</text>
+  </g>
+  <g>
+    <rect class="muted" x="840" y="752" width="320" height="128"/>
+    <text class="label" x="864" y="792">Normalized events</text>
+    <text class="detail" x="864" y="822">text · reasoning · tools</text>
+    <text class="detail" x="864" y="848">usage · errors · finish</text>
+  </g>
+  <g>
+    <rect class="card" x="448" y="752" width="320" height="128"/>
+    <text class="label" x="472" y="792">State compatibility</text>
+    <text class="detail" x="472" y="822">provider · model · protocol</text>
+    <text class="detail" x="472" y="848">tools · stable prefix</text>
+  </g>
+  <g>
+    <rect class="card" x="56" y="752" width="320" height="128"/>
+    <text class="label" x="80" y="792">Agent session</text>
+    <text class="detail" x="80" y="822">durable canonical output</text>
+    <text class="detail" x="80" y="848">safe public projections</text>
+  </g>
+
+  <rect class="card" x="56" y="900" width="1488" height="52"/>
+  <text class="detail" x="80" y="922">Secrets stay inside trusted auth and transport boundaries.</text>
+  <text class="detail" x="80" y="944">Extensions are trusted code; exported diagnostics stay allowlisted and redacted.</text>
+</svg>

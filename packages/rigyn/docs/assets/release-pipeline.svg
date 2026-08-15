@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn release pipeline</title>
+  <desc id="desc">GitHub Actions dependency graph. Regression guards, two additional platform checks, and four native builds feed staging. Staging supplies the Linux full-check platform leg, then feeds six standalone builds and finalization. Finalization feeds six-platform verification. A tag push publishes only after staging and verification have both passed.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .muted-card { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .connector { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 20px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="696"/>
+  <text class="heading" x="56" y="68">release job dependencies</text>
+  <path d="M56 88h148v18h-148m52-18v18m48-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <path class="edge" d="M270 158h20v172h20"/>
+  <path class="edge" d="M270 330h40"/>
+  <path class="edge" d="M270 502h20v-172h20"/>
+  <path class="edge" d="M530 330h40"/>
+  <path class="edge" d="M790 330h40"/>
+  <path class="edge" d="M1050 330h40"/>
+  <path class="edge" d="M1310 330h40"/>
+  <path class="edge" d="M420 270v-142h520v142"/>
+  <path class="edge" d="M420 390v206h1040v-206"/>
+
+  <rect class="connector" x="280" y="320" width="20" height="20"/>
+  <rect class="connector" x="410" y="118" width="20" height="20"/>
+  <rect class="connector" x="930" y="118" width="20" height="20"/>
+  <rect class="connector" x="410" y="586" width="20" height="20"/>
+  <rect class="connector" x="1450" y="586" width="20" height="20"/>
+
+  <g>
+    <rect class="card" x="50" y="108" width="220" height="100"/>
+    <text class="label" x="72" y="148">Regression</text>
+    <text class="label" x="72" y="178">guards</text>
+    <text class="detail" x="72" y="198">coverage · runtime</text>
+  </g>
+
+  <g>
+    <rect class="card" x="50" y="280" width="220" height="100"/>
+    <text class="label" x="72" y="320">Checks ×2</text>
+    <text class="detail" x="72" y="350">macOS · Windows</text>
+    <text class="detail" x="72" y="372">Node 26.7</text>
+  </g>
+
+  <g>
+    <rect class="card" x="50" y="452" width="220" height="100"/>
+    <text class="label" x="72" y="492">Native ×4</text>
+    <text class="detail" x="72" y="522">macOS + Windows</text>
+    <text class="detail" x="72" y="544">x64 + arm64</text>
+  </g>
+
+  <g>
+    <rect class="muted-card" x="310" y="270" width="220" height="120"/>
+    <text class="label" x="332" y="316">Stage release</text>
+    <text class="detail" x="332" y="346">Linux · packages</text>
+    <text class="detail" x="332" y="370">source archive</text>
+  </g>
+
+  <g>
+    <rect class="card" x="570" y="270" width="220" height="120"/>
+    <text class="label" x="592" y="310">Standalone</text>
+    <text class="detail" x="592" y="338">6 target builds</text>
+    <text class="detail" x="592" y="360">Linux · macOS</text>
+    <text class="detail" x="592" y="382">Windows</text>
+  </g>
+
+  <g>
+    <rect class="muted-card" x="830" y="270" width="220" height="120"/>
+    <text class="label" x="852" y="316">Finalize</text>
+    <text class="detail" x="852" y="346">SBOM · checksums</text>
+    <text class="detail" x="852" y="370">manifest · marker</text>
+  </g>
+
+  <g>
+    <rect class="card" x="1090" y="270" width="220" height="120"/>
+    <text class="label" x="1112" y="316">Verify ×6</text>
+    <text class="detail" x="1112" y="346">runtime matrix</text>
+    <text class="detail" x="1112" y="370">source build gate</text>
+  </g>
+
+  <g>
+    <rect class="muted-card" x="1350" y="270" width="200" height="120"/>
+    <text class="label" x="1372" y="316">Publish</text>
+    <text class="detail" x="1372" y="346">tag push only</text>
+    <text class="detail" x="1372" y="370">attest · release</text>
+  </g>
+
+  <rect class="card" x="570" y="636" width="580" height="44"/>
+  <text class="note" x="598" y="665">workflow_dispatch stops after verification</text>
+</svg>

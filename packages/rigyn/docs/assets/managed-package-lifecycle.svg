@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn managed extension package lifecycle</title>
+  <desc id="desc">A trusted workspace declares package sources. Only an explicit update follows moving selectors or local edits. Update resolves immutable identities, materializes packages in isolated bounded staging, validates resources and production dependencies, activation-tests the complete candidate set, then atomically swaps the installed set and lock. Failure preserves the previous set. Normal startup and reconcile consume only the immutable lock and verify installed bytes and provenance.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .muted { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #090a0a; stroke-width: 3; stroke-dasharray: 12 10; }
+      .connector { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .section { fill: #090a0a; font: 600 24px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 21px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 16px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="916"/>
+  <text class="heading" x="56" y="68">managed package lifecycle</text>
+  <path d="M56 88h148v18h-148m52-18v18m48-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <text class="section" x="56" y="148">explicit update path</text>
+  <path class="edge" d="M304 238h54"/>
+  <path class="edge" d="M626 238h54"/>
+  <path class="edge" d="M948 238h54"/>
+  <path class="edge" d="M1270 238h54"/>
+  <g>
+    <rect class="card" x="56" y="180" width="248" height="116"/>
+    <text class="label" x="80" y="220">packages.json</text>
+    <text class="detail" x="80" y="250">reviewed declarations</text>
+    <text class="detail" x="80" y="274">trusted workspace only</text>
+  </g>
+  <g>
+    <rect class="card" x="358" y="180" width="268" height="116"/>
+    <text class="label" x="382" y="220">Resolve update</text>
+    <text class="detail" x="382" y="250">moving selector / ref</text>
+    <text class="detail" x="382" y="274">becomes exact identity</text>
+  </g>
+  <g>
+    <rect class="muted" x="680" y="180" width="268" height="116"/>
+    <text class="label" x="704" y="220">Private staging</text>
+    <text class="detail" x="704" y="250">isolated npm + Git</text>
+    <text class="detail" x="704" y="274">scripts off · quotas</text>
+  </g>
+  <g>
+    <rect class="card" x="1002" y="180" width="268" height="116"/>
+    <text class="label" x="1026" y="220">Verify candidate</text>
+    <text class="detail" x="1026" y="250">digests · resources</text>
+    <text class="detail" x="1026" y="274">deps · activate set</text>
+  </g>
+  <g>
+    <rect class="muted" x="1324" y="180" width="220" height="116"/>
+    <text class="label" x="1348" y="220">Atomic commit</text>
+    <text class="detail" x="1348" y="250">installed set</text>
+    <text class="detail" x="1348" y="274">+ immutable lock</text>
+  </g>
+
+  <path class="edge" d="M1136 296v76H814v54"/>
+  <path class="edge" d="M1434 296v76h-150v54"/>
+  <rect class="connector" x="1126" y="362" width="20" height="20"/>
+  <g>
+    <rect class="card" x="644" y="426" width="340" height="96"/>
+    <text class="label" x="668" y="464">Any check fails</text>
+    <text class="detail" x="668" y="494">drop staging · keep prior</text>
+  </g>
+  <g>
+    <rect class="card" x="1114" y="426" width="340" height="96"/>
+    <text class="label" x="1138" y="464">Commit succeeds</text>
+    <text class="detail" x="1138" y="494">new lock is startup authority</text>
+  </g>
+
+  <path class="dash" d="M56 570h1488"/>
+  <text class="section" x="56" y="620">startup and reconcile path</text>
+  <path class="edge" d="M326 712h82"/>
+  <path class="edge" d="M716 712h82"/>
+  <path class="edge" d="M1106 712h82"/>
+  <g>
+    <rect class="card" x="56" y="652" width="270" height="120"/>
+    <text class="label" x="80" y="692">Immutable lock</text>
+    <text class="detail" x="80" y="722">exact version / rev</text>
+    <text class="detail" x="80" y="746">archive + content digests</text>
+  </g>
+  <g>
+    <rect class="card" x="408" y="652" width="308" height="120"/>
+    <text class="label" x="432" y="692">Verify installed set</text>
+    <text class="detail" x="432" y="722">bytes · provenance</text>
+    <text class="detail" x="432" y="746">platform attestation</text>
+  </g>
+  <g>
+    <rect class="muted" x="798" y="652" width="308" height="120"/>
+    <text class="label" x="822" y="692">Activate generation</text>
+    <text class="detail" x="822" y="722">project trust required</text>
+    <text class="detail" x="822" y="746">transactional runtime load</text>
+  </g>
+  <g>
+    <rect class="card" x="1188" y="652" width="356" height="120"/>
+    <text class="label" x="1212" y="692">Live contributions</text>
+    <text class="detail" x="1212" y="722">commands · tools · resources</text>
+    <text class="detail" x="1212" y="746">providers · events · UI</text>
+  </g>
+
+  <rect class="card" x="56" y="822" width="1488" height="72"/>
+  <text class="note" x="80" y="852">Startup never follows a branch, selector, or changed local directory.</text>
+  <text class="detail" x="80" y="878">Only an explicit update creates a new immutable lock identity. Runtime code remains trusted in-process code.</text>
+</svg>

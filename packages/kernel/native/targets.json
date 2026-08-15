@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "platform": "win32",
+      "arch": "x64",
+      "source": "native/win32/src/rigyn-job-launcher.c",
+      "output": "native/win32/prebuilds/win32-x64/rigyn-job-launcher.exe"
+    },
+    {
+      "platform": "win32",
+      "arch": "arm64",
+      "source": "native/win32/src/rigyn-job-launcher.c",
+      "output": "native/win32/prebuilds/win32-arm64/rigyn-job-launcher.exe"
+    }
+  ]
+}

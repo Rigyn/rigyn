@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn package dependency layers</title>
+  <desc id="desc">The rigyn product package depends on the kernel, models, and terminal packages. The kernel also depends on models. Models and terminal remain independent lower-level packages. External provider dependencies are outside these internal package arrows.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 27px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 21px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 20px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="876"/>
+  <text class="heading" x="56" y="70">package dependency layers</text>
+  <path d="M56 92h166v18H56m58-18v18m50-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="strong" x="470" y="142" width="660" height="154"/>
+  <text class="label" x="510" y="194">rigyn</text>
+  <text class="detail" x="510" y="232">AgentSession · auth · tools · extensions</text>
+  <text class="detail" x="510" y="266">six modes · policy · generations</text>
+
+  <path class="edge" d="M650 296v86H340v72"/>
+  <path class="edge" d="M800 296v158"/>
+  <path class="edge" d="M950 296v86h310v72"/>
+  <rect class="port" x="640" y="372" width="20" height="20"/>
+  <rect class="port" x="790" y="372" width="20" height="20"/>
+  <rect class="port" x="940" y="372" width="20" height="20"/>
+
+  <rect class="card" x="110" y="454" width="460" height="194"/>
+  <text class="label" x="148" y="506">@rigyn/kernel</text>
+  <text class="detail" x="148" y="546">runtime engine · agent loop</text>
+  <text class="detail" x="148" y="580">V4 journal · queues · recovery</text>
+  <text class="detail" x="148" y="614">context · tool execution ports</text>
+
+  <rect class="card" x="570" y="454" width="460" height="194"/>
+  <text class="label" x="608" y="506">@rigyn/models</text>
+  <text class="detail" x="608" y="546">canonical model and message types</text>
+  <text class="detail" x="608" y="580">provider transports</text>
+  <text class="detail" x="608" y="614">auth · normalized events</text>
+
+  <rect class="card" x="1030" y="454" width="460" height="194"/>
+  <text class="label" x="1068" y="506">@rigyn/terminal</text>
+  <text class="detail" x="1068" y="546">raw terminal lifecycle</text>
+  <text class="detail" x="1068" y="580">cell-aware diff rendering</text>
+  <text class="detail" x="1068" y="614">input · editor · overlays</text>
+
+  <path class="edge" d="M340 648v64h460v-64"/>
+  <text class="note" x="110" y="720">kernel imports models</text>
+  <text class="note" x="1090" y="704">terminal has no agent dependency</text>
+  <text class="note" x="430" y="810">arrows show internal package imports only</text>
+  <text class="note" x="302" y="842">models and product adapters also import external provider dependencies</text>
+</svg>

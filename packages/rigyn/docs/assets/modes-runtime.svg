@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn six modes and lifecycle ownership</title>
+  <desc id="desc">Interactive, print, JSON, RPC, serve, and SDK all reach one AgentSession and one kernel runtime engine. Print and JSON share an adapter. Each mode keeps its own input, output, terminal, and disposal rules.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 19px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="896"/>
+  <text class="heading" x="56" y="70">six modes, one runtime engine</text>
+  <path d="M56 92h178v18H56m58-18v18m58-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="card" x="56" y="154" width="280" height="206"/>
+  <text class="label" x="78" y="200">interactive TUI</text>
+  <text class="detail" x="78" y="238">raw terminal</text>
+  <text class="detail" x="78" y="270">discovery after UI</text>
+  <text class="detail" x="78" y="302">CLI owns lifecycle</text>
+  <text class="small" x="78" y="336">public mode keeps core</text>
+
+  <rect class="card" x="354" y="154" width="280" height="206"/>
+  <text class="label" x="376" y="200">print + JSON</text>
+  <text class="detail" x="376" y="238">shared one-shot adapter</text>
+  <text class="detail" x="376" y="270">one prompt sequence</text>
+  <text class="detail" x="376" y="302">adapter disposes</text>
+
+  <rect class="card" x="652" y="154" width="280" height="206"/>
+  <text class="label" x="674" y="200">RPC</text>
+  <text class="detail" x="674" y="238">stdin / stdout JSONL</text>
+  <text class="detail" x="674" y="270">commands can overlap</text>
+  <text class="detail" x="674" y="302">adapter disposes</text>
+
+  <rect class="card" x="950" y="154" width="280" height="206"/>
+  <text class="label" x="972" y="200">serve · HTTP/SSE</text>
+  <text class="detail" x="972" y="238">authenticated loopback</text>
+  <text class="detail" x="972" y="270">live event streams</text>
+  <text class="detail" x="972" y="302">service owns sessions</text>
+
+  <rect class="card" x="1248" y="154" width="280" height="206"/>
+  <text class="label" x="1270" y="200">SDK / embedding</text>
+  <text class="detail" x="1270" y="238">in-process API</text>
+  <text class="detail" x="1270" y="270">no terminal owner</text>
+  <text class="detail" x="1270" y="302">caller closes runtime</text>
+
+  <path class="line" d="M196 360v98h1192v-98"/>
+  <path class="line" d="M494 360v98"/>
+  <path class="line" d="M792 360v98"/>
+  <path class="line" d="M1090 360v98"/>
+  <path class="edge" d="M800 458v72"/>
+  <rect class="port" x="790" y="448" width="20" height="20"/>
+
+  <rect class="strong" x="442" y="530" width="716" height="148"/>
+  <text class="label" x="482" y="578">AgentSession + kernel RuntimeEngine</text>
+  <text class="detail" x="482" y="618">provider · ToolCoordinator · compaction · V4</text>
+  <text class="small" x="482" y="650">mode adapters keep distinct I/O and ownership</text>
+
+  <path class="edge" d="M642 678v88"/>
+  <path class="edge" d="M958 678v88"/>
+  <rect class="card" x="282" y="766" width="518" height="94"/>
+  <text class="label" x="314" y="808">persistent SessionManager</text>
+  <text class="detail" x="314" y="838">strict V4 JSONL journal</text>
+  <rect class="card" x="800" y="766" width="518" height="94"/>
+  <text class="label" x="832" y="808">in-memory SessionManager</text>
+  <text class="detail" x="832" y="838">same V4 reducer · no file</text>
+</svg>

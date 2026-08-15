@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn compaction flow</title>
+  <desc id="desc">Context pressure leads to a bounded summary view, a tool-safe retained boundary, summary generation, validation, and one V4 commit. The commit adds a compaction node and selects it as the main head. Reconstruction uses the summary and retained node while all older commits remain unchanged.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 19px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="956"/>
+  <text class="heading" x="56" y="70">compaction: plan, validate, append</text>
+  <path d="M56 92h190v18H56m62-18v18m60-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="card" x="56" y="154" width="278" height="146"/>
+  <text class="label" x="86" y="200">1 · pressure</text>
+  <text class="detail" x="86" y="238">context window</text>
+  <text class="detail" x="86" y="268">minus output reserve</text>
+
+  <path class="edge" d="M334 227h54"/>
+  <rect class="card" x="388" y="154" width="278" height="146"/>
+  <text class="label" x="418" y="200">2 · project</text>
+  <text class="detail" x="418" y="238">bound old results</text>
+  <text class="detail" x="418" y="268">V4 journal unchanged</text>
+
+  <path class="edge" d="M666 227h54"/>
+  <rect class="strong" x="720" y="154" width="344" height="146"/>
+  <text class="label" x="750" y="200">3 · choose boundary</text>
+  <text class="detail" x="750" y="238">keep complete turns</text>
+  <text class="detail" x="750" y="268">keep tool pairs intact</text>
+
+  <path class="edge" d="M1064 227h54"/>
+  <rect class="card" x="1118" y="154" width="426" height="146"/>
+  <text class="label" x="1148" y="200">4 · summary request</text>
+  <text class="detail" x="1148" y="238">selected source messages</text>
+  <text class="detail" x="1148" y="268">previous summary + optional focus</text>
+
+  <path class="edge" d="M1331 300v116H1042"/>
+  <rect class="card" x="720" y="416" width="322" height="162"/>
+  <text class="label" x="750" y="462">5 · validate</text>
+  <text class="detail" x="750" y="500">exact source IDs</text>
+  <text class="detail" x="750" y="530">new ID · text shape</text>
+  <text class="detail" x="750" y="560">summary · target budgets</text>
+
+  <path class="edge" d="M720 497H540"/>
+  <rect class="strong" x="56" y="416" width="484" height="162"/>
+  <text class="label" x="86" y="462">6 · append V4 commit</text>
+  <text class="detail" x="86" y="500">compaction node + main head</text>
+  <text class="detail" x="86" y="530">summary · retained ID · usage?</text>
+  <text class="small" x="86" y="560">source IDs are plan-only, not durable</text>
+
+  <path class="edge" d="M298 578v120"/>
+  <rect class="card" x="56" y="698" width="484" height="164"/>
+  <text class="label" x="86" y="744">7 · reconstruct context</text>
+  <text class="detail" x="86" y="782">synthetic summary first</text>
+  <text class="detail" x="86" y="812">retained branch from boundary</text>
+  <text class="detail" x="86" y="842">then later reachable nodes</text>
+
+  <path class="line" d="M540 780h232"/>
+  <rect class="port" x="762" y="770" width="20" height="20"/>
+  <rect class="card" x="782" y="698" width="762" height="164"/>
+  <text class="label" x="816" y="744">durable history remains append-only</text>
+  <text class="detail" x="816" y="782">older commits and nodes stay in the session tree</text>
+  <text class="detail" x="816" y="812">compaction changes provider projection, not history</text>
+  <text class="detail" x="816" y="842">a later plan receives the previous summary separately</text>
+
+  <path class="edge" d="M1163 698V632H882v-54"/>
+  <text class="small" x="1030" y="622">later compaction</text>
+  <rect class="port" x="872" y="622" width="20" height="20"/>
+
+  <rect class="card" x="720" y="900" width="824" height="40"/>
+  <text class="small" x="746" y="927">failure before append leaves the original branch authoritative</text>
+</svg>

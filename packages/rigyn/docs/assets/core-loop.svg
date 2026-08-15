@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1100" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn one-engine request and tool loop</title>
+  <desc id="desc">Six operating modes reach one AgentSession and one kernel runtime engine. AgentSession records V4 operation state, the kernel engine runs provider turns, ToolCoordinator validates and schedules every model tool call, and bounded events return to each host.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .diamond { fill: #090a0a; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 26px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 20px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="1076"/>
+  <text class="heading" x="56" y="70">request → one engine → tool loop</text>
+  <path d="M56 92h188v18H56m64-18v18m58-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="card" x="56" y="142" width="280" height="112"/>
+  <text class="label" x="78" y="186">interactive TUI</text>
+  <text class="detail" x="78" y="222">terminal adapter</text>
+  <rect class="card" x="354" y="142" width="280" height="112"/>
+  <text class="label" x="376" y="186">print / JSON</text>
+  <text class="detail" x="376" y="222">one owned run</text>
+  <rect class="card" x="652" y="142" width="280" height="112"/>
+  <text class="label" x="674" y="186">RPC</text>
+  <text class="detail" x="674" y="222">line-record bridge</text>
+  <rect class="card" x="950" y="142" width="280" height="112"/>
+  <text class="label" x="972" y="186">HTTP / SSE</text>
+  <text class="detail" x="972" y="222">loopback service</text>
+  <rect class="card" x="1248" y="142" width="280" height="112"/>
+  <text class="label" x="1270" y="186">SDK / embedding</text>
+  <text class="detail" x="1270" y="222">caller-owned runtime</text>
+
+  <path class="line" d="M196 254v52h1192v-52"/>
+  <path class="line" d="M494 254v52"/>
+  <path class="line" d="M792 254v52"/>
+  <path class="line" d="M1090 254v52"/>
+  <path class="edge" d="M773 306v62"/>
+  <rect class="port" x="763" y="296" width="20" height="20"/>
+
+  <rect class="strong" x="542" y="368" width="462" height="120"/>
+  <text class="label" x="582" y="414">AgentSession</text>
+  <text class="detail" x="582" y="450">policy · queues · V4 operation</text>
+  <text class="small" x="582" y="476">one product-level session coordinator</text>
+
+  <path class="edge" d="M542 428H374"/>
+  <rect class="card" x="56" y="354" width="318" height="148"/>
+  <text class="label" x="88" y="400">SessionManager</text>
+  <text class="detail" x="88" y="438">branch · V4 journal</text>
+  <text class="detail" x="88" y="470">persistent or in-memory</text>
+
+  <path class="edge" d="M773 488v72"/>
+  <rect class="strong" x="542" y="560" width="462" height="126"/>
+  <text class="label" x="582" y="606">Kernel RuntimeEngine</text>
+  <text class="detail" x="582" y="642">context · budget · provider turns</text>
+  <text class="small" x="582" y="670">the only provider-neutral agent loop</text>
+
+  <path class="edge" d="M1004 614h166"/>
+  <rect class="card" x="1170" y="544" width="374" height="142"/>
+  <text class="label" x="1202" y="590">ProviderRegistry</text>
+  <text class="detail" x="1202" y="628">runtime adapter</text>
+  <text class="detail" x="1202" y="658">normalized stream events</text>
+
+  <path class="edge" d="M1357 686v96H1004"/>
+  <text class="small" x="1084" y="746">stream: text · reasoning · tools · usage</text>
+
+  <rect class="card" x="542" y="782" width="462" height="144"/>
+  <text class="label" x="582" y="828">ToolCoordinator</text>
+  <text class="detail" x="582" y="866">prepare · validate · intercept</text>
+  <text class="detail" x="582" y="898">revalidate · claims · safe waves</text>
+
+  <path class="edge" d="M1004 854h166"/>
+  <rect class="card" x="1170" y="782" width="374" height="144"/>
+  <text class="label" x="1202" y="828">tool implementation</text>
+  <text class="detail" x="1202" y="866">local or claimed backend</text>
+  <text class="detail" x="1202" y="898">bounded result + progress</text>
+
+  <path class="edge" d="M1170 912h-102v74H773v-60"/>
+  <text class="small" x="818" y="978">settle effect · append result · continue</text>
+  <rect class="port" x="1058" y="902" width="20" height="20"/>
+
+  <path class="edge" d="M542 646H374"/>
+  <rect class="card" x="56" y="574" width="318" height="144"/>
+  <text class="label" x="88" y="620">SessionEventSink</text>
+  <text class="detail" x="88" y="658">required journal first</text>
+  <text class="detail" x="88" y="690">publish bounded envelopes</text>
+
+  <path class="edge" d="M56 646H30V306h176"/>
+  <path class="diamond" d="m773 1020 16 16-16 16-16-16z"/>
+  <text class="small" x="808" y="1043">terminal outcome, retry, or queue drain</text>
+</svg>

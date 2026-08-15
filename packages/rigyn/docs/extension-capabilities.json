@@ -1,0 +1,295 @@
+{
+  "schemaVersion": 1,
+  "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+  "capabilities": [
+    {
+      "id": "direct-package-loading",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": [],
+      "docs": ["docs/packages.md", "docs/extensions.md"],
+      "examples": ["examples/starter"],
+      "tests": ["test/core/package-manager-activation.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "lifecycle-events-and-disposal",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on", "onDispose"],
+      "eventContracts": [
+        { "name": "session_start", "resultType": "void" },
+        { "name": "session_info_changed", "resultType": "void" },
+        { "name": "session_shutdown", "resultType": "void" },
+        { "name": "agent_start", "resultType": "void" },
+        { "name": "agent_end", "resultType": "void" },
+        { "name": "agent_settled", "resultType": "void" },
+        { "name": "turn_start", "resultType": "void" },
+        { "name": "turn_end", "resultType": "void" },
+        { "name": "message_start", "resultType": "void" },
+        { "name": "message_update", "resultType": "void" },
+        { "name": "message_end", "resultType": "MessageEndEventResult | void" },
+        { "name": "tool_execution_start", "resultType": "void" },
+        { "name": "tool_execution_update", "resultType": "void" },
+        { "name": "tool_execution_end", "resultType": "void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/lifecycle-events"],
+      "tests": ["test/extensions/runtime.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "commands-and-flags",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["registerCommand", "registerFlag", "getFlag", "getCommands"],
+      "docs": ["docs/extensions.md"],
+      "examples": ["examples/command-controls", "examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "interactive-shortcuts",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["registerShortcut"],
+      "docs": ["docs/extension-api.md", "docs/keybindings.md"],
+      "examples": ["examples/command-controls"],
+      "tests": ["test/cli/extension-shortcuts.test.ts", "test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "tools-and-renderers",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["registerTool", "getActiveTools", "getAllTools", "setActiveTools"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/tool-rendering", "examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "input-and-tool-guards",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on"],
+      "eventContracts": [
+        { "name": "input", "resultType": "InputEventResult | void" },
+        { "name": "user_bash", "resultType": "UserBashEventResult | void" },
+        { "name": "tool_call", "resultType": "ToolCallEventResult | void" },
+        { "name": "tool_result", "resultType": "ToolResultEventResult | void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/input-guard"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "trusted-ui-surfaces",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/ui-surfaces"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "context-and-compaction",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on", "getContextUsage", "compact", "getSystemPrompt"],
+      "eventContracts": [
+        { "name": "context", "resultType": "ContextEventResult | void" },
+        { "name": "before_agent_start", "resultType": "BeforeAgentStartEventResult | void" },
+        { "name": "session_before_compact", "resultType": "SessionBeforeCompactResult | void" },
+        { "name": "session_compact", "resultType": "void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/compaction.md", "docs/extension-events.md"],
+      "examples": ["examples/context-compaction"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "custom-messages-and-events",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["events", "sendMessage", "registerMessageRenderer", "registerMarkdownTransformer"],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/messages-bus"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "model-and-thinking-controls",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["setModel", "getThinkingLevel", "setThinkingLevel"],
+      "eventContracts": [
+        { "name": "model_select", "resultType": "void" },
+        { "name": "thinking_level_select", "resultType": "void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/providers.md", "docs/extension-events.md"],
+      "examples": ["examples/model-controls", "examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "provider-replacement",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["registerProvider", "unregisterProvider"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/provider-override"],
+      "tests": ["test/cli/runtime-provider-overlay.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "trusted-editor-ui",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui", "setEditorComponent"],
+      "docs": ["docs/extensions.md", "docs/tui.md"],
+      "examples": ["examples/raw-editor-ui"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "current-session-inspection",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["sessionManager"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-jsonl"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "session-flow-controls",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "sdk"],
+      "apiMembers": ["newSession", "fork", "navigateTree", "switchSession", "refresh"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-control", "examples/session-lifecycle"],
+      "tests": ["test/extensions/direct-example-packages.test.ts", "test/cli/runtime-direct-extensions.test.ts"]
+    },
+    {
+      "id": "session-metadata-and-entries",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["appendEntry", "setSessionName", "getSessionName", "setLabel", "registerEntryRenderer"],
+      "docs": ["docs/extensions.md", "docs/sessions.md"],
+      "examples": ["examples/session-metadata"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "bounded-process-execution",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["exec", "processes"],
+      "docs": ["docs/extensions.md", "docs/extension-api.md", "docs/packages.md"],
+      "examples": ["examples/subprocess-workers"],
+      "tests": ["test/extensions/direct-example-packages.test.ts", "test/extensions/foundation-conformance.test.ts", "test/extensions/managed-process-runtime.test.ts", "test/process/command.test.ts", "test/process/managed-process.test.ts"]
+    },
+    {
+      "id": "dynamic-and-unified-resource-discovery",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on", "getDiscoveryView"],
+      "eventContracts": [
+        { "name": "resources_discover", "resultType": "ResourcesDiscoverResult | void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/packages.md", "docs/extension-events.md"],
+      "examples": ["examples/dynamic-package", "examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts", "test/core/resource-loader.test.ts", "test/sdk/agent-session.test.ts"]
+    },
+    {
+      "id": "provider-wire-lifecycle",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on"],
+      "eventContracts": [
+        { "name": "before_provider_request", "resultType": "BeforeProviderRequestEventResult | void" },
+        { "name": "before_provider_headers", "resultType": "void" },
+        { "name": "after_provider_response", "resultType": "void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/extension-events.md"],
+      "examples": ["examples/provider-hooks"],
+      "tests": ["test/extensions/direct-event-conformance.test.ts", "test/extensions/direct-example-packages.test.ts", "test/sdk/agent-session.test.ts"]
+    },
+    {
+      "id": "runtime-catalog-and-message-delivery",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["getActiveTools", "getAllTools", "setActiveTools", "getCommands", "getDiscoveryView", "setModel", "sendUserMessage"],
+      "docs": ["docs/extensions.md", "docs/resource-catalog.md"],
+      "examples": ["examples/runtime-catalog"],
+      "tests": ["test/extensions/direct-factory-contract.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "session-transition-lifecycle",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on", "compact", "navigateTree"],
+      "eventContracts": [
+        { "name": "session_before_switch", "resultType": "SessionBeforeSwitchResult | void" },
+        { "name": "session_before_fork", "resultType": "SessionBeforeForkResult | void" },
+        { "name": "session_before_tree", "resultType": "SessionBeforeTreeResult | void" },
+        { "name": "session_tree", "resultType": "void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/session-jsonl.md", "docs/extension-events.md"],
+      "examples": ["examples/session-lifecycle"],
+      "tests": ["test/extensions/direct-event-conformance.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "managed-provider-catalog",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["registerProvider"],
+      "docs": ["docs/extensions.md", "docs/providers.md"],
+      "examples": ["examples/provider-catalog"],
+      "tests": ["test/extensions/runtime-managed-provider-auth.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "terminal-workbench-ui",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui"],
+      "apiMembers": ["ui"],
+      "docs": ["docs/tui.md", "docs/themes.md", "docs/keybindings.md"],
+      "examples": ["examples/terminal-workbench"],
+      "tests": ["test/tui/direct-ui.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "project-trust-decision",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["on"],
+      "eventContracts": [
+        { "name": "project_trust", "resultType": "ProjectTrustEventResult | void" }
+      ],
+      "docs": ["docs/extensions.md", "docs/configuration.md", "docs/extension-events.md"],
+      "examples": ["examples/project-trust"],
+      "tests": ["test/extensions/runtime-project-trust.test.ts", "test/extensions/direct-example-packages.test.ts"]
+    },
+    {
+      "id": "extension-owned-state-and-policy",
+      "status": "implemented",
+      "authoring": true,
+      "hosts": ["tui", "print", "json", "rpc", "serve", "sdk"],
+      "apiMembers": ["config", "paths", "registerTool", "registerCommand", "on"],
+      "docs": ["docs/extensions.md", "docs/extension-api.md", "docs/cookbook.md"],
+      "examples": ["examples/state-and-policy"],
+      "tests": ["test/extensions/runtime-authoring.test.ts", "test/extensions/direct-example-packages.test.ts", "test/extensions/config-store-runtime.test.ts", "test/extensions/config-store.test.ts", "test/extensions/foundation-conformance.test.ts"]
+    }
+  ]
+}

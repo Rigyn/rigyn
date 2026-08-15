@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rigyn/rigyn/blob/main/packages/rigyn/benchmarks/offline-release-report.schema.json",
+  "title": "Rigyn offline release evaluation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "suite",
+    "purpose",
+    "deterministic",
+    "environment",
+    "build",
+    "focusedChecks",
+    "offlineHarness",
+    "runtimePerformance",
+    "areas",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "suite": { "const": "offline-release-v1" },
+    "purpose": { "const": "credential-free-release-regression-gate" },
+    "deterministic": { "const": true },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "architecture",
+        "node",
+        "credentialSources",
+        "externalNetwork",
+        "loopbackFixtures",
+        "runtimePerformanceSamples"
+      ],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 },
+        "node": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "credentialSources": { "const": "isolated" },
+        "externalNetwork": { "const": "blocked" },
+        "loopbackFixtures": { "const": true },
+        "runtimePerformanceSamples": { "const": 1 }
+      }
+    },
+    "build": { "$ref": "#/$defs/component" },
+    "focusedChecks": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/focusedCheck" }
+    },
+    "offlineHarness": { "$ref": "#/$defs/component" },
+    "runtimePerformance": { "$ref": "#/$defs/component" },
+    "areas": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/area" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["areas", "passedAreas", "components", "passedComponents", "passed"],
+      "properties": {
+        "areas": { "const": 7 },
+        "passedAreas": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "components": { "const": 10 },
+        "passedComponents": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "passed": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "areaId": {
+      "enum": [
+        "tui-lifecycle",
+        "tool-coordinator",
+        "compaction-cache",
+        "v4-recovery",
+        "portable-plugins",
+        "observability",
+        "provider-auth-contracts"
+      ]
+    },
+    "area": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "evidence", "passed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/areaId" },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "passed": { "type": "boolean" }
+      }
+    },
+    "focusedCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "areas",
+        "testFiles",
+        "durationMs",
+        "exitCode",
+        "signal",
+        "timedOut",
+        "passed"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "areas": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/areaId" }
+        },
+        "testFiles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "exitCode": { "type": ["integer", "null"] },
+        "signal": { "type": ["string", "null"] },
+        "timedOut": { "type": "boolean" },
+        "passed": { "type": "boolean" },
+        "failure": { "type": "string", "minLength": 1 }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["durationMs", "passed"],
+      "properties": {
+        "durationMs": { "type": "number", "minimum": 0 },
+        "passed": { "type": "boolean" },
+        "report": { "type": "object" },
+        "failure": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 930" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn RPC process and record flow</title>
+  <desc id="desc">A host or RpcClient starts rigyn in RPC mode. Line-delimited commands travel over standard input. Correlated responses, raw agent events, bash updates, and extension UI requests travel over standard output. Human diagnostics use standard error.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 19px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="906"/>
+  <text class="heading" x="56" y="70">RPC records and ownership</text>
+  <path d="M56 92h172v18H56m56-18v18m56-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="card" x="56" y="170" width="414" height="250"/>
+  <text class="label" x="88" y="218">host process</text>
+  <text class="detail" x="88" y="258">custom client or RpcClient</text>
+  <text class="detail" x="88" y="292">tracks request IDs</text>
+  <text class="detail" x="88" y="326">handles raw events</text>
+  <text class="detail" x="88" y="360">answers extension UI requests</text>
+  <text class="small" x="88" y="396">owns child start and stop</text>
+
+  <rect class="strong" x="1130" y="170" width="414" height="250"/>
+  <text class="label" x="1162" y="218">rigyn --mode rpc</text>
+  <text class="detail" x="1162" y="258">RpcRuntimeDispatcher</text>
+  <text class="detail" x="1162" y="292">AgentSessionRuntime</text>
+  <text class="detail" x="1162" y="326">extension UI bridge</text>
+  <text class="detail" x="1162" y="360">protocol-only stdout</text>
+  <text class="small" x="1162" y="396">owns runtime shutdown</text>
+
+  <path class="edge" d="M470 226h660"/>
+  <rect class="port" x="790" y="216" width="20" height="20"/>
+  <text class="label" x="620" y="204">stdin · command JSON + LF</text>
+
+  <path class="edge" d="M1130 306H470"/>
+  <rect class="port" x="790" y="296" width="20" height="20"/>
+  <text class="label" x="548" y="350">stdout · response / event JSON + LF</text>
+
+  <path class="edge" d="M470 388h660"/>
+  <text class="small" x="594" y="414">extension_ui_response uses request ID</text>
+
+  <rect class="card" x="56" y="514" width="462" height="250"/>
+  <text class="label" x="88" y="560">correlated records</text>
+  <text class="detail" x="88" y="600">response envelopes use command id</text>
+  <text class="detail" x="88" y="634">bash updates use originating id</text>
+  <text class="detail" x="88" y="668">UI requests use their own id</text>
+  <text class="detail" x="88" y="702">typed client maps req_1, req_2, …</text>
+  <text class="small" x="88" y="728">response confirms acceptance</text>
+  <text class="small" x="88" y="750">events report progress</text>
+
+  <rect class="card" x="569" y="514" width="462" height="250"/>
+  <text class="label" x="601" y="560">uncorrelated stream</text>
+  <text class="detail" x="601" y="600">raw AgentSessionEvent records</text>
+  <text class="detail" x="601" y="634">agent_settled marks idle</text>
+  <text class="detail" x="601" y="668">commands can overlap</text>
+  <text class="detail" x="601" y="702">unknown late responses ignored</text>
+
+  <rect class="card" x="1082" y="514" width="462" height="250"/>
+  <text class="label" x="1114" y="560">separate diagnostics</text>
+  <text class="detail" x="1114" y="600">stderr is never protocol data</text>
+  <text class="detail" x="1114" y="634">invalid JSON returns parse failure</text>
+  <text class="detail" x="1114" y="668">EOF begins owned shutdown</text>
+  <text class="detail" x="1114" y="702">Node 26.7 relay keeps piped input</text>
+
+  <path class="line" d="M800 420v70"/>
+  <path class="line" d="M287 490h1026"/>
+  <path class="line" d="M287 490v24M800 490v24M1313 490v24"/>
+  <rect class="port" x="790" y="480" width="20" height="20"/>
+
+  <rect class="strong" x="326" y="822" width="948" height="54"/>
+  <text class="small" x="362" y="855">LF delimits records; CRLF input is accepted and normalized.</text>
+</svg>

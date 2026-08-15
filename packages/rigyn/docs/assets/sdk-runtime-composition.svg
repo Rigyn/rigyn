@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn SDK and runtime composition</title>
+  <desc id="desc">Caller-owned or default model, resource, settings, V4 session, tool, and provider-wire services enter createAgentSession directly or through a reusable services bundle. The factory returns one AgentSession. AgentSession applies product policy and delegates provider turns to the kernel runtime engine. SDK, embedding, runtime owners, and ready-made modes use this same composition.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .muted { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .connector { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .section { fill: #090a0a; font: 600 24px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 21px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 16px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="876"/>
+  <text class="heading" x="56" y="68">SDK / runtime composition</text>
+  <path d="M56 88h148v18h-148m52-18v18m48-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <text class="section" x="56" y="148">service inputs</text>
+  <g>
+    <rect class="card" x="56" y="174" width="270" height="106"/>
+    <text class="label" x="80" y="204">ModelRuntime</text>
+    <text class="detail" x="80" y="228">providers · auth</text>
+    <text class="detail" x="80" y="250">model catalog</text>
+    <text class="detail" x="80" y="272">caller-owned / default</text>
+  </g>
+  <g>
+    <rect class="card" x="350" y="174" width="270" height="106"/>
+    <text class="label" x="374" y="204">ResourceLoader</text>
+    <text class="detail" x="374" y="228">extensions · skills</text>
+    <text class="detail" x="374" y="250">prompts · themes</text>
+    <text class="detail" x="374" y="272">context files</text>
+  </g>
+  <g>
+    <rect class="card" x="644" y="174" width="270" height="106"/>
+    <text class="label" x="668" y="212">Session + settings</text>
+    <text class="detail" x="668" y="242">V4 journal · workspace</text>
+    <text class="detail" x="668" y="266">runtime preferences</text>
+  </g>
+  <g>
+    <rect class="card" x="938" y="174" width="270" height="106"/>
+    <text class="label" x="962" y="204">Tools + backend</text>
+    <text class="detail" x="962" y="232">ToolCoordinator · claims</text>
+    <text class="detail" x="962" y="258">built-ins · custom tools</text>
+  </g>
+  <g>
+    <rect class="card" x="1232" y="174" width="312" height="106"/>
+    <text class="label" x="1256" y="212">Provider wire</text>
+    <text class="detail" x="1256" y="242">lifecycle · transport</text>
+    <text class="detail" x="1256" y="266">trusted request hooks</text>
+  </g>
+
+  <path class="edge" d="M191 280v82h465"/>
+  <path class="edge" d="M485 280v62h171"/>
+  <path class="edge" d="M779 280v62h-123"/>
+  <path class="edge" d="M1073 280v62h-417"/>
+  <path class="edge" d="M1388 280v82h-732"/>
+  <rect class="connector" x="646" y="332" width="20" height="20"/>
+
+  <g>
+    <rect class="muted" x="430" y="362" width="452" height="126"/>
+    <text class="label" x="454" y="402">createAgentSession()</text>
+    <text class="detail" x="454" y="432">or use reusable services</text>
+    <text class="detail" x="454" y="458">resolve · bind · clamp · own cleanup</text>
+  </g>
+  <g>
+    <rect class="card" x="950" y="362" width="438" height="126"/>
+    <text class="label" x="974" y="402">Reusable services bundle</text>
+    <text class="detail" x="974" y="432">createAgentSessionServices()</text>
+    <text class="detail" x="974" y="458">caller retains service ownership</text>
+  </g>
+  <path class="edge" d="M950 425h-68"/>
+  <path class="edge" d="M656 488v74"/>
+
+  <g>
+    <rect class="muted" x="430" y="562" width="452" height="152"/>
+    <text class="label" x="454" y="602">AgentSession</text>
+    <text class="detail" x="454" y="632">product policy · kernel engine</text>
+    <text class="detail" x="454" y="658">ToolCoordinator · V4 · compaction</text>
+    <text class="detail" x="454" y="684">extensions · refresh · events · close</text>
+  </g>
+  <g>
+    <rect class="card" x="950" y="562" width="438" height="152"/>
+    <text class="label" x="974" y="602">Construction result</text>
+    <text class="detail" x="974" y="632">session</text>
+    <text class="detail" x="974" y="658">extensionsResult snapshot</text>
+    <text class="detail" x="974" y="684">modelFallbackMessage?</text>
+  </g>
+  <path class="edge" d="M882 638h68"/>
+
+  <text class="section" x="56" y="768">application surfaces</text>
+  <path class="edge" d="M430 638H258v126"/>
+  <path class="edge" d="M656 714v50"/>
+  <path class="edge" d="M882 638h-10v126h258"/>
+  <rect class="connector" x="646" y="754" width="20" height="20"/>
+  <g>
+    <rect class="card" x="56" y="790" width="270" height="70"/>
+    <text class="label" x="80" y="830">SDK application</text>
+    <text class="detail" x="80" y="852">direct session control</text>
+  </g>
+  <g>
+    <rect class="card" x="350" y="790" width="306" height="70"/>
+    <text class="label" x="374" y="830">Embedding facade</text>
+    <text class="detail" x="374" y="852">narrow active-session view</text>
+  </g>
+  <g>
+    <rect class="card" x="680" y="790" width="380" height="70"/>
+    <text class="label" x="704" y="830">AgentSessionRuntime</text>
+    <text class="detail" x="704" y="852">replacement + lifecycle owner</text>
+  </g>
+  <g>
+    <rect class="card" x="1084" y="790" width="460" height="70"/>
+    <text class="label" x="1108" y="830">Ready-made modes</text>
+    <text class="detail" x="1108" y="852">interactive · print · JSON · RPC · serve</text>
+  </g>
+</svg>

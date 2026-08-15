@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rigyn:schema:theme:v1",
+  "title": "Rigyn theme definition",
+  "description": "A semantic-token theme or a role-style compatibility theme.",
+  "oneOf": [
+    { "$ref": "#/$defs/semanticTheme" },
+    { "$ref": "#/$defs/roleTheme" }
+  ],
+  "$defs": {
+    "schemaUri": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "themeName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,62}$",
+      "not": { "enum": ["dark", "light", "mono", "signal"] }
+    },
+    "base": {
+      "enum": ["dark", "light"]
+    },
+    "paletteColor": {
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "maximum": 255 },
+        { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+      ]
+    },
+    "foregroundColor": {
+      "oneOf": [
+        { "$ref": "#/$defs/paletteColor" },
+        { "const": "" }
+      ]
+    },
+    "styleColor": {
+      "oneOf": [
+        { "$ref": "#/$defs/foregroundColor" },
+        { "type": "string", "pattern": "^\\$[A-Za-z][A-Za-z0-9_.-]{0,62}$" }
+      ]
+    },
+    "styleBackground": {
+      "oneOf": [
+        { "$ref": "#/$defs/paletteColor" },
+        { "type": "string", "pattern": "^\\$[A-Za-z][A-Za-z0-9_.-]{0,62}$" }
+      ]
+    },
+    "styleVariables": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,62}$" },
+      "additionalProperties": { "$ref": "#/$defs/styleColor" }
+    },
+    "styleDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "background": { "$ref": "#/$defs/styleBackground" },
+        "bold": { "type": "boolean" },
+        "foreground": { "$ref": "#/$defs/styleColor" },
+        "italic": { "type": "boolean" }
+      }
+    },
+    "roleStyles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "accent",
+          "assistant",
+          "border",
+          "code",
+          "editor",
+          "editorActive",
+          "error",
+          "info",
+          "link",
+          "muted",
+          "scrollbar",
+          "selection",
+          "success",
+          "title",
+          "toolError",
+          "toolPending",
+          "toolRunning",
+          "toolSuccess",
+          "user",
+          "userMessage",
+          "warning",
+          "working"
+        ]
+      },
+      "additionalProperties": { "$ref": "#/$defs/styleDeclaration" }
+    },
+    "roleTheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "schemaVersion", "styles"],
+      "properties": {
+        "$schema": { "$ref": "#/$defs/schemaUri" },
+        "base": { "$ref": "#/$defs/base" },
+        "name": { "$ref": "#/$defs/themeName" },
+        "schemaVersion": { "const": 1 },
+        "styles": { "$ref": "#/$defs/roleStyles" },
+        "vars": { "$ref": "#/$defs/styleVariables" }
+      }
+    },
+    "semanticValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/foregroundColor" },
+        {
+          "type": "string",
+          "description": "A bare variable name of at most 1024 Unicode code points.",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[^#\\u0000][^\\u0000]{0,1023}$"
+        }
+      ]
+    },
+    "semanticVariables": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/semanticValue" }
+    },
+    "semanticColors": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "accent",
+          "bashMode",
+          "border",
+          "borderAccent",
+          "borderMuted",
+          "customMessageBg",
+          "customMessageLabel",
+          "customMessageText",
+          "dim",
+          "error",
+          "mdCode",
+          "mdCodeBlock",
+          "mdCodeBlockBorder",
+          "mdHeading",
+          "mdHr",
+          "mdLink",
+          "mdLinkUrl",
+          "mdListBullet",
+          "mdQuote",
+          "mdQuoteBorder",
+          "muted",
+          "scrollbarThumb",
+          "selectedBg",
+          "success",
+          "syntaxComment",
+          "syntaxFunction",
+          "syntaxKeyword",
+          "syntaxNumber",
+          "syntaxOperator",
+          "syntaxPunctuation",
+          "syntaxString",
+          "syntaxType",
+          "syntaxVariable",
+          "text",
+          "thinkingHigh",
+          "thinkingLow",
+          "thinkingMax",
+          "thinkingMedium",
+          "thinkingMinimal",
+          "thinkingOff",
+          "thinkingText",
+          "thinkingXhigh",
+          "toolDiffAdded",
+          "toolDiffContext",
+          "toolDiffRemoved",
+          "toolErrorBg",
+          "toolOutput",
+          "toolPendingBg",
+          "toolSuccessBg",
+          "toolTitle",
+          "userMessageBg",
+          "userMessageText",
+          "warning"
+        ]
+      },
+      "additionalProperties": { "$ref": "#/$defs/semanticValue" },
+      "allOf": [
+        {
+          "required": [
+            "accent",
+            "border",
+            "borderAccent",
+            "borderMuted",
+            "dim",
+            "error",
+            "muted",
+            "success",
+            "text",
+            "thinkingText",
+            "warning"
+          ]
+        },
+        {
+          "required": [
+            "customMessageBg",
+            "customMessageLabel",
+            "customMessageText",
+            "selectedBg",
+            "userMessageBg",
+            "userMessageText"
+          ]
+        },
+        {
+          "required": [
+            "toolErrorBg",
+            "toolOutput",
+            "toolPendingBg",
+            "toolSuccessBg",
+            "toolTitle"
+          ]
+        },
+        {
+          "required": [
+            "mdCode",
+            "mdCodeBlock",
+            "mdCodeBlockBorder",
+            "mdHeading",
+            "mdHr",
+            "mdLink",
+            "mdLinkUrl",
+            "mdListBullet",
+            "mdQuote",
+            "mdQuoteBorder"
+          ]
+        },
+        {
+          "required": ["toolDiffAdded", "toolDiffContext", "toolDiffRemoved"]
+        },
+        {
+          "required": [
+            "syntaxComment",
+            "syntaxFunction",
+            "syntaxKeyword",
+            "syntaxNumber",
+            "syntaxOperator",
+            "syntaxPunctuation",
+            "syntaxString",
+            "syntaxType",
+            "syntaxVariable"
+          ]
+        },
+        {
+          "required": [
+            "bashMode",
+            "thinkingHigh",
+            "thinkingLow",
+            "thinkingMedium",
+            "thinkingMinimal",
+            "thinkingOff",
+            "thinkingXhigh"
+          ]
+        }
+      ]
+    },
+    "exportColors": {
+      "type": "object",
+      "propertyNames": { "enum": ["cardBg", "infoBg", "pageBg"] },
+      "additionalProperties": { "$ref": "#/$defs/semanticValue" }
+    },
+    "semanticTheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["colors", "name"],
+      "properties": {
+        "$schema": { "$ref": "#/$defs/schemaUri" },
+        "base": { "$ref": "#/$defs/base" },
+        "colors": { "$ref": "#/$defs/semanticColors" },
+        "export": { "$ref": "#/$defs/exportColors" },
+        "name": { "$ref": "#/$defs/themeName" },
+        "schemaVersion": { "const": 1 },
+        "vars": { "$ref": "#/$defs/semanticVariables" }
+      }
+    }
+  }
+}

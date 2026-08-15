@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 960" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn external tool backend flow</title>
+  <desc id="desc">Every model tool call enters ToolCoordinator. It prepares, validates, intercepts, revalidates, records resource claims, and emits durable lifecycle observations. Only tools claimed by an ExternalToolBackend cross that boundary. The backend starts fixed arguments without a shell or inherited environment and accepts one bounded JSON response. Failure never falls back to local execution.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 19px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="936"/>
+  <text class="heading" x="56" y="70">external execution backend</text>
+  <path d="M56 92h178v18H56m58-18v18m58-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <rect class="card" x="56" y="170" width="326" height="176"/>
+  <text class="label" x="86" y="216">model tool call</text>
+  <text class="detail" x="86" y="254">name + JSON input</text>
+  <text class="detail" x="86" y="286">call ID + workspace</text>
+  <text class="small" x="86" y="320">no execution yet</text>
+
+  <path class="edge" d="M382 258h62"/>
+  <rect class="strong" x="444" y="170" width="390" height="176"/>
+  <text class="label" x="474" y="216">ToolCoordinator</text>
+  <text class="detail" x="474" y="254">prepare · validate</text>
+  <text class="detail" x="474" y="286">intercept · revalidate · claims</text>
+  <text class="small" x="474" y="320">route only claimed tools</text>
+
+  <path class="edge" d="M834 258h62"/>
+  <rect class="card" x="896" y="170" width="648" height="176"/>
+  <text class="label" x="926" y="216">ExternalToolBackend</text>
+  <text class="detail" x="926" y="254">fixed argv · no shell · empty inherited env</text>
+  <text class="detail" x="926" y="286">timeout · output bound · process-tree termination</text>
+  <text class="small" x="926" y="320">one request object in, one result object out</text>
+
+  <path class="edge" d="M1220 346v96"/>
+  <rect class="strong" x="896" y="442" width="648" height="196"/>
+  <text class="label" x="926" y="488">actual boundary command</text>
+  <text class="detail" x="926" y="526">container · fixed SSH · custom boundary</text>
+  <text class="detail" x="926" y="560">worker runs inside the authority you configured</text>
+  <text class="detail" x="926" y="594">the bundled worker alone is not a sandbox</text>
+
+  <path class="edge" d="M896 540H648"/>
+  <rect class="card" x="56" y="442" width="592" height="196"/>
+  <text class="label" x="86" y="488">bounded result returns to the loop</text>
+  <text class="detail" x="86" y="526">content · status · isError · metadata?</text>
+  <text class="detail" x="86" y="560">bad response or process failure is visible</text>
+  <text class="detail" x="86" y="594">claimed tools never fall back locally</text>
+
+  <rect class="card" x="56" y="732" width="706" height="142"/>
+  <text class="label" x="86" y="778">local tool path</text>
+  <text class="detail" x="86" y="816">used only when the backend does not claim that tool</text>
+  <text class="small" x="86" y="848">normal local tool implementation and filesystem policy apply</text>
+
+  <rect class="card" x="838" y="732" width="706" height="142"/>
+  <text class="label" x="868" y="778">outside this routing contract</text>
+  <text class="detail" x="868" y="816">trusted extension JavaScript · rigyn.exec</text>
+  <text class="small" x="868" y="848">these remain host-process authority unless separately isolated</text>
+
+  <path class="line" d="M1220 638v38H1191v56"/>
+  <rect class="port" x="1210" y="666" width="20" height="20"/>
+
+  <text class="small" x="56" y="916">The executable you configure—not ExternalToolBackend by itself—defines the security boundary.</text>
+</svg>

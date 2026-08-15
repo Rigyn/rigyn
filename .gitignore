@@ -1,0 +1,15 @@
+.rigyn/
+.release/
+.env
+.env.*
+!.env.example
+.npmrc
+.DS_Store
+*.tgz
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+coverage/
+dist/
+node_modules/
+*.log

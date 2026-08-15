@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/terminal/tsconfig.build.json" },
+    { "path": "./packages/models/tsconfig.build.json" },
+    { "path": "./packages/kernel/tsconfig.build.json" },
+    { "path": "./packages/rigyn/tsconfig.json" }
+  ]
+}

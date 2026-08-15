@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/rigyn/rigyn/v0.1.0/packages/rigyn/resources/schemas/config-v1.json",
+  "title": "rigyn configuration",
+  "description": "Editor schema for rigyn user and trusted-project config.json files. Null inherits from the lower-precedence scope or the runtime default.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "nullableBoolean": {
+      "type": ["boolean", "null"]
+    },
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "nullableNonNegativeInteger": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "nullableStringArray": {
+      "type": ["array", "null"],
+      "items": { "type": "string" }
+    },
+    "packageSource": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": {
+            "source": { "type": "string", "pattern": "\\S" },
+            "autoload": { "type": "boolean" },
+            "manifest": { "const": "legacy" },
+            "extensions": { "type": "array", "items": { "type": "string" } },
+            "prompts": { "type": "array", "items": { "type": "string" } },
+            "skills": { "type": "array", "items": { "type": "string" } },
+            "themes": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "keybinding": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "\\S" },
+        {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "pattern": "\\S" }
+        }
+      ]
+    },
+    "timeout": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "number", "minimum": 0, "maximum": 2147483647 },
+        {
+          "type": "string",
+          "pattern": "^\\s*(?:disabled|(?:(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?))?\\s*$"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "$schema": {
+      "const": "https://raw.githubusercontent.com/rigyn/rigyn/v0.1.0/packages/rigyn/resources/schemas/config-v1.json"
+    },
+    "lastChangelogVersion": { "$ref": "#/$defs/nullableString" },
+    "defaultProvider": { "$ref": "#/$defs/nullableString" },
+    "defaultModel": { "$ref": "#/$defs/nullableString" },
+    "defaultThinkingLevel": {
+      "type": ["string", "null"],
+      "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", null]
+    },
+    "transport": {
+      "type": ["string", "null"],
+      "enum": ["auto", "sse", "websocket", "websocket-cached", null],
+      "default": "auto"
+    },
+    "steeringMode": {
+      "type": ["string", "null"],
+      "enum": ["all", "one-at-a-time", null]
+    },
+    "followUpMode": {
+      "type": ["string", "null"],
+      "enum": ["all", "one-at-a-time", null]
+    },
+    "theme": { "$ref": "#/$defs/nullableString" },
+    "compaction": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "$ref": "#/$defs/nullableBoolean" },
+        "triggerPercent": {
+          "type": ["integer", "null"],
+          "minimum": 50,
+          "maximum": 95
+        },
+        "reserveTokens": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "recentTokens": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "branchSummary": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "reserveTokens": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "skipPrompt": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "retry": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "$ref": "#/$defs/nullableBoolean" },
+        "maxRetries": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740990
+        },
+        "baseDelayMs": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "provider": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "timeoutMs": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "maxRetries": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 9007199254740990
+            },
+            "maxRetryDelayMs": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 2147483647
+            }
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": ["string", "null"],
+          "enum": ["off", "error", "info", "debug", null]
+        }
+      }
+    },
+    "showCacheMissNotices": { "$ref": "#/$defs/nullableBoolean" },
+    "externalEditor": { "$ref": "#/$defs/nullableString" },
+    "shellPath": { "$ref": "#/$defs/nullableString" },
+    "quietStartup": { "$ref": "#/$defs/nullableBoolean" },
+    "defaultProjectTrust": {
+      "type": ["string", "null"],
+      "enum": ["ask", "always", "never", null]
+    },
+    "shellCommandPrefix": { "$ref": "#/$defs/nullableString" },
+    "npmCommand": { "$ref": "#/$defs/nullableStringArray" },
+    "collapseChangelog": { "$ref": "#/$defs/nullableBoolean" },
+    "packages": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/packageSource" }
+    },
+    "extensions": { "$ref": "#/$defs/nullableStringArray" },
+    "skills": { "$ref": "#/$defs/nullableStringArray" },
+    "prompts": { "$ref": "#/$defs/nullableStringArray" },
+    "themes": { "$ref": "#/$defs/nullableStringArray" },
+    "enableSkillCommands": { "$ref": "#/$defs/nullableBoolean" },
+    "tools": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "pattern": "\\S" }
+        },
+        "excluded": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "terminal": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "showImages": { "$ref": "#/$defs/nullableBoolean" },
+        "imageWidthCells": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "clearOnShrink": { "$ref": "#/$defs/nullableBoolean" },
+        "showTerminalProgress": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "images": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "autoResize": { "$ref": "#/$defs/nullableBoolean" },
+        "blockImages": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "enabledModels": { "$ref": "#/$defs/nullableStringArray" },
+    "doubleEscapeAction": {
+      "type": ["string", "null"],
+      "enum": ["fork", "tree", "none", null]
+    },
+    "treeFilterMode": {
+      "type": ["string", "null"],
+      "enum": ["default", "no-tools", "user-only", "labeled-only", "all", null]
+    },
+    "thinkingBudgets": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "minimal": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "low": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "medium": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "high": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "xhigh": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "max": { "$ref": "#/$defs/nullableNonNegativeInteger" }
+      }
+    },
+    "editorPaddingX": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 3
+    },
+    "outputPad": {
+      "type": ["integer", "null"],
+      "enum": [0, 1, null]
+    },
+    "autocompleteMaxVisible": {
+      "type": ["integer", "null"],
+      "minimum": 3,
+      "maximum": 20
+    },
+    "showHardwareCursor": { "$ref": "#/$defs/nullableBoolean" },
+    "markdown": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "codeBlockIndent": {
+          "type": ["string", "null"],
+          "pattern": "^ {0,8}$"
+        }
+      }
+    },
+    "warnings": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "anthropicExtraUsage": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "sessionDir": { "$ref": "#/$defs/nullableString" },
+    "httpProxy": { "$ref": "#/$defs/nullableString" },
+    "httpIdleTimeoutMs": { "$ref": "#/$defs/timeout" },
+    "websocketConnectTimeoutMs": { "$ref": "#/$defs/timeout" },
+    "keybindings": {
+      "type": ["object", "null"],
+      "additionalProperties": { "$ref": "#/$defs/keybinding" }
+    }
+  }
+}

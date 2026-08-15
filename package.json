@@ -1,0 +1,45 @@
+{
+  "name": "rigyn-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "clean": "npm run clean --workspaces --if-present",
+    "build": "npm run build --workspace @rigyn/terminal && npm run build:offline --workspace @rigyn/models && npm run build --workspace @rigyn/kernel && npm run build --workspace rigyn",
+    "check": "npm run check:dependencies && npm run check:workspaces && npm run build && npm run check --workspace @rigyn/terminal && npm run check --workspace @rigyn/models && npm run check --workspace @rigyn/kernel && npm run check --workspace rigyn",
+    "check:dependencies": "node scripts/check-dependency-policy.mjs",
+    "check:workspaces": "node scripts/check-workspace-boundaries.mjs",
+    "install:user": "node packages/rigyn/scripts/install-user.mjs",
+    "update:user": "node packages/rigyn/scripts/update-user.mjs",
+    "uninstall:user": "node packages/rigyn/scripts/uninstall-user.mjs --yes",
+    "benchmark:release-offline": "npm run benchmark:release-offline --workspace rigyn",
+    "benchmark:runtime": "npm run benchmark:runtime --workspace rigyn",
+    "release:stage": "node scripts/stage-release.mjs",
+    "release:source": "node scripts/source-archive.mjs",
+    "release:standalone": "node scripts/build-standalone.mjs",
+    "release:finalize": "node scripts/finalize-release.mjs",
+    "release:verify": "node scripts/verify-release-artifact.mjs",
+    "test": "npm test --workspaces --if-present",
+    "test:coverage:risk": "npm run build --workspace @rigyn/terminal && npm run build:offline --workspace @rigyn/models && npm run build --workspace @rigyn/kernel && npm run build --workspace rigyn && npm run test:coverage:risk --workspace rigyn",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=26.7.0"
+  },
+  "allowScripts": {
+    "@google/genai": false,
+    "esbuild": false,
+    "fsevents": false,
+    "protobufjs": false
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "c8": "12.0.0",
+    "monocart-coverage-reports": "2.12.12",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  }
+}

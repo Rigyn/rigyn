@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn TUI input, streaming, and render ownership</title>
+  <desc id="desc">Decoded terminal input becomes a TUI action and then an AgentSession prompt. Live events and resumed V4 history enter one TUI model. One differential renderer owns the retained transcript, live stream, composer, overlays, and footer.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .strong { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; }
+      .port { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 19px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .small { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="956"/>
+  <text class="heading" x="56" y="70">TUI input and live render path</text>
+  <path d="M56 92h180v18H56m58-18v18m58-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <text class="label" x="56" y="158">input</text>
+  <rect class="card" x="56" y="188" width="250" height="116"/>
+  <text class="label" x="84" y="232">terminal bytes</text>
+  <text class="detail" x="84" y="270">decoder + key map</text>
+  <path class="edge" d="M306 246h52"/>
+  <rect class="card" x="358" y="188" width="250" height="116"/>
+  <text class="label" x="386" y="232">TuiAction</text>
+  <text class="detail" x="386" y="270">controller emit</text>
+  <path class="edge" d="M608 246h52"/>
+  <rect class="card" x="660" y="188" width="344" height="116"/>
+  <text class="label" x="688" y="232">command coordinator</text>
+  <text class="detail" x="688" y="270">submit · steer · follow-up</text>
+  <path class="edge" d="M1004 246h52"/>
+  <rect class="strong" x="1056" y="188" width="488" height="116"/>
+  <text class="label" x="1084" y="232">AgentSession.prompt()</text>
+  <text class="detail" x="1084" y="270">admission, run, queues</text>
+
+  <text class="label" x="56" y="390">event and history inputs</text>
+  <rect class="card" x="56" y="422" width="364" height="126"/>
+  <text class="label" x="84" y="466">live event envelopes</text>
+  <text class="detail" x="84" y="504">event sink → render(event)</text>
+  <rect class="card" x="56" y="604" width="364" height="126"/>
+  <text class="label" x="84" y="648">resumed branch</text>
+  <text class="detail" x="84" y="686">history → replaceTranscript</text>
+
+  <path class="edge" d="M420 485h166"/>
+  <path class="edge" d="M420 667h92v-182h74"/>
+  <rect class="port" x="502" y="475" width="20" height="20"/>
+
+  <rect class="strong" x="586" y="422" width="364" height="308"/>
+  <text class="label" x="616" y="470">TuiModel</text>
+  <text class="detail" x="616" y="510">apply event reducer</text>
+  <text class="detail" x="616" y="544">transcript snapshot</text>
+  <text class="detail" x="616" y="578">streaming message state</text>
+  <text class="detail" x="616" y="612">tool and status state</text>
+  <text class="detail" x="616" y="646">editor + overlays</text>
+  <text class="small" x="616" y="696">render coalesced per microtask</text>
+
+  <path class="edge" d="M950 576h106"/>
+  <rect class="card" x="1056" y="422" width="488" height="308"/>
+  <text class="label" x="1086" y="470">TuiController.renderNow()</text>
+  <text class="detail" x="1086" y="510">1 · retain bounded transcript state</text>
+  <text class="detail" x="1086" y="544">2 · collect widgets and background</text>
+  <text class="detail" x="1086" y="578">3 · build frame</text>
+  <text class="detail" x="1086" y="612">4 · render complete viewport diff</text>
+  <text class="detail" x="1086" y="646">5 · write terminal update</text>
+
+  <path class="line" d="M1300 730v60H354"/>
+  <rect class="port" x="1290" y="780" width="20" height="20"/>
+
+  <rect class="strong" x="56" y="790" width="596" height="138"/>
+  <text class="label" x="86" y="834">retained transcript</text>
+  <text class="detail" x="86" y="874">bounded rows remain mutable and pageable</text>
+
+  <rect class="card" x="704" y="790" width="840" height="138"/>
+  <text class="label" x="734" y="834">LiveSurfaceRenderer</text>
+  <text class="detail" x="734" y="874">owns the complete rich terminal viewport</text>
+  <text class="detail" x="734" y="904">stream · editor · footer · overlays · widgets</text>
+
+  <path class="edge" d="M1300 730v30h-176v30"/>
+  <text class="small" x="56" y="952">One viewport keeps reasoning, tools, resize, refresh, and extension surfaces in a single render order.</text>
+</svg>

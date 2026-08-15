@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">rigyn extension generation lifecycle and capability flow</title>
+  <desc id="desc">A trusted extension factory writes to a private candidate registration ledger. Successful activation publishes one live generation. Failed activation discards the candidate. Refresh prepares a replacement while the current generation remains recoverable, then either restores the current generation or publishes the candidate and disposes the stale generation. The live generation connects commands, tools, events, providers, resources, session actions, processes, and terminal UI to host-owned boundaries.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#090a0a" stroke-width="1.8" stroke-linecap="square" stroke-linejoin="miter"/>
+    </marker>
+    <style>
+      .frame { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .card { fill: #ffffff; stroke: #090a0a; stroke-width: 3; }
+      .muted { fill: #c8c5ba; stroke: #090a0a; stroke-width: 3; }
+      .edge { fill: none; stroke: #090a0a; stroke-width: 3; stroke-linecap: square; stroke-linejoin: miter; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #090a0a; stroke-width: 3; stroke-dasharray: 12 10; }
+      .connector { fill: #f3f1e8; stroke: #090a0a; stroke-width: 3; }
+      .heading { fill: #090a0a; font: 600 36px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .section { fill: #090a0a; font: 600 25px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .label { fill: #090a0a; font: 600 22px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .detail { fill: #090a0a; font: 400 17px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .note { fill: #090a0a; font: 500 18px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect class="frame" x="12" y="12" width="1576" height="1016"/>
+  <text class="heading" x="56" y="68">extension generation lifecycle</text>
+  <path d="M56 88h148v18h-148m52-18v18m48-18v18" fill="none" stroke="#090a0a" stroke-width="3"/>
+
+  <text class="section" x="56" y="148">transactional activation</text>
+  <path class="edge" d="M330 226h70"/>
+  <path class="edge" d="M710 226h70"/>
+  <path class="edge" d="M1090 226h70"/>
+  <path class="edge" d="M555 286v78h-200v52"/>
+  <path class="edge" d="M935 286v78h200v52"/>
+  <rect class="connector" x="545" y="354" width="20" height="20"/>
+  <rect class="connector" x="925" y="354" width="20" height="20"/>
+
+  <g>
+    <rect class="card" x="56" y="170" width="274" height="116"/>
+    <text class="label" x="80" y="210">Trusted factory</text>
+    <text class="detail" x="80" y="240">one ExtensionAPI</text>
+    <text class="detail" x="80" y="264">one generation</text>
+  </g>
+  <g>
+    <rect class="card" x="400" y="170" width="310" height="116"/>
+    <text class="label" x="424" y="210">Candidate ledger</text>
+    <text class="detail" x="424" y="240">registrations stay private</text>
+    <text class="detail" x="424" y="264">until activation succeeds</text>
+  </g>
+  <g>
+    <rect class="muted" x="780" y="170" width="310" height="116"/>
+    <text class="label" x="804" y="210">Publish generation</text>
+    <text class="detail" x="804" y="240">commands · tools · hooks</text>
+    <text class="detail" x="804" y="264">become host-visible together</text>
+  </g>
+  <g>
+    <rect class="card" x="1160" y="170" width="384" height="116"/>
+    <text class="label" x="1184" y="210">Live generation</text>
+    <text class="detail" x="1184" y="240">host owns registrations</text>
+    <text class="detail" x="1184" y="264">extension owns external resources</text>
+  </g>
+  <g>
+    <rect class="card" x="190" y="416" width="330" height="100"/>
+    <text class="label" x="214" y="454">Activation fails</text>
+    <text class="detail" x="214" y="482">discard candidate · API stale</text>
+    <text class="detail" x="214" y="504">reverse-order disposal</text>
+  </g>
+  <g>
+    <rect class="card" x="970" y="416" width="330" height="100"/>
+    <text class="label" x="994" y="454">Refresh candidate</text>
+    <text class="detail" x="994" y="482">current generation stays</text>
+    <text class="detail" x="994" y="504">recoverable during prepare</text>
+  </g>
+
+  <path class="edge" d="M1300 466h120v94h-120"/>
+  <path class="edge" d="M1135 516v54h-195v42"/>
+  <path class="edge" d="M1135 516v54h195v42"/>
+  <rect class="connector" x="1125" y="560" width="20" height="20"/>
+  <g>
+    <rect class="card" x="760" y="612" width="360" height="92"/>
+    <text class="label" x="784" y="646">Candidate fails</text>
+    <text class="detail" x="784" y="674">dispose candidate</text>
+    <text class="detail" x="784" y="696">restore current</text>
+  </g>
+  <g>
+    <rect class="muted" x="1150" y="612" width="394" height="92"/>
+    <text class="label" x="1174" y="650">Candidate succeeds</text>
+    <text class="detail" x="1174" y="680">swap · stale old API · dispose old</text>
+  </g>
+
+  <path class="dash" d="M56 744h1488"/>
+  <text class="section" x="56" y="792">live capability flow</text>
+  <path class="edge" d="M330 894h70"/>
+  <path class="edge" d="M710 894h70"/>
+  <path class="edge" d="M1090 894h70"/>
+
+  <g>
+    <rect class="card" x="56" y="830" width="274" height="128"/>
+    <text class="label" x="80" y="870">Extension code</text>
+    <text class="detail" x="80" y="900">trusted Node.js code</text>
+    <text class="detail" x="80" y="926">bounded callback data</text>
+  </g>
+  <g>
+    <rect class="muted" x="400" y="830" width="310" height="128"/>
+    <text class="label" x="424" y="870">Generation API</text>
+    <text class="detail" x="424" y="900">ownership · cancellation</text>
+    <text class="detail" x="424" y="926">validation · diagnostics</text>
+  </g>
+  <g>
+    <rect class="card" x="780" y="830" width="310" height="128"/>
+    <text class="label" x="804" y="870">Host boundaries</text>
+    <text class="detail" x="804" y="900">session · provider</text>
+    <text class="detail" x="804" y="926">process · resources · TUI</text>
+  </g>
+  <g>
+    <rect class="card" x="1160" y="830" width="384" height="128"/>
+    <text class="label" x="1184" y="870">Published effects</text>
+    <text class="detail" x="1184" y="900">commands · tools · events</text>
+    <text class="detail" x="1184" y="926">providers · renderers · resources</text>
+  </g>
+
+  <rect class="card" x="56" y="978" width="1488" height="32"/>
+  <text class="note" x="80" y="1001">Trust boundary: extensions run in-process; generation cleanup limits ownership leaks but is not a sandbox.</text>
+</svg>
